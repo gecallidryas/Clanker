@@ -1,6 +1,6 @@
 [Unit]
 Description=Femmy Discord Bot
-Documentation=https://github.com/yourusername/femboibot
+Documentation=https://github.com/gecallidryas/femboi
 After=network.target
 
 [Service]
