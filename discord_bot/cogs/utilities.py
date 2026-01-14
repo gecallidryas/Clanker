@@ -154,7 +154,7 @@ class Utilities(commands.Cog):
     # ============================================
     
     @commands.command(name="stats", aliases=["status", "botstats"])
-    async def bot_stats(self, ctx: commands.Context):
+    async def show_stats(self, ctx: commands.Context):
         """Display bot statistics and uptime."""
         stats = await get_stats()
         
