@@ -1,0 +1,335 @@
+"""
+Affection & Mood Cog for Femmy Discord Bot
+============================================
+Tracks user affection levels and bot mood per server.
+
+Affection Levels:
+    - stranger (0-49)
+    - acquaintance (50-199)
+    - friend (200-499)
+    - close_friend (500-999)
+    - beloved (1000+)
+
+Mood States:
+    - happy (70-100)
+    - neutral (40-69)
+    - sad (20-39)
+    - neglected (0-19)
+
+Commands:
+    !affection       - View your affection level
+    !mood            - Check bot's current mood
+    !headpat         - Give headpats (+5 mood, +3 affection)
+    !hug             - Give hugs (+5 mood, +3 affection)
+"""
+
+import random
+import discord
+from discord.ext import commands, tasks
+
+from utils.db_handler import (
+    get_affection,
+    add_affection,
+    get_mood,
+    update_mood,
+    get_server_mode,
+)
+
+
+# ============================================
+# Affection Level Display
+# ============================================
+
+AFFECTION_DISPLAY = {
+    "stranger": {"emoji": "👤", "title": "Stranger", "color": 0x808080},
+    "acquaintance": {"emoji": "🤝", "title": "Acquaintance", "color": 0x3498db},
+    "friend": {"emoji": "😊", "title": "Friend", "color": 0x2ecc71},
+    "close_friend": {"emoji": "💕", "title": "Close Friend", "color": 0xe91e63},
+    "beloved": {"emoji": "💖", "title": "Beloved", "color": 0xff69b4},
+}
+
+AFFECTION_THRESHOLDS = [
+    (0, 50, "stranger"),
+    (50, 200, "acquaintance"),
+    (200, 500, "friend"),
+    (500, 1000, "close_friend"),
+    (1000, float("inf"), "beloved"),
+]
+
+
+# ============================================
+# Mood Display
+# ============================================
+
+MOOD_DISPLAY = {
+    "happy": {"emoji": "😊", "color": 0x2ecc71},
+    "neutral": {"emoji": "😐", "color": 0x95a5a6},
+    "sad": {"emoji": "😔", "color": 0x3498db},
+    "neglected": {"emoji": "😢", "color": 0x9b59b6},
+}
+
+MOOD_MESSAGES = {
+    "mode_femboy": {
+        "happy": "I'm super happy, Nii-chan! Everything is wonderful~ ♡",
+        "neutral": "I'm doing okay! How can I help you today?",
+        "sad": "I'm a little sad... but seeing you makes it better!",
+        "neglected": "N-Nii-chan... you haven't talked to me in a while... >.<"
+    },
+    "mode_tsundere": {
+        "happy": "I-I'm fine! Not that your attention matters or anything! Hmph!",
+        "neutral": "What? I'm normal. Stop asking weird questions, baka.",
+        "sad": "It's nothing! I'm not sad because you ignored me! ...baka.",
+        "neglected": "W-where were you?! It's not like I missed you or anything!"
+    },
+    "mode_oneesan": {
+        "happy": "Ara ara~ I'm feeling wonderful, my dear! Thank you for asking~",
+        "neutral": "I'm doing well, little one. How are you?",
+        "sad": "I'm a bit melancholy today... but your company helps~",
+        "neglected": "My dear... it's been so quiet. I was starting to worry~"
+    }
+}
+
+
+# ============================================
+# Interaction Responses
+# ============================================
+
+HEADPAT_RESPONSES = {
+    "mode_femboy": [
+        "*purrs happily* Ehehe~ That feels nice, Nii-chan~ ♡",
+        "*melts* H-headpats... I love headpats~ ✨",
+        "*tail wags* More more more~ >w<"
+    ],
+    "mode_tsundere": [
+        "*blushes furiously* W-what are you doing, baka?! ...don't stop though.",
+        "Hmph! I-it's not like I enjoy this or anything! ...pat me more.",
+        "*reluctantly leans into hand* ...fine, but only because you insist!"
+    ],
+    "mode_oneesan": [
+        "Ara ara~ How sweet of you, little one~ *pats you back*",
+        "Fufu~ You're so adorable when you try to spoil me~",
+        "*smiles warmly* Thank you, my dear. That was lovely~"
+    ]
+}
+
+HUG_RESPONSES = {
+    "mode_femboy": [
+        "*hugs back tightly* Nii-chan's hugs are the best~ ♡",
+        "*nuzzles* I could stay like this forever! ✨",
+        "*squeezes* Thank you thank you thank you~!"
+    ],
+    "mode_tsundere": [
+        "*stiffens* W-what?! ...okay, fine. Just this once. *hugs back briefly*",
+        "Baka! You can't just- ...okay, I guess this is nice. Don't tell anyone!",
+        "*mumbles* It's warm... I hate how nice this feels. Hmph!"
+    ],
+    "mode_oneesan": [
+        "*wraps arms around you* There there, my dear~ *pats back*",
+        "Ara ara~ Come here, let me hold you properly~ ♡",
+        "*gentle embrace* You give the best hugs, little one~"
+    ]
+}
+
+
+class Affection(commands.Cog):
+    """
+    Affection & Mood Cog - Engagement and relationship tracking.
+    """
+    
+    def __init__(self, bot: commands.Bot):
+        self.bot = bot
+        self.mood_decay_loop.start()
+    
+    def cog_unload(self):
+        self.mood_decay_loop.cancel()
+    
+    # ============================================
+    # Commands
+    # ============================================
+    
+    @commands.command(name="affection", aliases=["love", "relationship"])
+    async def show_affection(self, ctx: commands.Context, member: discord.Member = None):
+        """View your or another user's affection level."""
+        target = member or ctx.author
+        data = await get_affection(target.id)
+        
+        level = data["affection_level"]
+        points = data["affection_points"]
+        interactions = data["total_interactions"]
+        display = AFFECTION_DISPLAY.get(level, AFFECTION_DISPLAY["stranger"])
+        
+        # Calculate progress to next level
+        next_threshold = None
+        for min_pts, max_pts, lvl_name in AFFECTION_THRESHOLDS:
+            if lvl_name == level and max_pts != float("inf"):
+                next_threshold = max_pts
+                progress = (points - min_pts) / (max_pts - min_pts) * 100
+                break
+        else:
+            progress = 100
+        
+        # Build progress bar
+        filled = int(progress // 10)
+        bar = "█" * filled + "░" * (10 - filled)
+        
+        embed = discord.Embed(
+            title=f"{display['emoji']} {target.display_name}'s Affection",
+            color=display["color"]
+        )
+        
+        embed.add_field(
+            name="Level",
+            value=f"**{display['title']}**",
+            inline=True
+        )
+        embed.add_field(
+            name="Points",
+            value=f"**{points:,}** pts",
+            inline=True
+        )
+        embed.add_field(
+            name="Interactions",
+            value=f"**{interactions:,}**",
+            inline=True
+        )
+        
+        if next_threshold:
+            embed.add_field(
+                name="Progress to Next Level",
+                value=f"[{bar}] {progress:.1f}%\n{points}/{next_threshold}",
+                inline=False
+            )
+        else:
+            embed.add_field(
+                name="Progress",
+                value="✨ Max Level Reached! ✨",
+                inline=False
+            )
+        
+        embed.set_thumbnail(url=target.display_avatar.url)
+        
+        await ctx.send(embed=embed)
+    
+    @commands.command(name="mood")
+    async def show_mood(self, ctx: commands.Context):
+        """Check the bot's current mood."""
+        if not ctx.guild:
+            await ctx.send("Moods are server-specific~ Use this in a server!")
+            return
+        
+        mood_data = await get_mood(ctx.guild.id)
+        mode = await get_server_mode(ctx.guild.id)
+        
+        mood = mood_data["mood"]
+        value = mood_data["mood_value"]
+        display = MOOD_DISPLAY.get(mood, MOOD_DISPLAY["neutral"])
+        
+        message = MOOD_MESSAGES.get(mode, MOOD_MESSAGES["mode_femboy"]).get(mood, "I'm okay~")
+        
+        # Build mood bar
+        filled = int(value // 10)
+        bar = "💖" * filled + "🖤" * (10 - filled)
+        
+        embed = discord.Embed(
+            title=f"{display['emoji']} Current Mood",
+            description=message,
+            color=display["color"]
+        )
+        
+        embed.add_field(
+            name="Mood Level",
+            value=f"[{bar}] {value}/100",
+            inline=False
+        )
+        
+        embed.set_footer(text="Interact with me to improve my mood~ ♡")
+        
+        await ctx.send(embed=embed)
+    
+    @commands.command(name="headpat", aliases=["pat", "pets"])
+    async def headpat(self, ctx: commands.Context):
+        """Give Femmy headpats!"""
+        if not ctx.guild:
+            return
+        
+        mode = await get_server_mode(ctx.guild.id)
+        
+        # Update mood and affection
+        await update_mood(ctx.guild.id, 5)
+        await add_affection(ctx.author.id, 3)
+        
+        responses = HEADPAT_RESPONSES.get(mode, HEADPAT_RESPONSES["mode_femboy"])
+        response = random.choice(responses)
+        
+        await ctx.send(response)
+    
+    @commands.command(name="hug", aliases=["hugs"])
+    async def hug(self, ctx: commands.Context):
+        """Give Femmy a hug!"""
+        if not ctx.guild:
+            return
+        
+        mode = await get_server_mode(ctx.guild.id)
+        
+        # Update mood and affection
+        await update_mood(ctx.guild.id, 5)
+        await add_affection(ctx.author.id, 3)
+        
+        responses = HUG_RESPONSES.get(mode, HUG_RESPONSES["mode_femboy"])
+        response = random.choice(responses)
+        
+        await ctx.send(response)
+    
+    # ============================================
+    # Listeners
+    # ============================================
+    
+    @commands.Cog.listener()
+    async def on_message(self, message: discord.Message):
+        """Track interactions for affection and mood."""
+        if message.author.bot:
+            return
+        if not message.guild:
+            return
+        
+        # Small mood boost for any activity
+        await update_mood(message.guild.id, 1)
+        
+        # If bot is mentioned, add affection
+        if self.bot.user in message.mentions:
+            await add_affection(message.author.id, 1)
+    
+    # ============================================
+    # Background Tasks
+    # ============================================
+    
+    @tasks.loop(hours=1)
+    async def mood_decay_loop(self):
+        """Decay mood over time when inactive."""
+        from utils.db_handler import DATABASE_PATH
+        import aiosqlite
+        from datetime import datetime, timedelta
+        
+        async with aiosqlite.connect(DATABASE_PATH) as db:
+            # Decay mood by 3 for servers inactive for 1+ hours
+            cutoff = datetime.now() - timedelta(hours=1)
+            await db.execute("""
+                UPDATE bot_mood 
+                SET mood_value = MAX(0, mood_value - 3),
+                    mood = CASE 
+                        WHEN mood_value - 3 >= 70 THEN 'happy'
+                        WHEN mood_value - 3 >= 40 THEN 'neutral'
+                        WHEN mood_value - 3 >= 20 THEN 'sad'
+                        ELSE 'neglected'
+                    END
+                WHERE last_updated < ?
+            """, (cutoff,))
+            await db.commit()
+    
+    @mood_decay_loop.before_loop
+    async def before_mood_decay(self):
+        await self.bot.wait_until_ready()
+
+
+async def setup(bot: commands.Bot):
+    await bot.add_cog(Affection(bot))

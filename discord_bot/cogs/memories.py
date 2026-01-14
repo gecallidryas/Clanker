@@ -1,0 +1,342 @@
+"""
+Memories Cog for Femmy Discord Bot
+===================================
+Handles user personalization through facts and timezone storage.
+
+Commands:
+    !set_timezone <Region/City>  - Set your timezone (e.g., Asia/Dhaka)
+    !remember <fact>             - Store a fact about yourself
+    !forget                      - Clear all stored facts
+    !myinfo                      - View your stored timezone and facts
+
+Examples:
+    !set_timezone America/New_York
+    !remember I love spicy food
+    !remember My birthday is March 15th
+"""
+
+import pytz
+from discord.ext import commands
+import discord
+
+from utils.db_handler import (
+    set_timezone,
+    add_fact,
+    get_facts,
+    delete_facts,
+    get_user,
+    create_user,
+)
+
+
+class Memories(commands.Cog):
+    """
+    Memories Cog - User personalization and fact storage.
+    
+    Stores:
+        - User timezones for meal check scheduling
+        - Personal facts for AI context injection
+        
+    TODO:
+        - [ ] Add fact categories/tags
+        - [ ] Implement fact search
+        - [ ] Add export/import functionality
+        - [ ] Limit maximum facts per user
+    """
+    
+    def __init__(self, bot: commands.Bot):
+        self.bot = bot
+    
+    @commands.command(name="set_timezone", aliases=["tz", "timezone"])
+    async def set_user_timezone(self, ctx: commands.Context, *, timezone: str):
+        """
+        Set your timezone for meal check reminders.
+        
+        Args:
+            timezone: IANA timezone string (e.g., "Asia/Dhaka") or abbreviation (e.g., "EST", "PST")
+        """
+        # Common timezone abbreviation mappings
+        TIMEZONE_ALIASES = {
+            # North America
+            "EST": "America/New_York",
+            "EDT": "America/New_York",
+            "CST": "America/Chicago",
+            "CDT": "America/Chicago",
+            "MST": "America/Denver",
+            "MDT": "America/Denver",
+            "PST": "America/Los_Angeles",
+            "PDT": "America/Los_Angeles",
+            "AKST": "America/Anchorage",
+            "AKDT": "America/Anchorage",
+            "HST": "Pacific/Honolulu",
+            # Europe
+            "GMT": "Europe/London",
+            "BST": "Europe/London",
+            "CET": "Europe/Paris",
+            "CEST": "Europe/Paris",
+            "EET": "Europe/Helsinki",
+            "EEST": "Europe/Helsinki",
+            "WET": "Europe/Lisbon",
+            # Asia
+            "IST": "Asia/Kolkata",
+            "BST": "Asia/Dhaka",  # Bangladesh Standard Time
+            "BDT": "Asia/Dhaka",
+            "JST": "Asia/Tokyo",
+            "KST": "Asia/Seoul",
+            "CST_CHINA": "Asia/Shanghai",
+            "HKT": "Asia/Hong_Kong",
+            "SGT": "Asia/Singapore",
+            "PHT": "Asia/Manila",
+            "ICT": "Asia/Bangkok",
+            "WIB": "Asia/Jakarta",
+            # Australia
+            "AEST": "Australia/Sydney",
+            "AEDT": "Australia/Sydney",
+            "ACST": "Australia/Adelaide",
+            "AWST": "Australia/Perth",
+            # Other
+            "UTC": "UTC",
+            "MTC": "Europe/Moscow",  # Moscow Time
+            "MSK": "Europe/Moscow",
+            "GST": "Asia/Dubai",  # Gulf Standard Time
+            "AST": "Asia/Riyadh",  # Arabia Standard Time
+            "NZST": "Pacific/Auckland",
+            "NZDT": "Pacific/Auckland",
+        }
+        
+        # Normalize input
+        tz_input = timezone.strip().upper()
+        
+        # Check for abbreviation first
+        if tz_input in TIMEZONE_ALIASES:
+            timezone = TIMEZONE_ALIASES[tz_input]
+        
+        # Validate timezone
+        try:
+            tz = pytz.timezone(timezone)
+        except pytz.UnknownTimeZoneError:
+            # Build abbreviation examples
+            abbrev_examples = ", ".join(list(TIMEZONE_ALIASES.keys())[:8])
+            await ctx.send(
+                f"❌ Unknown timezone: `{timezone}`\n"
+                f"**Abbreviations:** `{abbrev_examples}`, ...\n"
+                f"**Full format:** `Asia/Dhaka`, `America/New_York`, `Europe/London`\n"
+                f"Find more: https://en.wikipedia.org/wiki/List_of_tz_database_time_zones"
+            )
+            return
+        
+        # Store timezone
+        await set_timezone(ctx.author.id, timezone)
+        
+        # Get current time in that timezone
+        from datetime import datetime
+        current_time = datetime.now(tz).strftime("%H:%M")
+        
+        await ctx.send(
+            f"✅ Timezone set to **{timezone}**!\n"
+            f"Your current time: `{current_time}`"
+        )
+    
+    @commands.command(name="remember")
+    async def remember_fact(self, ctx: commands.Context, *, fact: str):
+        """
+        Store a fact about yourself for AI context.
+        
+        Args:
+            fact: Any information you want Femmy to remember
+            
+        TODO:
+            - [ ] Check for duplicate facts
+            - [ ] Implement fact limit (e.g., max 50)
+            - [ ] Add confirmation for sensitive info
+        """
+        if len(fact) > 500:
+            await ctx.send("❌ Fact too long! Please keep it under 500 characters.")
+            return
+        
+        # Ensure user exists
+        await create_user(ctx.author.id)
+        
+        # Store the fact
+        fact_id = await add_fact(ctx.author.id, fact)
+        
+        await ctx.send(
+            f"📝 Got it! I'll remember that~ ♡\n"
+            f"Stored: *\"{fact}\"*"
+        )
+    
+    @commands.command(name="forget")
+    async def forget_facts(self, ctx: commands.Context):
+        """
+        Delete all stored facts about yourself.
+        
+        TODO:
+            - [ ] Add confirmation prompt
+            - [ ] Allow deleting specific facts by ID
+        """
+        count = await delete_facts(ctx.author.id)
+        
+        if count == 0:
+            await ctx.send("🤔 I don't have any facts stored about you!")
+        else:
+            await ctx.send(f"🗑️ Cleared {count} fact(s) from memory!")
+    
+    @commands.command(name="myinfo", aliases=["me", "profile"])
+    async def show_user_info(self, ctx: commands.Context):
+        """
+        Display your stored timezone and facts.
+        
+        TODO:
+            - [ ] Add pagination for many facts
+            - [ ] Show fact creation dates
+        """
+        user = await get_user(ctx.author.id)
+        facts = await get_facts(ctx.author.id)
+        
+        # Build embed
+        embed = discord.Embed(
+            title=f"📋 {ctx.author.display_name}'s Profile",
+            color=discord.Color.pink()
+        )
+        
+        # Timezone info
+        timezone = user.get("timezone", "Not set") if user else "Not set"
+        embed.add_field(
+            name="🌍 Timezone",
+            value=f"`{timezone}`",
+            inline=True
+        )
+        
+        # Facts info
+        if facts:
+            facts_text = "\n".join(f"• {fact}" for fact in facts[:10])
+            if len(facts) > 10:
+                facts_text += f"\n... and {len(facts) - 10} more"
+            embed.add_field(
+                name=f"📝 Remembered Facts ({len(facts)})",
+                value=facts_text,
+                inline=False
+            )
+        else:
+            embed.add_field(
+                name="📝 Remembered Facts",
+                value="*No facts stored yet. Use `!remember <fact>` to add some!*",
+                inline=False
+            )
+        
+        embed.set_footer(text="Use !remember to add facts, !forget to clear them")
+        
+        await ctx.send(embed=embed)
+    
+    # ============================================
+    # Birthday Commands
+    # ============================================
+    
+    @commands.group(name="birthday", aliases=["bday"], invoke_without_command=True)
+    async def birthday(self, ctx: commands.Context, member: discord.Member = None):
+        """
+        View your or someone's birthday.
+        
+        Usage:
+            !birthday          - View your birthday
+            !birthday @user    - View someone's birthday
+            !birthday set MM-DD - Set your birthday
+            !birthday upcoming  - See upcoming birthdays
+        """
+        from utils.db_handler import get_birthday
+        
+        target = member or ctx.author
+        bday = await get_birthday(target.id)
+        
+        if bday:
+            month, day = bday.split("-")
+            month_name = [
+                "", "January", "February", "March", "April", "May", "June",
+                "July", "August", "September", "October", "November", "December"
+            ][int(month)]
+            await ctx.send(f"🎂 {target.display_name}'s birthday is **{month_name} {int(day)}**!")
+        else:
+            if target == ctx.author:
+                await ctx.send("📅 You haven't set your birthday yet! Use `!birthday set MM-DD`")
+            else:
+                await ctx.send(f"📅 {target.display_name} hasn't set their birthday yet!")
+    
+    @birthday.command(name="set")
+    async def birthday_set(self, ctx: commands.Context, date: str):
+        """
+        Set your birthday (format: MM-DD).
+        
+        Examples:
+            !birthday set 03-15  (March 15th)
+            !birthday set 12-25  (December 25th)
+        """
+        from utils.db_handler import set_birthday
+        import re
+        
+        # Validate format
+        if not re.match(r"^\d{2}-\d{2}$", date):
+            await ctx.send("❌ Invalid format! Use `MM-DD` (e.g., `03-15` for March 15th)")
+            return
+        
+        month, day = map(int, date.split("-"))
+        
+        # Validate month and day
+        if month < 1 or month > 12:
+            await ctx.send("❌ Month must be between 01 and 12!")
+            return
+        
+        days_in_month = [0, 31, 29, 31, 30, 31, 30, 31, 31, 30, 31, 30, 31]
+        if day < 1 or day > days_in_month[month]:
+            await ctx.send(f"❌ Invalid day for month {month:02d}!")
+            return
+        
+        await set_birthday(ctx.author.id, date)
+        
+        month_name = [
+            "", "January", "February", "March", "April", "May", "June",
+            "July", "August", "September", "October", "November", "December"
+        ][month]
+        
+        await ctx.send(f"🎂 Birthday set to **{month_name} {day}**! I'll remember~ ♡")
+    
+    @birthday.command(name="upcoming")
+    async def birthday_upcoming(self, ctx: commands.Context):
+        """See upcoming birthdays in the next 30 days."""
+        from utils.db_handler import get_upcoming_birthdays
+        
+        upcoming = await get_upcoming_birthdays(30)
+        
+        if not upcoming:
+            await ctx.send("📅 No birthdays coming up in the next 30 days!")
+            return
+        
+        embed = discord.Embed(
+            title="🎂 Upcoming Birthdays",
+            color=discord.Color.pink()
+        )
+        
+        for entry in upcoming[:10]:
+            user = self.bot.get_user(entry["user_id"])
+            name = user.display_name if user else f"User {entry['user_id']}"
+            days = entry["days_until"]
+            
+            if days == 0:
+                when = "**Today!** 🎉"
+            elif days == 1:
+                when = "Tomorrow"
+            else:
+                when = f"In {days} days"
+            
+            month, day = entry["birthday"].split("-")
+            embed.add_field(
+                name=f"{name}",
+                value=f"{month}/{day} - {when}",
+                inline=True
+            )
+        
+        await ctx.send(embed=embed)
+
+
+async def setup(bot: commands.Bot):
+    """Load the Memories cog."""
+    await bot.add_cog(Memories(bot))
