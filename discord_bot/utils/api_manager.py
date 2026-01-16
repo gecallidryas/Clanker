@@ -420,8 +420,8 @@ OPENROUTER_BASE_URL = "https://openrouter.ai/api/v1/chat/completions"
 
 # Available uncensored models
 OPENROUTER_MODELS = {
-    "venice": "venice-ai/venice-uncensored",
-    "hermes": "nousresearch/hermes-3-llama-3.1-405b",
+    "venice": "cognitivecomputations/dolphin-mistral-24b-venice-edition:free",
+    "hermes": "nousresearch/hermes-3-llama-3.1-405b:free",
 }
 
 
