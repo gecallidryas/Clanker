@@ -19,6 +19,7 @@ Usage:
 from collections import deque
 from datetime import datetime, timedelta
 from typing import Dict, Optional
+import re
 
 import discord
 from discord.ext import commands
@@ -279,11 +280,28 @@ class AIBrain(commands.Cog):
         mode = await get_server_mode(guild_id)
         persona = PERSONAS.get(mode, PERSONAS["mode_femboy"])
         
-        # Get user facts
+        # Get user facts (Current speaker)
         facts = await get_facts(user_id)
+        facts_list = [f"- (User {user_id}) {fact}" for fact in facts]
+
+        # Check for mentions in the message and fetch their facts
+        mentioned_ids = set(re.findall(r"<@!?(\d+)>", message))
+        for mentioned_id in mentioned_ids:
+            uid = int(mentioned_id)
+            # Skip if it's the bot itself or the current speaker (already fetched)
+            if uid == self.bot.user.id or uid == user_id:
+                continue
+            
+            other_facts = await get_facts(uid)
+            if other_facts:
+                # Try to resolve username for better context
+                user = self.bot.get_user(uid)
+                name = user.display_name if user else f"User {uid}"
+                facts_list.extend([f"- ({name}) {fact}" for fact in other_facts])
+
         facts_section = ""
-        if facts:
-            facts_section = f"\n\nThings you know about this user:\n" + "\n".join(f"- {fact}" for fact in facts)
+        if facts_list:
+            facts_section = f"\n\nThings you know about the users:\n" + "\n".join(facts_list)
         
         # Build full prompt
         prompt = f"""

@@ -98,12 +98,20 @@ def _parse_timeout(value: Optional[str], fallback: float) -> float:
 
 
 def _generate_content_sync(api_key: str, model_name: str, prompt: str, image) -> object:
+    # Relaxed safety settings
+    safety_settings = [
+        {"category": "HARM_CATEGORY_HARASSMENT", "threshold": "BLOCK_ONLY_HIGH"},
+        {"category": "HARM_CATEGORY_HATE_SPEECH", "threshold": "BLOCK_ONLY_HIGH"},
+        {"category": "HARM_CATEGORY_SEXUALLY_EXPLICIT", "threshold": "BLOCK_ONLY_HIGH"},
+        {"category": "HARM_CATEGORY_DANGEROUS_CONTENT", "threshold": "BLOCK_ONLY_HIGH"},
+    ]
+
     with _GENAI_CALL_LOCK:
         genai.configure(api_key=api_key)
         model = genai.GenerativeModel(model_name)
         if image is None:
-            return model.generate_content(prompt)
-        return model.generate_content([prompt, image])
+            return model.generate_content(prompt, safety_settings=safety_settings)
+        return model.generate_content([prompt, image], safety_settings=safety_settings)
 
 
 @dataclass
