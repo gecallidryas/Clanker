@@ -24,7 +24,7 @@ import re
 import discord
 from discord.ext import commands
 
-from utils.db_handler import get_server_mode, get_facts, increment_stat
+from utils.db_handler import get_server_mode, get_facts, increment_stat, get_affection
 from utils.api_manager import get_gemini_manager, UserInputError
 from utils.rate_limiter import ai_limiter, get_rate_limit_message
 from utils.logger import get_logger
@@ -303,9 +303,24 @@ class AIBrain(commands.Cog):
         if facts_list:
             facts_section = f"\n\nThings you know about the users:\n" + "\n".join(facts_list)
         
+        # Get affection level for behavior adjustment
+        affection_data = await get_affection(user_id)
+        affection_level = affection_data.get("affection_level", "stranger")
+        affection_prompts = {
+            "stranger": "This user is new to you. Be polite but reserved.",
+            "acquaintance": "You're getting to know this user. Be friendly but not overly familiar.",
+            "friend": "This is a good friend! Be casual, use their name, share jokes.",
+            "close_friend": "You're very close! Be affectionate, playful, reference past interactions.",
+            "beloved": "This is your favorite person! Show deep care, attachment, and protectiveness."
+        }
+        affection_context = affection_prompts.get(affection_level, affection_prompts["stranger"])
+        
         # Build full prompt
         prompt = f"""
 {persona}
+
+Relationship with this user: {affection_level.replace('_', ' ').title()}
+{affection_context}
 {facts_section}
 
 Recent conversation:

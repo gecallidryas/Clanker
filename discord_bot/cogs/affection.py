@@ -34,6 +34,42 @@ from utils.db_handler import (
     update_mood,
     get_server_mode,
 )
+from utils.sentiment import analyze_sentiment, quick_sentiment_check
+from utils.logger import get_logger
+
+logger = get_logger(__name__)
+
+
+# ============================================
+# Negative Reaction Responses
+# ============================================
+
+NEGATIVE_REACTIONS = {
+    "mode_femboy": {
+        "negative": "*flinches* N-Nii-chan, that hurt my feelings... >.<",
+        "very_negative": "*tears up* W-why are you being so mean...? I just wanted to help... 😢",
+        "hostile": "*runs away crying* I-I'll leave you alone then... 💔"
+    },
+    "mode_tsundere": {
+        "negative": "Tch! Whatever, see if I care! *turns away* Baka!",
+        "very_negative": "*glares* You think you can talk to me like that?! Hmph, the nerve!",
+        "hostile": "Fine! I don't need this! You're the worst! *storms off*"
+    },
+    "mode_oneesan": {
+        "negative": "Ara... that wasn't very kind, was it? *sighs softly*",
+        "very_negative": "My dear, I'm disappointed. Is something troubling you?",
+        "hostile": "*looks hurt* I... I see. Perhaps you need some space, little one."
+    }
+}
+
+# Affection-based behavior modifiers
+AFFECTION_PROMPTS = {
+    "stranger": "This user is new to you. Be polite but reserved. Keep some distance.",
+    "acquaintance": "You're getting to know this user. Be friendly but not overly familiar.",
+    "friend": "This is a good friend! Be casual, use their name, share jokes.",
+    "close_friend": "You're very close! Be affectionate, playful, remember details about them.",
+    "beloved": "This is your favorite person! Show deep care, attachment, and protectiveness."
+}
 
 
 # ============================================
@@ -286,7 +322,7 @@ class Affection(commands.Cog):
     
     @commands.Cog.listener()
     async def on_message(self, message: discord.Message):
-        """Track interactions for affection and mood."""
+        """Track interactions for affection and mood with sentiment analysis."""
         if message.author.bot:
             return
         if not message.guild:
@@ -295,9 +331,41 @@ class Affection(commands.Cog):
         # Small mood boost for any activity
         await update_mood(message.guild.id, 1)
         
-        # If bot is mentioned, add affection
+        # If bot is mentioned, analyze sentiment and adjust affection
         if self.bot.user in message.mentions:
-            await add_affection(message.author.id, 1)
+            # Get message content without the mention
+            content = message.content
+            content = content.replace(f"<@{self.bot.user.id}>", "").strip()
+            content = content.replace(f"<@!{self.bot.user.id}>", "").strip()
+            
+            if len(content) > 5:
+                # Try quick keyword check first
+                quick_result = quick_sentiment_check(content)
+                
+                if quick_result:
+                    sentiment, delta = quick_result
+                else:
+                    # Use AI for more nuanced analysis
+                    sentiment, delta = await analyze_sentiment(content)
+                
+                # Apply affection change
+                await add_affection(message.author.id, delta)
+                
+                # React to negative messages
+                if sentiment in ("negative", "very_negative", "hostile"):
+                    mode = await get_server_mode(message.guild.id)
+                    reactions = NEGATIVE_REACTIONS.get(mode, NEGATIVE_REACTIONS["mode_femboy"])
+                    reaction = reactions.get(sentiment, reactions["negative"])
+                    
+                    # Only react sometimes (50% chance) to avoid spam
+                    import random
+                    if random.random() < 0.5:
+                        await message.reply(reaction, mention_author=False)
+                    
+                    logger.info(f"Negative interaction from {message.author}: {sentiment} ({delta} pts)")
+            else:
+                # Default positive for short mentions
+                await add_affection(message.author.id, 1)
     
     # ============================================
     # Background Tasks

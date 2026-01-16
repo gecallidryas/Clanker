@@ -40,6 +40,12 @@ def _require_env(name: str) -> str:
 DISCORD_TOKEN = _require_env("DISCORD_TOKEN")
 GEMINI_API_KEY = _require_env("GEMINI_API_KEY")
 
+# Optional: Lock bot to a specific personality mode
+# Set BOT_MODE=femboy, tsundere, or oneesan to lock the mode
+BOT_MODE = os.getenv("BOT_MODE", "").lower()
+VALID_MODES = {"femboy": "mode_femboy", "tsundere": "mode_tsundere", "oneesan": "mode_oneesan"}
+LOCKED_MODE = VALID_MODES.get(BOT_MODE)
+
 # Intents configuration
 intents = discord.Intents.default()
 intents.message_content = True

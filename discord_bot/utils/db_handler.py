@@ -138,6 +138,46 @@ async def init_db() -> None:
         except:
             pass  # Column already exists
         
+        # ============================================
+        # Phase 7: Enhanced Memory System Tables
+        # ============================================
+        
+        # Add source tracking to user_facts (migration)
+        try:
+            await db.execute("ALTER TABLE user_facts ADD COLUMN source TEXT DEFAULT 'manual'")
+        except:
+            pass
+        try:
+            await db.execute("ALTER TABLE user_facts ADD COLUMN learned_from_user_id INTEGER")
+        except:
+            pass
+        
+        # User aliases table
+        await db.execute("""
+            CREATE TABLE IF NOT EXISTS user_aliases (
+                id INTEGER PRIMARY KEY AUTOINCREMENT,
+                user_id INTEGER NOT NULL,
+                alias TEXT NOT NULL COLLATE NOCASE,
+                added_by_user_id INTEGER,
+                created_at TIMESTAMP DEFAULT CURRENT_TIMESTAMP,
+                UNIQUE(user_id, alias)
+            )
+        """)
+        
+        # Pending facts (for ask-before-saving)
+        await db.execute("""
+            CREATE TABLE IF NOT EXISTS pending_facts (
+                id INTEGER PRIMARY KEY AUTOINCREMENT,
+                about_user_id INTEGER NOT NULL,
+                fact TEXT NOT NULL,
+                learned_from_user_id INTEGER NOT NULL,
+                channel_id INTEGER NOT NULL,
+                message_id INTEGER,
+                created_at TIMESTAMP DEFAULT CURRENT_TIMESTAMP,
+                expires_at TIMESTAMP NOT NULL
+            )
+        """)
+        
         await db.commit()
         logger.info("Database initialized successfully")
 
@@ -309,15 +349,22 @@ async def get_server_mode(guild_id: int) -> str:
     """
     Get the current persona mode for a server.
     
+    If BOT_MODE is set in environment, that mode is used globally.
+    Otherwise, returns the server-specific mode.
+    
     Args:
         guild_id: Discord guild/server ID
         
     Returns:
         Persona mode string (default: "mode_femboy")
-        
-    TODO:
-        - [ ] Cache frequently accessed server modes
     """
+    # Check for locked mode from environment
+    locked_mode = os.getenv("BOT_MODE", "").lower()
+    mode_map = {"femboy": "mode_femboy", "tsundere": "mode_tsundere", "oneesan": "mode_oneesan"}
+    if locked_mode in mode_map:
+        return mode_map[locked_mode]
+    
+    # Otherwise use server-specific mode
     async with aiosqlite.connect(DATABASE_PATH) as db:
         async with db.execute(
             "SELECT persona_mode FROM server_config WHERE guild_id = ?",
@@ -680,3 +727,243 @@ async def get_stats() -> Dict[str, Any]:
                 "start_time": datetime.now()
             }
 
+
+# ============================================
+# User Aliases Operations
+# ============================================
+
+async def add_alias(user_id: int, alias: str, added_by_user_id: int) -> bool:
+    """Add an alias for a user. Returns True if added, False if already exists."""
+    async with aiosqlite.connect(DATABASE_PATH) as db:
+        try:
+            await db.execute(
+                "INSERT INTO user_aliases (user_id, alias, added_by_user_id) VALUES (?, ?, ?)",
+                (user_id, alias, added_by_user_id)
+            )
+            await db.commit()
+            return True
+        except:
+            return False
+
+
+async def get_aliases(user_id: int) -> List[str]:
+    """Get all aliases for a user."""
+    async with aiosqlite.connect(DATABASE_PATH) as db:
+        async with db.execute(
+            "SELECT alias FROM user_aliases WHERE user_id = ?",
+            (user_id,)
+        ) as cursor:
+            rows = await cursor.fetchall()
+            return [row[0] for row in rows]
+
+
+async def find_user_by_alias(alias: str) -> Optional[int]:
+    """Find a user ID by their alias (case-insensitive)."""
+    async with aiosqlite.connect(DATABASE_PATH) as db:
+        async with db.execute(
+            "SELECT user_id FROM user_aliases WHERE alias = ? COLLATE NOCASE",
+            (alias,)
+        ) as cursor:
+            row = await cursor.fetchone()
+            return row[0] if row else None
+
+
+async def delete_alias(user_id: int, alias: str) -> bool:
+    """Delete an alias for a user."""
+    async with aiosqlite.connect(DATABASE_PATH) as db:
+        cursor = await db.execute(
+            "DELETE FROM user_aliases WHERE user_id = ? AND alias = ? COLLATE NOCASE",
+            (user_id, alias)
+        )
+        await db.commit()
+        return cursor.rowcount > 0
+
+
+# ============================================
+# Enhanced Fact Operations (with source tracking)
+# ============================================
+
+async def add_fact_with_source(
+    user_id: int, 
+    fact: str, 
+    source: str = "manual",
+    learned_from_user_id: Optional[int] = None
+) -> int:
+    """Store a fact about a user with source tracking."""
+    async with aiosqlite.connect(DATABASE_PATH) as db:
+        cursor = await db.execute(
+            """INSERT INTO user_facts (user_id, fact, source, learned_from_user_id) 
+               VALUES (?, ?, ?, ?)""",
+            (user_id, fact, source, learned_from_user_id)
+        )
+        await db.commit()
+        return cursor.lastrowid
+
+
+async def get_facts_detailed(user_id: int) -> List[Dict[str, Any]]:
+    """Get all facts about a user with full details."""
+    async with aiosqlite.connect(DATABASE_PATH) as db:
+        db.row_factory = aiosqlite.Row
+        async with db.execute(
+            """SELECT id, fact, source, learned_from_user_id, created_at 
+               FROM user_facts WHERE user_id = ? ORDER BY created_at DESC""",
+            (user_id,)
+        ) as cursor:
+            rows = await cursor.fetchall()
+            return [dict(row) for row in rows]
+
+
+async def delete_fact_by_id(fact_id: int) -> bool:
+    """Delete a specific fact by ID."""
+    async with aiosqlite.connect(DATABASE_PATH) as db:
+        cursor = await db.execute(
+            "DELETE FROM user_facts WHERE id = ?",
+            (fact_id,)
+        )
+        await db.commit()
+        return cursor.rowcount > 0
+
+
+# ============================================
+# Pending Facts Operations (ask-before-save)
+# ============================================
+
+async def create_pending_fact(
+    about_user_id: int,
+    fact: str,
+    learned_from_user_id: int,
+    channel_id: int,
+    message_id: Optional[int] = None,
+    expires_minutes: int = 5
+) -> int:
+    """Create a pending fact awaiting confirmation."""
+    expires_at = datetime.now() + __import__('datetime').timedelta(minutes=expires_minutes)
+    async with aiosqlite.connect(DATABASE_PATH) as db:
+        cursor = await db.execute(
+            """INSERT INTO pending_facts 
+               (about_user_id, fact, learned_from_user_id, channel_id, message_id, expires_at)
+               VALUES (?, ?, ?, ?, ?, ?)""",
+            (about_user_id, fact, learned_from_user_id, channel_id, message_id, expires_at)
+        )
+        await db.commit()
+        return cursor.lastrowid
+
+
+async def get_pending_fact(pending_id: int) -> Optional[Dict[str, Any]]:
+    """Get a pending fact by ID."""
+    async with aiosqlite.connect(DATABASE_PATH) as db:
+        db.row_factory = aiosqlite.Row
+        async with db.execute(
+            "SELECT * FROM pending_facts WHERE id = ?",
+            (pending_id,)
+        ) as cursor:
+            row = await cursor.fetchone()
+            return dict(row) if row else None
+
+
+async def confirm_pending_fact(pending_id: int) -> bool:
+    """Confirm a pending fact and move it to user_facts."""
+    pending = await get_pending_fact(pending_id)
+    if not pending:
+        return False
+    
+    # Check if expired
+    if datetime.fromisoformat(pending["expires_at"]) < datetime.now():
+        await delete_pending_fact(pending_id)
+        return False
+    
+    # Move to user_facts
+    await add_fact_with_source(
+        pending["about_user_id"],
+        pending["fact"],
+        source="learned",
+        learned_from_user_id=pending["learned_from_user_id"]
+    )
+    await delete_pending_fact(pending_id)
+    return True
+
+
+async def delete_pending_fact(pending_id: int) -> bool:
+    """Delete a pending fact."""
+    async with aiosqlite.connect(DATABASE_PATH) as db:
+        cursor = await db.execute(
+            "DELETE FROM pending_facts WHERE id = ?",
+            (pending_id,)
+        )
+        await db.commit()
+        return cursor.rowcount > 0
+
+
+async def cleanup_expired_pending_facts() -> int:
+    """Delete all expired pending facts."""
+    async with aiosqlite.connect(DATABASE_PATH) as db:
+        cursor = await db.execute(
+            "DELETE FROM pending_facts WHERE expires_at < ?",
+            (datetime.now(),)
+        )
+        await db.commit()
+        return cursor.rowcount
+
+
+# ============================================
+# Admin Operations
+# ============================================
+
+async def reset_user_data(user_id: int, reset_type: str = "all") -> Dict[str, int]:
+    """Reset user data. reset_type: 'all', 'facts', 'affection', 'aliases'"""
+    deleted = {"facts": 0, "affection": 0, "aliases": 0}
+    
+    async with aiosqlite.connect(DATABASE_PATH) as db:
+        if reset_type in ("all", "facts"):
+            cursor = await db.execute("DELETE FROM user_facts WHERE user_id = ?", (user_id,))
+            deleted["facts"] = cursor.rowcount
+        
+        if reset_type in ("all", "affection"):
+            cursor = await db.execute("DELETE FROM user_affection WHERE user_id = ?", (user_id,))
+            deleted["affection"] = cursor.rowcount
+        
+        if reset_type in ("all", "aliases"):
+            cursor = await db.execute("DELETE FROM user_aliases WHERE user_id = ?", (user_id,))
+            deleted["aliases"] = cursor.rowcount
+        
+        await db.commit()
+    
+    return deleted
+
+
+async def set_affection_value(user_id: int, points: int) -> Dict[str, Any]:
+    """Set a user's affection points to a specific value."""
+    new_level = _calculate_level(points)
+    
+    async with aiosqlite.connect(DATABASE_PATH) as db:
+        await db.execute("""
+            INSERT INTO user_affection (user_id, affection_points, affection_level, last_interaction)
+            VALUES (?, ?, ?, ?)
+            ON CONFLICT(user_id) DO UPDATE SET
+                affection_points = ?,
+                affection_level = ?,
+                last_interaction = ?
+        """, (user_id, points, new_level, datetime.now(),
+              points, new_level, datetime.now()))
+        await db.commit()
+    
+    return {
+        "user_id": user_id,
+        "affection_points": points,
+        "affection_level": new_level
+    }
+
+
+async def get_user_full_profile(user_id: int) -> Dict[str, Any]:
+    """Get complete user profile for admin viewing."""
+    user = await get_user(user_id) or {"user_id": user_id}
+    affection = await get_affection(user_id)
+    facts = await get_facts_detailed(user_id)
+    aliases = await get_aliases(user_id)
+    
+    return {
+        **user,
+        "affection": affection,
+        "facts": facts,
+        "aliases": aliases
+    }

@@ -13,6 +13,7 @@ Personality Modes:
     - oneesan: Mature, caring older sister (Ara Ara~)
 """
 
+import os
 import random
 import discord
 from discord.ext import commands
@@ -95,12 +96,16 @@ class Social(commands.Cog):
         
         Args:
             mode_name: Personality mode (femboy, tsundere, oneesan)
-            
-        TODO:
-            - [ ] Add confirmation for mode switch
-            - [ ] Announce mode change in channel
-            - [ ] Add cooldown
         """
+        # Check if mode is locked via environment
+        locked_mode = os.getenv("BOT_MODE", "").lower()
+        if locked_mode in ("femboy", "tsundere", "oneesan"):
+            await ctx.send(
+                "🔒 Mode switching is disabled for this bot instance.\n"
+                f"This bot is locked to **{locked_mode}** mode."
+            )
+            return
+        
         if not mode_name:
             await self.show_modes(ctx)
             return
