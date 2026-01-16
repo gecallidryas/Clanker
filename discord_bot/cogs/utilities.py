@@ -41,7 +41,7 @@ COMMAND_CATEGORIES = {
     },
     "💭 Memory": {
         "description": "I can remember things about you~",
-        "commands": ["remember", "forget", "myinfo", "set_timezone", "birthday"]
+        "commands": ["remember", "forget", "myinfo", "set_timezone", "birthday", "aboutuser", "aka", "aliases", "whois"]
     },
     "💕 Affection": {
         "description": "Build our relationship!",

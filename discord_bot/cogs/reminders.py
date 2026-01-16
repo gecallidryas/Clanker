@@ -13,6 +13,8 @@ Time Formats:
     - Xh: X hours (e.g., 2h)
     - Xd: X days (e.g., 1d)
     - Xw: X weeks (e.g., 1w)
+    - tomorrow
+    - next week
 """
 
 import re
@@ -83,7 +85,13 @@ def parse_time(time_str: str) -> Optional[int]:
     Returns:
         Seconds or None if invalid
     """
-    match = TIME_PATTERN.match(time_str.strip())
+    normalized = time_str.strip().lower()
+    if normalized in ("tomorrow", "next day", "nextday"):
+        return 24 * 60 * 60
+    if normalized in ("next week", "nextweek"):
+        return 7 * 24 * 60 * 60
+
+    match = TIME_PATTERN.match(normalized)
     if not match:
         return None
     
@@ -142,7 +150,7 @@ class Reminders(commands.Cog):
                 "• `!remind 30m drink water`\n"
                 "• `!remind 2h check the oven`\n"
                 "• `!remind 1d submit assignment`\n\n"
-                "**Time formats:** `Xm` (minutes), `Xh` (hours), `Xd` (days), `Xw` (weeks)"
+                "**Time formats:** `Xm` (minutes), `Xh` (hours), `Xd` (days), `Xw` (weeks), `tomorrow`, `next week`"
             )
             return
         
@@ -161,7 +169,7 @@ class Reminders(commands.Cog):
         if seconds is None:
             await ctx.send(
                 f"❌ Couldn't parse time: `{time}`\n"
-                "Use formats like: `30m`, `2h`, `1d`, `1w`"
+                "Use formats like: `30m`, `2h`, `1d`, `1w`, `tomorrow`, `next week`"
             )
             return
         

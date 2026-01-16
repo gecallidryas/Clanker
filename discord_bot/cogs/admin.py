@@ -37,7 +37,7 @@ class Admin(commands.Cog):
         """Only allow admins to use these commands."""
         if not ctx.guild:
             return False
-        return ctx.author.guild_permissions.administrator
+        return ctx.author.guild_permissions.manage_guild
     
     @commands.group(name="admin", invoke_without_command=True)
     async def admin_group(self, ctx: commands.Context):

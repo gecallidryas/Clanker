@@ -26,6 +26,9 @@ from utils.db_handler import (
     delete_facts,
     get_user,
     create_user,
+    add_alias,
+    get_aliases,
+    find_user_by_alias,
 )
 
 
@@ -79,7 +82,6 @@ class Memories(commands.Cog):
             "WET": "Europe/Lisbon",
             # Asia
             "IST": "Asia/Kolkata",
-            "BST": "Asia/Dhaka",  # Bangladesh Standard Time
             "BDT": "Asia/Dhaka",
             "JST": "Asia/Tokyo",
             "KST": "Asia/Seoul",
@@ -226,6 +228,137 @@ class Memories(commands.Cog):
         
         embed.set_footer(text="Use !remember to add facts, !forget to clear them")
         
+        await ctx.send(embed=embed)
+
+    # ============================================
+    # User Alias Commands
+    # ============================================
+
+    @commands.command(name="aka", aliases=["alias", "nickname"])
+    async def add_user_alias(self, ctx: commands.Context, member: discord.Member = None, *, alias: str = None):
+        """
+        Add an alias for a user.
+
+        Usage:
+            !aka @user <alias>
+        """
+        if not ctx.guild:
+            await ctx.send("Please use this command in a server.")
+            return
+        if not member or not alias:
+            await ctx.send("Usage: `!aka @user <alias>`")
+            return
+
+        alias = alias.strip()
+        if not alias:
+            await ctx.send("Please provide a non-empty alias.")
+            return
+        if len(alias) > 64:
+            await ctx.send("Alias too long. Please keep it under 64 characters.")
+            return
+
+        added = await add_alias(member.id, alias, ctx.author.id)
+        if added:
+            await ctx.send(f"Added alias `{alias}` for {member.display_name}.")
+        else:
+            await ctx.send(f"`{alias}` is already an alias for {member.display_name}.")
+
+    @commands.command(name="aliases", aliases=["aka_list"])
+    async def list_user_aliases(self, ctx: commands.Context, member: discord.Member = None):
+        """
+        List aliases for a user.
+
+        Usage:
+            !aliases @user
+        """
+        if not ctx.guild:
+            await ctx.send("Please use this command in a server.")
+            return
+
+        target = member or ctx.author
+        aliases = await get_aliases(target.id)
+        if not aliases:
+            await ctx.send(f"No aliases found for {target.display_name}.")
+            return
+
+        alias_text = ", ".join(aliases[:20])
+        if len(aliases) > 20:
+            alias_text += f", ... (+{len(aliases) - 20} more)"
+
+        embed = discord.Embed(
+            title=f"Aliases for {target.display_name}",
+            description=alias_text,
+            color=discord.Color.blue()
+        )
+        await ctx.send(embed=embed)
+
+    @commands.command(name="whois")
+    async def whois_alias(self, ctx: commands.Context, *, alias: str):
+        """
+        Find a user by alias.
+
+        Usage:
+            !whois <alias>
+        """
+        if not ctx.guild:
+            await ctx.send("Please use this command in a server.")
+            return
+
+        alias = alias.strip()
+        if not alias:
+            await ctx.send("Usage: `!whois <alias>`")
+            return
+
+        user_id = await find_user_by_alias(alias)
+        if not user_id:
+            await ctx.send(f"No user found with alias `{alias}`.")
+            return
+
+        member = ctx.guild.get_member(user_id)
+        if member:
+            await ctx.send(f"`{alias}` belongs to {member.mention}.")
+            return
+
+        user = self.bot.get_user(user_id)
+        if user:
+            await ctx.send(f"`{alias}` belongs to {user.name} (`{user_id}`).")
+        else:
+            await ctx.send(f"`{alias}` belongs to user ID `{user_id}`.")
+
+    # ============================================
+    # Cross-User Facts
+    # ============================================
+
+    @commands.command(name="aboutuser", aliases=["about_user", "userfacts", "facts"])
+    async def about_user(self, ctx: commands.Context, member: discord.Member = None):
+        """
+        View facts about another user.
+
+        Usage:
+            !aboutuser @user
+        """
+        if not ctx.guild:
+            await ctx.send("Please use this command in a server.")
+            return
+
+        if member is None:
+            await ctx.send("Usage: `!aboutuser @user`")
+            return
+
+        facts = await get_facts(member.id)
+        if not facts:
+            await ctx.send(f"I don't have any facts stored about {member.display_name}.")
+            return
+
+        facts_text = "\n".join(f"- {fact}" for fact in facts[:10])
+        if len(facts) > 10:
+            facts_text += f"\n... and {len(facts) - 10} more"
+
+        embed = discord.Embed(
+            title=f"Facts about {member.display_name}",
+            description=facts_text,
+            color=discord.Color.pink()
+        )
         await ctx.send(embed=embed)
     
     # ============================================

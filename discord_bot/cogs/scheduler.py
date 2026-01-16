@@ -13,6 +13,7 @@ Configuration:
 """
 
 import asyncio
+import os
 from datetime import datetime, timedelta
 from typing import Dict
 
@@ -53,6 +54,13 @@ class Scheduler(commands.Cog):
     def __init__(self, bot: commands.Bot):
         self.bot = bot
         self.last_meal_check: Dict[int, datetime] = {}  # user_id -> last_check_time
+        self.default_bump_channel_id = None
+        raw_channel_id = os.getenv("BUMP_CHANNEL_ID", "").strip()
+        if raw_channel_id:
+            try:
+                self.default_bump_channel_id = int(raw_channel_id)
+            except ValueError:
+                logger.warning("Invalid BUMP_CHANNEL_ID=%s (expected integer channel ID)", raw_channel_id)
 
     def _select_ping_channel(self, guild: discord.Guild) -> discord.TextChannel | None:
         """Pick a channel where the bot can ping users."""
@@ -99,6 +107,9 @@ class Scheduler(commands.Cog):
         """
         for guild in self.bot.guilds:
             channel_id = await get_bump_channel(guild.id)
+            if not channel_id and self.default_bump_channel_id:
+                if guild.get_channel(self.default_bump_channel_id):
+                    channel_id = self.default_bump_channel_id
             
             if not channel_id:
                 continue

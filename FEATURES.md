@@ -92,7 +92,7 @@ Store facts about users that the AI will remember.
 | `!remember <fact>` | Save a fact about yourself |
 | `!forget` | Clear all your facts |
 | `!myinfo` | View your stored information |
-| `!about @user` | View facts about another user |
+| `!aboutuser @user` | View facts about another user |
 
 ### User Aliases
 Associate names/nicknames with Discord users.
@@ -164,7 +164,7 @@ GEMINI_API_KEY_3=
 # Optional Settings
 BOT_MODE=          # Lock to: femboy, tsundere, or oneesan
 PORTFOLIO_URL=     # For !portfolio command
-BUMP_CHANNEL_ID=   # Auto-bump reminders
+BUMP_CHANNEL_ID=   # Default channel for auto-bump reminders
 ```
 
 ---
