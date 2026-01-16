@@ -390,6 +390,21 @@ class AIBrain(commands.Cog):
         }
         affection_context = affection_prompts.get(affection_level, affection_prompts["stranger"])
         
+
+        # Command context for RAG-like help
+        commands_help = """
+=== AVAILABLE COMMANDS ===
+You can explain these commands to the user if asked:
+- !mode <type>: Switch personality (femboy, tsundere, oneesan)
+- !affection / !mood: Check relationship/server mood
+- !headpat / !hug: Give affection (+pts)
+- !evil on/off: Toggle uncensored mode
+- !remind <time> <msg>: Set a reminder
+- !aka @user <name> / !whois <name>: Manage nicknames
+- !remember <fact> / !aboutuser @user: Memory system
+- !stats / !ping: Bot status
+"""
+
         # Build full prompt
         prompt = f"""
 {persona}
@@ -400,6 +415,8 @@ User's affection level: {affection_level.replace('_', ' ').upper()} ({affection_
 
 IMPORTANT: Your warmth, compliance, and willingness to help MUST match the affection level above.
 Low affection = reserved, won't agree to demands. High affection = eager to please.
+
+{commands_help}
 {facts_section}
 
 Recent conversation:

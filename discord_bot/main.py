@@ -78,7 +78,7 @@ class Femmy(commands.Bot):
     
     def __init__(self):
         super().__init__(
-            command_prefix="!",
+            command_prefix=os.getenv("COMMAND_PREFIX", "!"),
             intents=intents,
             description="Femmy - Your AI companion with personality!"
         )

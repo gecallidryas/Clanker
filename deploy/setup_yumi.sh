@@ -57,6 +57,7 @@ if [ ! -f "$BOT_DIR/discord_bot/.env" ]; then
     echo "" >> "$BOT_DIR/discord_bot/.env"
     echo "# LOCKED MODE" >> "$BOT_DIR/discord_bot/.env"
     echo "BOT_MODE=oneesan" >> "$BOT_DIR/discord_bot/.env"
+    echo "COMMAND_PREFIX=!?" >> "$BOT_DIR/discord_bot/.env"
     
     chown "$BOT_USER:$BOT_USER" "$BOT_DIR/discord_bot/.env"
     chmod 600 "$BOT_DIR/discord_bot/.env"
