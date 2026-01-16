@@ -178,6 +178,12 @@ async def init_db() -> None:
             )
         """)
         
+        # Add evil_mode column to server_config (migration)
+        try:
+            await db.execute("ALTER TABLE server_config ADD COLUMN evil_mode BOOLEAN DEFAULT FALSE")
+        except:
+            pass  # Column already exists
+        
         await db.commit()
         logger.info("Database initialized successfully")
 
@@ -398,6 +404,44 @@ async def set_server_mode(guild_id: int, mode: str) -> None:
                 persona_mode = ?,
                 updated_at = ?
         """, (guild_id, mode, datetime.now(), mode, datetime.now()))
+        await db.commit()
+
+
+async def get_evil_mode(guild_id: int) -> bool:
+    """
+    Check if evil (uncensored) mode is enabled for a server.
+    
+    Args:
+        guild_id: Discord guild/server ID
+        
+    Returns:
+        True if evil mode is enabled
+    """
+    async with aiosqlite.connect(DATABASE_PATH) as db:
+        async with db.execute(
+            "SELECT evil_mode FROM server_config WHERE guild_id = ?",
+            (guild_id,)
+        ) as cursor:
+            row = await cursor.fetchone()
+            return bool(row[0]) if row and row[0] else False
+
+
+async def set_evil_mode(guild_id: int, enabled: bool) -> None:
+    """
+    Enable or disable evil (uncensored) mode for a server.
+    
+    Args:
+        guild_id: Discord guild/server ID
+        enabled: True to enable evil mode
+    """
+    async with aiosqlite.connect(DATABASE_PATH) as db:
+        await db.execute("""
+            INSERT INTO server_config (guild_id, evil_mode, updated_at)
+            VALUES (?, ?, ?)
+            ON CONFLICT(guild_id) DO UPDATE SET 
+                evil_mode = ?,
+                updated_at = ?
+        """, (guild_id, enabled, datetime.now(), enabled, datetime.now()))
         await db.commit()
 
 

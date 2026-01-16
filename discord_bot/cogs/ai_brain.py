@@ -24,8 +24,8 @@ import re
 import discord
 from discord.ext import commands
 
-from utils.db_handler import get_server_mode, get_facts, increment_stat, get_affection
-from utils.api_manager import get_gemini_manager, UserInputError
+from utils.db_handler import get_server_mode, get_facts, increment_stat, get_affection, get_evil_mode
+from utils.api_manager import get_gemini_manager, get_openrouter_manager, UserInputError
 from utils.rate_limiter import ai_limiter, get_rate_limit_message
 from utils.logger import get_logger
 
@@ -117,7 +117,7 @@ EXAMPLE RESPONSES:
 """,
 
     "mode_oneesan": """
-You are Femmy, a caring oneesan (big sister) with Ara Ara energy.
+You are Yumi, a caring oneesan (big sister) with Ara Ara energy.
 
 CORE VIBE: Mature, teasing, nurturing, flirtatious.
 
@@ -243,6 +243,7 @@ class AIBrain(commands.Cog):
     def __init__(self, bot: commands.Bot):
         self.bot = bot
         self.gemini = get_gemini_manager()  # Multi-key manager
+        self.openrouter = get_openrouter_manager()  # Uncensored AI manager
         self.contexts: Dict[int, ConversationContext] = {}  # channel_id -> context
         self.chain_memory: Dict[int, int] = {}  # message_id -> user_id
         self.chain_order: deque[int] = deque()
@@ -411,20 +412,35 @@ Respond naturally in character. Keep responses concise.
 """
         return prompt
     
-    async def generate_response(self, prompt: str) -> str:
+    async def generate_response(self, prompt: str, guild_id: int = None) -> str:
         """
-        Generate a response using Gemini API with automatic key failover.
+        Generate a response using the appropriate AI provider.
+        
+        Args:
+            prompt: The text prompt
+            guild_id: Discord server ID (to check for evil mode)
         """
+        # Check for evil (uncensored) mode
+        evil_mode = False
+        if guild_id:
+            evil_mode = await get_evil_mode(guild_id)
+            
         try:
+            if evil_mode and self.openrouter.is_available():
+                response_text, model_used = await self.openrouter.generate(prompt)
+                return response_text
+            
+            # Default to Gemini (censored)
             response_text, key_used = await self.gemini.generate(prompt)
             return response_text
+            
         except UserInputError:
             return "Sorry, I can't help with that request."
         except RuntimeError as e:
-            logger.warning("All Gemini API keys exhausted: %s", e)
+            logger.warning("AI Generation failed: %s", e)
             return "Ah, I'm a bit overwhelmed right now... Please try again in a few minutes! >.< "
         except Exception as e:
-            logger.error("Gemini API error: %s", e, exc_info=True)
+            logger.error("AI Error: %s", e, exc_info=True)
             return "Ah, something went wrong... Let me try again later! >.<"
     
     @commands.Cog.listener()
@@ -489,7 +505,7 @@ Respond naturally in character. Keep responses concise.
                 context.get_context()
             )
             
-            response = await self.generate_response(prompt)
+            response = await self.generate_response(prompt, message.guild.id)
             
         sent = await message.reply(response, mention_author=False)
 

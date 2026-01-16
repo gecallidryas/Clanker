@@ -18,7 +18,7 @@ import random
 import discord
 from discord.ext import commands
 
-from utils.db_handler import get_server_mode, set_server_mode
+from utils.db_handler import get_server_mode, set_server_mode, get_evil_mode, set_evil_mode
 
 
 # Mode display information
@@ -88,6 +88,30 @@ class Social(commands.Cog):
         content = content.replace(f"<@!{self.bot.user.id}>", "")
         return content.strip() == ""
     
+    @commands.command(name="evil", aliases=["uncensored"])
+    @commands.has_permissions(manage_guild=True)
+    async def toggle_evil_mode(self, ctx: commands.Context, state: str = None):
+        """
+        Toggle 'Evil' (Uncensored) mode using OpenRouter models.
+        
+        Usage: !evil [on/off]
+        """
+        if not state:
+            current = await get_evil_mode(ctx.guild.id)
+            status = "ENABLED" if current else "DISABLED"
+            await ctx.send(f"😈 Evil Mode is currently **{status}**.")
+            return
+
+        state = state.lower()
+        if state in ["on", "enable", "true", "yes"]:
+            await set_evil_mode(ctx.guild.id, True)
+            await ctx.send("😈 **Evil Mode ENABLED**. Responses will now use uncensored models (Venice/Hermes).")
+        elif state in ["off", "disable", "false", "no"]:
+            await set_evil_mode(ctx.guild.id, False)
+            await ctx.send("😇 **Evil Mode DISABLED**. Returning to standard safety protocols.")
+        else:
+            await ctx.send("Usage: `!evil on` or `!evil off`")
+
     @commands.command(name="mode")
     @commands.has_permissions(manage_guild=True)
     async def switch_mode(self, ctx: commands.Context, mode_name: str = None):
@@ -160,12 +184,16 @@ class Social(commands.Cog):
             - [ ] Show current mode
         """
         current_mode = await get_server_mode(ctx.guild.id)
+        current_evil = await get_evil_mode(ctx.guild.id)
         
         embed = discord.Embed(
             title="🎭 Available Personality Modes",
             description="Switch Femmy's personality with `!mode <name>`",
-            color=discord.Color.pink()
+            color=discord.Color.from_rgb(255, 182, 193)
         )
+        
+        evil_status = "😈 **Evil Mode**: ON" if current_evil else "😇 **Evil Mode**: OFF"
+        embed.add_field(name="System Status", value=evil_status, inline=False)
         
         for mode_key, info in MODE_INFO.items():
             is_current = mode_key == current_mode
@@ -185,10 +213,13 @@ class Social(commands.Cog):
     async def show_current_mode(self, ctx: commands.Context):
         """Display the current personality mode."""
         current_mode = await get_server_mode(ctx.guild.id)
+        current_evil = await get_evil_mode(ctx.guild.id)
         info = MODE_INFO.get(current_mode, MODE_INFO["mode_femboy"])
         
+        evil_text = "\n😈 (Evil Mode Active)" if current_evil else ""
+        
         await ctx.send(
-            f"{info['emoji']} Currently in **{info['name']}** mode!\n"
+            f"{info['emoji']} Currently in **{info['name']}** mode!{evil_text}\n"
             f"*{info['description']}*"
         )
     

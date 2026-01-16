@@ -19,6 +19,16 @@ A highly advanced Discord bot with AI-powered conversations, multiple personalit
 
 > **Mode Locking**: Set `BOT_MODE=oneesan` in `.env` to lock personality.
 
+## 😈 Evil Mode (Uncensored)
+Enable uncensored responses using OpenRouter (Venice AI/Nous Hermes).
+
+### Commands
+- `!evil on` - Enable Evil Mode (Uncensored)
+- `!evil off` - Disable Evil Mode (Standard Safety)
+- `!evil` - Check current status
+
+**Note**: Requires `OPENROUTER_API_KEY` in settings. Evil Mode is tracked per-server.
+
 ---
 
 ## 🧠 AI Integration (Gemini)
