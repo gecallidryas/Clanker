@@ -221,7 +221,7 @@ class Scheduler(commands.Cog):
     # Configuration Commands
     # ============================================
     
-    @commands.command(name="setbump")
+    @commands.command(name="setbump", aliases=["bumpstart", "bumpreminderstart"])
     @commands.has_permissions(manage_guild=True)
     async def set_bump_channel_cmd(self, ctx: commands.Context, channel: discord.TextChannel = None):
         """
@@ -241,7 +241,7 @@ class Scheduler(commands.Cog):
             f"I'll send reminders every 2 hours~ ♡"
         )
     
-    @commands.command(name="clearbump")
+    @commands.command(name="clearbump", aliases=["bumpstop", "bumpreminderstop"])
     @commands.has_permissions(manage_guild=True)
     async def clear_bump_channel_cmd(self, ctx: commands.Context):
         """

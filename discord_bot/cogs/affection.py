@@ -348,20 +348,10 @@ class Affection(commands.Cog):
                     # Use AI for more nuanced analysis
                     sentiment, delta = await analyze_sentiment(content)
                 
-                # Apply affection change
+                # Apply affection change (don't reply here - ai_brain handles responses)
                 await add_affection(message.author.id, delta)
                 
-                # React to negative messages
                 if sentiment in ("negative", "very_negative", "hostile"):
-                    mode = await get_server_mode(message.guild.id)
-                    reactions = NEGATIVE_REACTIONS.get(mode, NEGATIVE_REACTIONS["mode_femboy"])
-                    reaction = reactions.get(sentiment, reactions["negative"])
-                    
-                    # Only react sometimes (50% chance) to avoid spam
-                    import random
-                    if random.random() < 0.5:
-                        await message.reply(reaction, mention_author=False)
-                    
                     logger.info(f"Negative interaction from {message.author}: {sentiment} ({delta} pts)")
             else:
                 # Default positive for short mentions
