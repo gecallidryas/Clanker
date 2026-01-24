@@ -80,7 +80,8 @@ class Femmy(commands.Bot):
         super().__init__(
             command_prefix=os.getenv("COMMAND_PREFIX", "!"),
             intents=intents,
-            description="Femmy - Your AI companion with personality!"
+            description="Femmy - Your AI companion with personality!",
+            help_command=None  # Use custom help in utilities.py
         )
     
     async def setup_hook(self):
