@@ -152,6 +152,10 @@ class Memories(commands.Cog):
             - [ ] Implement fact limit (e.g., max 50)
             - [ ] Add confirmation for sensitive info
         """
+        if not ctx.guild:
+            await ctx.send("Facts are server-specific. Use this in a server.")
+            return
+
         if len(fact) > 500:
             await ctx.send("❌ Fact too long! Please keep it under 500 characters.")
             return
@@ -160,7 +164,7 @@ class Memories(commands.Cog):
         await create_user(ctx.author.id)
         
         # Store the fact
-        fact_id = await add_fact(ctx.author.id, fact)
+        fact_id = await add_fact(ctx.guild.id, ctx.author.id, fact)
         
         await ctx.send(
             f"📝 Got it! I'll remember that~ ♡\n"
@@ -176,7 +180,11 @@ class Memories(commands.Cog):
             - [ ] Add confirmation prompt
             - [ ] Allow deleting specific facts by ID
         """
-        count = await delete_facts(ctx.author.id)
+        if not ctx.guild:
+            await ctx.send("Facts are server-specific. Use this in a server.")
+            return
+
+        count = await delete_facts(ctx.guild.id, ctx.author.id)
         
         if count == 0:
             await ctx.send("🤔 I don't have any facts stored about you!")
@@ -192,8 +200,12 @@ class Memories(commands.Cog):
             - [ ] Add pagination for many facts
             - [ ] Show fact creation dates
         """
+        if not ctx.guild:
+            await ctx.send("Profiles are server-specific. Use this in a server.")
+            return
+
         user = await get_user(ctx.author.id)
-        facts = await get_facts(ctx.author.id)
+        facts = await get_facts(ctx.guild.id, ctx.author.id)
         
         # Build embed
         embed = discord.Embed(
@@ -257,7 +269,7 @@ class Memories(commands.Cog):
             await ctx.send("Alias too long. Please keep it under 64 characters.")
             return
 
-        added = await add_alias(member.id, alias, ctx.author.id)
+        added = await add_alias(ctx.guild.id, member.id, alias, ctx.author.id)
         if added:
             await ctx.send(f"Added alias `{alias}` for {member.display_name}.")
         else:
@@ -276,7 +288,7 @@ class Memories(commands.Cog):
             return
 
         target = member or ctx.author
-        aliases = await get_aliases(target.id)
+        aliases = await get_aliases(ctx.guild.id, target.id)
         if not aliases:
             await ctx.send(f"No aliases found for {target.display_name}.")
             return
@@ -309,7 +321,7 @@ class Memories(commands.Cog):
             await ctx.send("Usage: `!whois <alias>`")
             return
 
-        user_id = await find_user_by_alias(alias)
+        user_id = await find_user_by_alias(ctx.guild.id, alias)
         if not user_id:
             await ctx.send(f"No user found with alias `{alias}`.")
             return
@@ -345,7 +357,7 @@ class Memories(commands.Cog):
             await ctx.send("Usage: `!aboutuser @user`")
             return
 
-        facts = await get_facts(member.id)
+        facts = await get_facts(ctx.guild.id, member.id)
         if not facts:
             await ctx.send(f"I don't have any facts stored about {member.display_name}.")
             return

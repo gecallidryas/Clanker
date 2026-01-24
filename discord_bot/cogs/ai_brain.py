@@ -24,7 +24,14 @@ import re
 import discord
 from discord.ext import commands
 
-from utils.db_handler import get_server_mode, get_facts, increment_stat, get_affection, get_evil_mode
+from utils.db_handler import (
+    get_server_mode,
+    get_facts,
+    increment_stat,
+    get_affection,
+    get_evil_mode,
+    get_gender_roles,
+)
 from utils.api_manager import get_gemini_manager, get_openrouter_manager, UserInputError
 from utils.rate_limiter import ai_limiter, get_rate_limit_message
 from utils.logger import get_logger
@@ -303,13 +310,36 @@ class AIBrain(commands.Cog):
             if attachment.content_type and attachment.content_type.startswith("image/"):
                 return True
         return False
+
+    async def get_user_gender(
+        self,
+        member: Optional[discord.Member],
+        guild_id: int
+    ) -> str:
+        """Infer gender from configured roles for this server."""
+        if not member or not member.guild:
+            return "unknown"
+
+        gender_roles = await get_gender_roles(guild_id)
+        matched_genders = set()
+        for role in member.roles:
+            gender = gender_roles.get(role.id)
+            if gender:
+                matched_genders.add(gender.lower())
+
+        if len(matched_genders) == 0:
+            return "unknown"
+        if len(matched_genders) > 1:
+            return "confused"
+        return matched_genders.pop()
     
     async def build_prompt(
         self, 
         guild_id: int, 
         user_id: int, 
         message: str, 
-        context: str
+        context: str,
+        member: Optional[discord.Member] = None
     ) -> str:
         """
         Build the full prompt for Gemini.
@@ -329,7 +359,7 @@ class AIBrain(commands.Cog):
         persona = PERSONAS.get(mode, PERSONAS["mode_femboy"])
         
         # Get user facts (Current speaker)
-        facts = await get_facts(user_id)
+        facts = await get_facts(guild_id, user_id)
         facts_list = [f"- (User {user_id}) {fact}" for fact in facts]
 
         # Check for mentions in the message and fetch their facts
@@ -340,7 +370,7 @@ class AIBrain(commands.Cog):
             if uid == self.bot.user.id or uid == user_id:
                 continue
             
-            other_facts = await get_facts(uid)
+            other_facts = await get_facts(guild_id, uid)
             if other_facts:
                 # Try to resolve username for better context
                 user = self.bot.get_user(uid)
@@ -352,9 +382,18 @@ class AIBrain(commands.Cog):
             facts_section = f"\n\nThings you know about the users:\n" + "\n".join(facts_list)
         
         # Get affection level for behavior adjustment
-        affection_data = await get_affection(user_id)
+        affection_data = await get_affection(guild_id, user_id)
         affection_level = affection_data.get("affection_level", "stranger")
         affection_points = affection_data.get("affection_points", 0)
+
+        # Determine user gender from configured roles
+        gender = await self.get_user_gender(member, guild_id)
+        if gender == "unknown":
+            gender_note = "[User Gender: Unknown. Act confused if asked about their gender.]"
+        elif gender == "confused":
+            gender_note = "[User Gender: Conflicting roles. Express confusion if asked.]"
+        else:
+            gender_note = f"[User Gender: {gender}]"
         
         # Affection prompts that gate compliance and warmth
         affection_prompts = {
@@ -416,6 +455,8 @@ User's affection level: {affection_level.replace('_', ' ').upper()} ({affection_
 
 IMPORTANT: Your warmth, compliance, and willingness to help MUST match the affection level above.
 Low affection = reserved, won't agree to demands. High affection = eager to please.
+
+{gender_note}
 
 {commands_help}
 {facts_section}
@@ -520,7 +561,8 @@ Respond naturally in character. Keep responses concise.
                 message.guild.id,
                 message.author.id,
                 message.content,
-                context.get_context()
+                context.get_context(),
+                member=message.author
             )
             
             response = await self.generate_response(prompt, message.guild.id)

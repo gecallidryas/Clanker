@@ -12,6 +12,9 @@ from .db_handler import (
     get_facts,
     get_server_mode,
     set_server_mode,
+    get_gender_roles,
+    set_gender_role,
+    delete_gender_role,
 )
 
 __all__ = [
@@ -22,4 +25,7 @@ __all__ = [
     "get_facts",
     "get_server_mode",
     "set_server_mode",
+    "get_gender_roles",
+    "set_gender_role",
+    "delete_gender_role",
 ]

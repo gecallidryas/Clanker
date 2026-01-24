@@ -186,8 +186,12 @@ class Affection(commands.Cog):
     @commands.command(name="affection", aliases=["love", "relationship"])
     async def show_affection(self, ctx: commands.Context, member: discord.Member = None):
         """View your or another user's affection level."""
+        if not ctx.guild:
+            await ctx.send("Affection is server-specific. Use this in a server.")
+            return
+
         target = member or ctx.author
-        data = await get_affection(target.id)
+        data = await get_affection(ctx.guild.id, target.id)
         
         level = data["affection_level"]
         points = data["affection_points"]
@@ -292,7 +296,7 @@ class Affection(commands.Cog):
         
         # Update mood and affection
         await update_mood(ctx.guild.id, 5)
-        await add_affection(ctx.author.id, 3)
+        await add_affection(ctx.guild.id, ctx.author.id, 3)
         
         responses = HEADPAT_RESPONSES.get(mode, HEADPAT_RESPONSES["mode_femboy"])
         response = random.choice(responses)
@@ -309,7 +313,7 @@ class Affection(commands.Cog):
         
         # Update mood and affection
         await update_mood(ctx.guild.id, 5)
-        await add_affection(ctx.author.id, 3)
+        await add_affection(ctx.guild.id, ctx.author.id, 3)
         
         responses = HUG_RESPONSES.get(mode, HUG_RESPONSES["mode_femboy"])
         response = random.choice(responses)
@@ -349,13 +353,13 @@ class Affection(commands.Cog):
                     sentiment, delta = await analyze_sentiment(content)
                 
                 # Apply affection change (don't reply here - ai_brain handles responses)
-                await add_affection(message.author.id, delta)
+                await add_affection(message.guild.id, message.author.id, delta)
                 
                 if sentiment in ("negative", "very_negative", "hostile"):
                     logger.info(f"Negative interaction from {message.author}: {sentiment} ({delta} pts)")
             else:
                 # Default positive for short mentions
-                await add_affection(message.author.id, 1)
+                await add_affection(message.guild.id, message.author.id, 1)
     
     # ============================================
     # Background Tasks

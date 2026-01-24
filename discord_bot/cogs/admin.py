@@ -78,7 +78,7 @@ class Admin(commands.Cog):
             await ctx.send(f"❌ Invalid type. Use one of: {', '.join(valid_types)}")
             return
         
-        deleted = await reset_user_data(member.id, reset_type.lower())
+        deleted = await reset_user_data(ctx.guild.id, member.id, reset_type.lower())
         
         embed = discord.Embed(
             title=f"🗑️ Reset Data for {member.display_name}",
@@ -98,7 +98,7 @@ class Admin(commands.Cog):
     @admin_group.command(name="view")
     async def view_user(self, ctx: commands.Context, member: discord.Member):
         """View complete user profile."""
-        profile = await get_user_full_profile(member.id)
+        profile = await get_user_full_profile(ctx.guild.id, member.id)
         
         embed = discord.Embed(
             title=f"👤 Profile: {member.display_name}",
@@ -157,6 +157,7 @@ class Admin(commands.Cog):
     async def set_fact(self, ctx: commands.Context, member: discord.Member, *, fact: str):
         """Add a fact for a user (admin source)."""
         fact_id = await add_fact_with_source(
+            ctx.guild.id,
             member.id,
             fact,
             source="admin",
@@ -170,14 +171,14 @@ class Admin(commands.Cog):
     async def del_fact(self, ctx: commands.Context, member: discord.Member, fact_id: int):
         """Delete a specific fact by ID."""
         # Verify fact belongs to user
-        facts = await get_facts_detailed(member.id)
+        facts = await get_facts_detailed(ctx.guild.id, member.id)
         fact_ids = [f["id"] for f in facts]
         
         if fact_id not in fact_ids:
             await ctx.send(f"❌ Fact #{fact_id} not found for {member.display_name}")
             return
         
-        success = await delete_fact_by_id(fact_id)
+        success = await delete_fact_by_id(ctx.guild.id, fact_id)
         if success:
             await ctx.send(f"✅ Deleted fact #{fact_id} for {member.display_name}")
             logger.info(f"Admin {ctx.author} deleted fact #{fact_id} for {member}")
@@ -191,7 +192,7 @@ class Admin(commands.Cog):
             await ctx.send("❌ Points cannot be negative")
             return
         
-        result = await set_affection_value(member.id, points)
+        result = await set_affection_value(ctx.guild.id, member.id, points)
         
         await ctx.send(
             f"✅ Set {member.display_name}'s affection to "
