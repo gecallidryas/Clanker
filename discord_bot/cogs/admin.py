@@ -267,6 +267,27 @@ class Admin(commands.Cog):
         )
         logger.info(f"Admin {ctx.author} set affection for {member} to {points}")
 
+    @admin_group.command(name="sync")
+    async def sync_tree(self, ctx: commands.Context, target: str = "guild"):
+        """
+        Sync slash commands.
+        Usage: 
+            !admin sync guild (default) - Instant sync to this server
+            !admin sync global - Sync globally (takes up to 1h)
+        """
+        if target == "guild":
+            self.bot.tree.copy_global_to(guild=ctx.guild)
+            await self.bot.tree.sync(guild=ctx.guild)
+            await ctx.send(f"✅ Synced slash commands to **{ctx.guild.name}**! (Instant)")
+        elif target == "global":
+            if await self.bot.is_owner(ctx.author):
+                await self.bot.tree.sync()
+                await ctx.send("✅ Synced **global** commands. (Updates take up to 1h)")
+            else:
+                 await ctx.send("❌ Only bot owner can sync globally.")
+        else:
+            await ctx.send("Usage: `!admin sync [guild|global]`")
+
     async def _slash_context(self, interaction: discord.Interaction) -> commands.Context:
         return await commands.Context.from_interaction(interaction)
 
