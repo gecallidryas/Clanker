@@ -418,10 +418,12 @@ def get_gemini_manager() -> GeminiManager:
 
 OPENROUTER_BASE_URL = "https://openrouter.ai/api/v1/chat/completions"
 
-# Available uncensored models (venice = paid, hermes = free fallback)
+# Available uncensored models
+# venice/hermes = free tier (rate limited), deepseek = paid (no limits)
 OPENROUTER_MODELS = {
-    "venice": "cognitivecomputations/dolphin-mistral-24b-venice-edition",
+    "venice": "cognitivecomputations/dolphin-mistral-24b-venice-edition:free",
     "hermes": "nousresearch/hermes-3-llama-3.1-405b:free",
+    "deepseek": "deepseek/deepseek-chat",
 }
 
 
