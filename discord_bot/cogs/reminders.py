@@ -23,6 +23,7 @@ from datetime import datetime, timedelta
 from typing import Optional
 
 import discord
+from discord import app_commands
 from discord.ext import commands, tasks
 
 from utils.db_handler import (
@@ -298,6 +299,26 @@ class Reminders(commands.Cog):
     @reminder_check_loop.before_loop
     async def before_reminder_check(self):
         await self.bot.wait_until_ready()
+
+    async def _slash_context(self, interaction: discord.Interaction) -> commands.Context:
+        return await commands.Context.from_interaction(interaction)
+
+    @app_commands.command(name="remind", description="Set a reminder.")
+    @app_commands.describe(time="When to remind you (e.g., 30m, 2h, tomorrow)", message="Reminder message")
+    async def remind_slash(self, interaction: discord.Interaction, time: str, message: str):
+        ctx = await self._slash_context(interaction)
+        await self.remind(ctx, time=time, message=message)
+
+    @app_commands.command(name="reminders", description="List your active reminders.")
+    async def reminders_slash(self, interaction: discord.Interaction):
+        ctx = await self._slash_context(interaction)
+        await self.remind_list(ctx)
+
+    @app_commands.command(name="remindcancel", description="Cancel a reminder by ID.")
+    @app_commands.describe(reminder_id="Reminder ID to cancel")
+    async def remind_cancel_slash(self, interaction: discord.Interaction, reminder_id: int):
+        ctx = await self._slash_context(interaction)
+        await self.remind_cancel(ctx, reminder_id=reminder_id)
 
 
 async def setup(bot: commands.Bot):

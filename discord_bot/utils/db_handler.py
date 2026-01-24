@@ -4,7 +4,8 @@ Database Handler for Femmy Discord Bot
 Async SQLite wrapper for all database operations.
 
 Tables:
-    - users: User profiles with timezone info
+    - users: Global user registry (for foreign keys)
+    - user_profiles: Guild-scoped user settings (timezone, birthday)
     - user_facts: Stored facts about users (!remember)
     - server_config: Server-specific settings (persona mode, bump channel)
 
@@ -12,7 +13,7 @@ Usage:
     from utils.db_handler import init_db, get_user, add_fact
     
     await init_db()
-    user = await get_user(123456789)
+    user = await get_user(987654321, 123456789)
 """
 
 import os
@@ -46,13 +47,26 @@ async def init_db() -> None:
     Initialize the database and create tables if they don't exist.
     """
     async with aiosqlite.connect(DATABASE_PATH) as db:
-        # Users table (with birthday support)
+        # Users table (global registry)
         await db.execute("""
             CREATE TABLE IF NOT EXISTS users (
                 user_id INTEGER PRIMARY KEY,
                 timezone TEXT DEFAULT 'UTC',
                 birthday TEXT,
                 created_at TIMESTAMP DEFAULT CURRENT_TIMESTAMP
+            )
+        """)
+
+        # Guild-scoped user profiles (timezone/birthday)
+        await db.execute("""
+            CREATE TABLE IF NOT EXISTS user_profiles (
+                guild_id INTEGER NOT NULL,
+                user_id INTEGER NOT NULL,
+                timezone TEXT DEFAULT 'UTC',
+                birthday TEXT,
+                created_at TIMESTAMP DEFAULT CURRENT_TIMESTAMP,
+                PRIMARY KEY (guild_id, user_id),
+                FOREIGN KEY (user_id) REFERENCES users(user_id)
             )
         """)
         
@@ -118,6 +132,16 @@ async def init_db() -> None:
                 completed BOOLEAN DEFAULT FALSE
             )
         """)
+
+        # Wellbeing checks (one per user per day, per guild)
+        await db.execute("""
+            CREATE TABLE IF NOT EXISTS wellbeing_checks (
+                guild_id INTEGER NOT NULL,
+                user_id INTEGER NOT NULL,
+                last_asked_date TEXT,
+                PRIMARY KEY (guild_id, user_id)
+            )
+        """)
         
         # Bot stats (singleton row)
         await db.execute("""
@@ -140,6 +164,15 @@ async def init_db() -> None:
             await db.execute("ALTER TABLE users ADD COLUMN birthday TEXT")
         except:
             pass  # Column already exists
+
+        # Best-effort migration to guild_id=0 profile (legacy data)
+        try:
+            await db.execute("""
+                INSERT OR IGNORE INTO user_profiles (guild_id, user_id, timezone, birthday, created_at)
+                SELECT 0, user_id, timezone, birthday, created_at FROM users
+            """)
+        except:
+            pass
 
         # Add guild_id column to user_facts if missing (migration)
         try:
@@ -170,6 +203,12 @@ async def init_db() -> None:
         # Add guild_id column to pending_facts if missing (migration)
         try:
             await db.execute("ALTER TABLE pending_facts ADD COLUMN guild_id INTEGER DEFAULT 0")
+        except:
+            pass
+
+        # Add last_asked_date to wellbeing_checks if missing (migration)
+        try:
+            await db.execute("ALTER TABLE wellbeing_checks ADD COLUMN last_asked_date TEXT")
         except:
             pass
         
@@ -225,11 +264,12 @@ async def init_db() -> None:
 # User Operations
 # ============================================
 
-async def get_user(user_id: int) -> Optional[Dict[str, Any]]:
+async def get_user(guild_id: int, user_id: int) -> Optional[Dict[str, Any]]:
     """
-    Fetch a user record by their Discord ID.
+    Fetch a guild-scoped user profile by Discord ID.
     
     Args:
+        guild_id: Discord guild/server ID
         user_id: Discord user ID
         
     Returns:
@@ -241,18 +281,19 @@ async def get_user(user_id: int) -> Optional[Dict[str, Any]]:
     async with aiosqlite.connect(DATABASE_PATH) as db:
         db.row_factory = aiosqlite.Row
         async with db.execute(
-            "SELECT * FROM users WHERE user_id = ?",
-            (user_id,)
+            "SELECT * FROM user_profiles WHERE guild_id = ? AND user_id = ?",
+            (guild_id, user_id)
         ) as cursor:
             row = await cursor.fetchone()
             return dict(row) if row else None
 
 
-async def create_user(user_id: int, timezone: str = "UTC") -> None:
+async def create_user(guild_id: int, user_id: int, timezone: str = "UTC") -> None:
     """
-    Create a new user record.
+    Create a new guild-scoped user profile.
     
     Args:
+        guild_id: Discord guild/server ID
         user_id: Discord user ID
         timezone: User's timezone (default: UTC)
         
@@ -264,14 +305,20 @@ async def create_user(user_id: int, timezone: str = "UTC") -> None:
             "INSERT OR IGNORE INTO users (user_id, timezone) VALUES (?, ?)",
             (user_id, timezone)
         )
+        await db.execute(
+            """INSERT OR IGNORE INTO user_profiles (guild_id, user_id, timezone)
+               VALUES (?, ?, ?)""",
+            (guild_id, user_id, timezone)
+        )
         await db.commit()
 
 
-async def set_timezone(user_id: int, timezone: str) -> None:
+async def set_timezone(guild_id: int, user_id: int, timezone: str) -> None:
     """
-    Set or update a user's timezone.
+    Set or update a user's timezone for a guild.
     
     Args:
+        guild_id: Discord guild/server ID
         user_id: Discord user ID
         timezone: Timezone string (e.g., "Asia/Dhaka")
         
@@ -280,17 +327,20 @@ async def set_timezone(user_id: int, timezone: str) -> None:
         - [ ] Create user if doesn't exist
     """
     async with aiosqlite.connect(DATABASE_PATH) as db:
-        # Upsert pattern
+        await db.execute(
+            "INSERT OR IGNORE INTO users (user_id) VALUES (?)",
+            (user_id,)
+        )
         await db.execute("""
-            INSERT INTO users (user_id, timezone) VALUES (?, ?)
-            ON CONFLICT(user_id) DO UPDATE SET timezone = ?
-        """, (user_id, timezone, timezone))
+            INSERT INTO user_profiles (guild_id, user_id, timezone) VALUES (?, ?, ?)
+            ON CONFLICT(guild_id, user_id) DO UPDATE SET timezone = ?
+        """, (guild_id, user_id, timezone, timezone))
         await db.commit()
 
 
-async def get_users_with_timezone() -> List[Dict[str, Any]]:
+async def get_users_with_timezone(guild_id: int) -> List[Dict[str, Any]]:
     """
-    Get all users who have set a timezone.
+    Get all users who have set a timezone for a guild.
     Used for meal check scheduling.
     
     Returns:
@@ -302,7 +352,8 @@ async def get_users_with_timezone() -> List[Dict[str, Any]]:
     async with aiosqlite.connect(DATABASE_PATH) as db:
         db.row_factory = aiosqlite.Row
         async with db.execute(
-            "SELECT * FROM users WHERE timezone != 'UTC'"
+            "SELECT * FROM user_profiles WHERE guild_id = ? AND timezone != 'UTC'",
+            (guild_id,)
         ) as cursor:
             rows = await cursor.fetchall()
             return [dict(row) for row in rows]
@@ -666,36 +717,41 @@ async def update_mood(guild_id: int, delta: int) -> Dict[str, Any]:
 # Birthday Operations
 # ============================================
 
-async def set_birthday(user_id: int, birthday: str) -> None:
-    """Set user birthday (format: MM-DD)."""
+async def set_birthday(guild_id: int, user_id: int, birthday: str) -> None:
+    """Set user birthday (format: MM-DD) for a guild."""
     async with aiosqlite.connect(DATABASE_PATH) as db:
+        await db.execute(
+            "INSERT OR IGNORE INTO users (user_id) VALUES (?)",
+            (user_id,)
+        )
         await db.execute("""
-            INSERT INTO users (user_id, birthday) VALUES (?, ?)
-            ON CONFLICT(user_id) DO UPDATE SET birthday = ?
-        """, (user_id, birthday, birthday))
+            INSERT INTO user_profiles (guild_id, user_id, birthday) VALUES (?, ?, ?)
+            ON CONFLICT(guild_id, user_id) DO UPDATE SET birthday = ?
+        """, (guild_id, user_id, birthday, birthday))
         await db.commit()
 
 
-async def get_birthday(user_id: int) -> Optional[str]:
-    """Get user birthday."""
+async def get_birthday(guild_id: int, user_id: int) -> Optional[str]:
+    """Get user birthday for a guild."""
     async with aiosqlite.connect(DATABASE_PATH) as db:
         async with db.execute(
-            "SELECT birthday FROM users WHERE user_id = ?",
-            (user_id,)
+            "SELECT birthday FROM user_profiles WHERE guild_id = ? AND user_id = ?",
+            (guild_id, user_id)
         ) as cursor:
             row = await cursor.fetchone()
             return row[0] if row and row[0] else None
 
 
-async def get_upcoming_birthdays(days: int = 30) -> List[Dict[str, Any]]:
-    """Get users with birthdays in the next N days."""
+async def get_upcoming_birthdays(guild_id: int, days: int = 30) -> List[Dict[str, Any]]:
+    """Get users with birthdays in the next N days for a guild."""
     today = datetime.now()
     upcoming = []
     
     async with aiosqlite.connect(DATABASE_PATH) as db:
         db.row_factory = aiosqlite.Row
         async with db.execute(
-            "SELECT user_id, birthday FROM users WHERE birthday IS NOT NULL"
+            "SELECT user_id, birthday FROM user_profiles WHERE guild_id = ? AND birthday IS NOT NULL",
+            (guild_id,)
         ) as cursor:
             async for row in cursor:
                 try:
@@ -859,6 +915,34 @@ async def delete_alias(guild_id: int, user_id: int, alias: str) -> bool:
         )
         await db.commit()
         return cursor.rowcount > 0
+
+
+# ============================================
+# Wellbeing Check Operations
+# ============================================
+
+async def get_last_wellbeing_date(guild_id: int, user_id: int) -> Optional[str]:
+    """Get the last wellbeing check date for a user (YYYY-MM-DD)."""
+    async with aiosqlite.connect(DATABASE_PATH) as db:
+        async with db.execute(
+            "SELECT last_asked_date FROM wellbeing_checks WHERE guild_id = ? AND user_id = ?",
+            (guild_id, user_id)
+        ) as cursor:
+            row = await cursor.fetchone()
+            return row[0] if row and row[0] else None
+
+
+async def set_last_wellbeing_date(guild_id: int, user_id: int, date_str: str) -> None:
+    """Set the last wellbeing check date for a user (YYYY-MM-DD)."""
+    async with aiosqlite.connect(DATABASE_PATH) as db:
+        await db.execute(
+            """INSERT INTO wellbeing_checks (guild_id, user_id, last_asked_date)
+               VALUES (?, ?, ?)
+               ON CONFLICT(guild_id, user_id) DO UPDATE SET
+                   last_asked_date = ?""",
+            (guild_id, user_id, date_str, date_str)
+        )
+        await db.commit()
 
 
 # ============================================
@@ -1093,7 +1177,7 @@ async def set_affection_value(guild_id: int, user_id: int, points: int) -> Dict[
 
 async def get_user_full_profile(guild_id: int, user_id: int) -> Dict[str, Any]:
     """Get complete user profile for admin viewing."""
-    user = await get_user(user_id) or {"user_id": user_id}
+    user = await get_user(guild_id, user_id) or {"user_id": user_id}
     affection = await get_affection(guild_id, user_id)
     facts = await get_facts_detailed(guild_id, user_id)
     aliases = await get_aliases(guild_id, user_id)

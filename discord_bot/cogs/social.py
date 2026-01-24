@@ -16,6 +16,7 @@ Personality Modes:
 import os
 import random
 import discord
+from discord import app_commands
 from discord.ext import commands
 
 from utils.db_handler import get_server_mode, set_server_mode, get_evil_mode, set_evil_mode
@@ -112,6 +113,34 @@ class Social(commands.Cog):
         else:
             await ctx.send("Usage: `!evil on` or `!evil off`")
 
+    @app_commands.command(name="evil", description="Toggle uncensored (evil) mode.")
+    @app_commands.checks.has_permissions(manage_guild=True)
+    @app_commands.describe(state="on/off")
+    async def toggle_evil_mode_slash(self, interaction: discord.Interaction, state: str = None):
+        if not interaction.guild:
+            await interaction.response.send_message("Use this command in a server.", ephemeral=True)
+            return
+
+        if not state:
+            current = await get_evil_mode(interaction.guild.id)
+            status = "ENABLED" if current else "DISABLED"
+            await interaction.response.send_message(f"😈 Evil Mode is currently **{status}**.")
+            return
+
+        state = state.lower()
+        if state in ["on", "enable", "true", "yes"]:
+            await set_evil_mode(interaction.guild.id, True)
+            await interaction.response.send_message(
+                "😈 **Evil Mode ENABLED**. Responses will now use uncensored models (Venice/Hermes)."
+            )
+        elif state in ["off", "disable", "false", "no"]:
+            await set_evil_mode(interaction.guild.id, False)
+            await interaction.response.send_message(
+                "😇 **Evil Mode DISABLED**. Returning to standard safety protocols."
+            )
+        else:
+            await interaction.response.send_message("Usage: `/evil on` or `/evil off`", ephemeral=True)
+
     @commands.command(name="mode")
     @commands.has_permissions(manage_guild=True)
     async def switch_mode(self, ctx: commands.Context, mode_name: str = None):
@@ -173,6 +202,59 @@ class Social(commands.Cog):
         }
         
         await ctx.send(confirmations.get(target_mode, f"{mode_info['emoji']} Mode switched!"))
+
+    @app_commands.command(name="mode", description="Switch the bot's personality mode.")
+    @app_commands.checks.has_permissions(manage_guild=True)
+    @app_commands.describe(mode="Personality mode")
+    @app_commands.choices(mode=[
+        app_commands.Choice(name="femboy", value="femboy"),
+        app_commands.Choice(name="tsundere", value="tsundere"),
+        app_commands.Choice(name="oneesan", value="oneesan"),
+    ])
+    async def switch_mode_slash(self, interaction: discord.Interaction, mode: app_commands.Choice[str]):
+        if not interaction.guild:
+            await interaction.response.send_message("Use this command in a server.", ephemeral=True)
+            return
+
+        locked_mode = os.getenv("BOT_MODE", "").lower()
+        if locked_mode in ("femboy", "tsundere", "oneesan"):
+            await interaction.response.send_message(
+                "🔒 Mode switching is disabled for this bot instance.\n"
+                f"This bot is locked to **{locked_mode}** mode.",
+                ephemeral=True,
+            )
+            return
+
+        mode_name = mode.value
+        target_mode = None
+        for mode_key, info in MODE_INFO.items():
+            if mode_name in info["aliases"] or mode_name == mode_key:
+                target_mode = mode_key
+                break
+
+        if not target_mode:
+            await interaction.response.send_message(
+                f"❌ Unknown mode: `{mode_name}`\nUse `/modes` to see available options!",
+                ephemeral=True,
+            )
+            return
+
+        current_mode = await get_server_mode(interaction.guild.id)
+        if current_mode == target_mode:
+            mode_info = MODE_INFO[target_mode]
+            await interaction.response.send_message(
+                f"{mode_info['emoji']} Already in **{mode_info['name']}** mode!"
+            )
+            return
+
+        await set_server_mode(interaction.guild.id, target_mode)
+        mode_info = MODE_INFO[target_mode]
+        confirmations = {
+            "mode_femboy": f"{mode_info['emoji']} Mode switched! Ehehe~ I'll be your cute little sibling now, Nii-chan! ♡",
+            "mode_tsundere": f"{mode_info['emoji']} F-fine! I switched modes... It's not like I wanted to or anything! Hmph!",
+            "mode_oneesan": f"{mode_info['emoji']} Ara ara~ Mode changed, my dear. Let me take care of you now~ 💕",
+        }
+        await interaction.response.send_message(confirmations.get(target_mode, f"{mode_info['emoji']} Mode switched!"))
     
     @commands.command(name="modes", aliases=["personalities", "personas"])
     async def show_modes(self, ctx: commands.Context):
@@ -208,6 +290,37 @@ class Social(commands.Cog):
         embed.set_footer(text="Manage Guild permission required to change modes")
         
         await ctx.send(embed=embed)
+
+    @app_commands.command(name="modes", description="List all available personality modes.")
+    async def show_modes_slash(self, interaction: discord.Interaction):
+        if not interaction.guild:
+            await interaction.response.send_message("Use this command in a server.", ephemeral=True)
+            return
+
+        current_mode = await get_server_mode(interaction.guild.id)
+        current_evil = await get_evil_mode(interaction.guild.id)
+
+        embed = discord.Embed(
+            title="🎭 Available Personality Modes",
+            description="Switch Femmy's personality with `/mode`",
+            color=discord.Color.from_rgb(255, 182, 193),
+        )
+
+        evil_status = "😈 **Evil Mode**: ON" if current_evil else "😇 **Evil Mode**: OFF"
+        embed.add_field(name="System Status", value=evil_status, inline=False)
+
+        for mode_key, info in MODE_INFO.items():
+            is_current = mode_key == current_mode
+            marker = " ← Current" if is_current else ""
+
+            embed.add_field(
+                name=f"{info['emoji']} {info['name']}{marker}",
+                value=f"{info['description']}\n*Aliases: {', '.join(info['aliases'])}*",
+                inline=False,
+            )
+
+        embed.set_footer(text="Manage Guild permission required to change modes")
+        await interaction.response.send_message(embed=embed)
     
     @commands.command(name="currentmode", aliases=["whatmode"])
     async def show_current_mode(self, ctx: commands.Context):
@@ -219,6 +332,22 @@ class Social(commands.Cog):
         evil_text = "\n😈 (Evil Mode Active)" if current_evil else ""
         
         await ctx.send(
+            f"{info['emoji']} Currently in **{info['name']}** mode!{evil_text}\n"
+            f"*{info['description']}*"
+        )
+
+    @app_commands.command(name="currentmode", description="Show the current personality mode.")
+    async def show_current_mode_slash(self, interaction: discord.Interaction):
+        if not interaction.guild:
+            await interaction.response.send_message("Use this command in a server.", ephemeral=True)
+            return
+
+        current_mode = await get_server_mode(interaction.guild.id)
+        current_evil = await get_evil_mode(interaction.guild.id)
+        info = MODE_INFO.get(current_mode, MODE_INFO["mode_femboy"])
+        evil_text = "\n😈 (Evil Mode Active)" if current_evil else ""
+
+        await interaction.response.send_message(
             f"{info['emoji']} Currently in **{info['name']}** mode!{evil_text}\n"
             f"*{info['description']}*"
         )

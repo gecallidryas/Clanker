@@ -107,6 +107,12 @@ class Femmy(commands.Bot):
                 logger.info("Loaded cog: %s", cog)
             except Exception as e:
                 logger.error("Failed to load cog %s: %s", cog, e, exc_info=True)
+
+        try:
+            await self.tree.sync()
+            logger.info("Slash commands synced.")
+        except Exception as e:
+            logger.error("Failed to sync slash commands: %s", e, exc_info=True)
     
     async def on_ready(self):
         """Called when the bot is connected and ready."""

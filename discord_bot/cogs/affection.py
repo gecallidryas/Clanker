@@ -25,6 +25,7 @@ Commands:
 
 import random
 import discord
+from discord import app_commands
 from discord.ext import commands, tasks
 
 from utils.db_handler import (
@@ -249,6 +250,53 @@ class Affection(commands.Cog):
         embed.set_thumbnail(url=target.display_avatar.url)
         
         await ctx.send(embed=embed)
+
+    @app_commands.command(name="affection", description="View your or another user's affection level.")
+    @app_commands.describe(member="User to check (optional)")
+    async def show_affection_slash(self, interaction: discord.Interaction, member: discord.Member = None):
+        if not interaction.guild:
+            await interaction.response.send_message("Affection is server-specific. Use this in a server.", ephemeral=True)
+            return
+
+        target = member or interaction.user
+        data = await get_affection(interaction.guild.id, target.id)
+
+        level = data["affection_level"]
+        points = data["affection_points"]
+        interactions = data["total_interactions"]
+        display = AFFECTION_DISPLAY.get(level, AFFECTION_DISPLAY["stranger"])
+
+        next_threshold = None
+        for min_pts, max_pts, lvl_name in AFFECTION_THRESHOLDS:
+            if lvl_name == level and max_pts != float("inf"):
+                next_threshold = max_pts
+                progress = (points - min_pts) / (max_pts - min_pts) * 100
+                break
+        else:
+            progress = 100
+
+        filled = int(progress // 10)
+        bar = "█" * filled + "░" * (10 - filled)
+
+        embed = discord.Embed(
+            title=f"{display['emoji']} {target.display_name}'s Affection",
+            color=display["color"],
+        )
+        embed.add_field(name="Level", value=f"**{display['title']}**", inline=True)
+        embed.add_field(name="Points", value=f"**{points:,}** pts", inline=True)
+        embed.add_field(name="Interactions", value=f"**{interactions:,}**", inline=True)
+
+        if next_threshold:
+            embed.add_field(
+                name="Progress to Next Level",
+                value=f"[{bar}] {progress:.1f}%\n{points}/{next_threshold}",
+                inline=False,
+            )
+        else:
+            embed.add_field(name="Progress", value="✨ Max Level Reached! ✨", inline=False)
+
+        embed.set_thumbnail(url=target.display_avatar.url)
+        await interaction.response.send_message(embed=embed)
     
     @commands.command(name="mood")
     async def show_mood(self, ctx: commands.Context):
@@ -285,6 +333,33 @@ class Affection(commands.Cog):
         embed.set_footer(text="Interact with me to improve my mood~ ♡")
         
         await ctx.send(embed=embed)
+
+    @app_commands.command(name="mood", description="Check the bot's current mood.")
+    async def show_mood_slash(self, interaction: discord.Interaction):
+        if not interaction.guild:
+            await interaction.response.send_message("Moods are server-specific. Use this in a server.", ephemeral=True)
+            return
+
+        mood_data = await get_mood(interaction.guild.id)
+        mode = await get_server_mode(interaction.guild.id)
+
+        mood = mood_data["mood"]
+        value = mood_data["mood_value"]
+        display = MOOD_DISPLAY.get(mood, MOOD_DISPLAY["neutral"])
+
+        message = MOOD_MESSAGES.get(mode, MOOD_MESSAGES["mode_femboy"]).get(mood, "I'm okay~")
+
+        filled = int(value // 10)
+        bar = "💖" * filled + "🖤" * (10 - filled)
+
+        embed = discord.Embed(
+            title=f"{display['emoji']} Current Mood",
+            description=message,
+            color=display["color"],
+        )
+        embed.add_field(name="Mood Level", value=f"[{bar}] {value}/100", inline=False)
+        embed.set_footer(text="Interact with me to improve my mood~ ♡")
+        await interaction.response.send_message(embed=embed)
     
     @commands.command(name="headpat", aliases=["pat", "pets"])
     async def headpat(self, ctx: commands.Context):
@@ -302,6 +377,20 @@ class Affection(commands.Cog):
         response = random.choice(responses)
         
         await ctx.send(response)
+
+    @app_commands.command(name="headpat", description="Give a headpat.")
+    async def headpat_slash(self, interaction: discord.Interaction):
+        if not interaction.guild:
+            await interaction.response.send_message("Use this command in a server.", ephemeral=True)
+            return
+
+        mode = await get_server_mode(interaction.guild.id)
+        await update_mood(interaction.guild.id, 5)
+        await add_affection(interaction.guild.id, interaction.user.id, 3)
+
+        responses = HEADPAT_RESPONSES.get(mode, HEADPAT_RESPONSES["mode_femboy"])
+        response = random.choice(responses)
+        await interaction.response.send_message(response)
     
     @commands.command(name="hug", aliases=["hugs"])
     async def hug(self, ctx: commands.Context):
@@ -319,6 +408,20 @@ class Affection(commands.Cog):
         response = random.choice(responses)
         
         await ctx.send(response)
+
+    @app_commands.command(name="hug", description="Give a hug.")
+    async def hug_slash(self, interaction: discord.Interaction):
+        if not interaction.guild:
+            await interaction.response.send_message("Use this command in a server.", ephemeral=True)
+            return
+
+        mode = await get_server_mode(interaction.guild.id)
+        await update_mood(interaction.guild.id, 5)
+        await add_affection(interaction.guild.id, interaction.user.id, 3)
+
+        responses = HUG_RESPONSES.get(mode, HUG_RESPONSES["mode_femboy"])
+        response = random.choice(responses)
+        await interaction.response.send_message(response)
     
     # ============================================
     # Listeners

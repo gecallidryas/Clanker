@@ -18,6 +18,7 @@ from io import BytesIO
 from typing import Optional
 
 import discord
+from discord import app_commands
 from discord.ext import commands
 from PIL import Image
 
@@ -133,6 +134,8 @@ Analyze the image and respond in character. Be helpful and engaging.
         Listen for messages with image attachments when mentioned.
         IMPORTANT: Check for image attachments FIRST before doing any processing.
         """
+        # Auto vision context handling lives in AIBrain to avoid double replies.
+        return
         # Ignore bots
         if message.author.bot:
             return
@@ -272,6 +275,44 @@ Analyze the image and respond in character. Be helpful and engaging.
         embed.set_thumbnail(url=attachment.url)
         
         await ctx.send(embed=embed)
+
+    @app_commands.command(name="describe", description="Describe an attached image.")
+    @app_commands.describe(prompt="Optional question about the image", image="Image attachment")
+    async def describe_image_slash(
+        self,
+        interaction: discord.Interaction,
+        image: discord.Attachment,
+        prompt: str = None
+    ):
+        if image.content_type not in SUPPORTED_FORMATS:
+            await interaction.response.send_message("Unsupported image format.", ephemeral=True)
+            return
+        if image.size > MAX_IMAGE_SIZE:
+            await interaction.response.send_message("Image too large! Maximum size is 10 MB.", ephemeral=True)
+            return
+
+        mode = await get_server_mode(interaction.guild.id) if interaction.guild else "mode_femboy"
+        if not await ai_limiter.acquire(interaction.user.id):
+            retry_after = ai_limiter.get_retry_after(interaction.user.id)
+            await interaction.response.send_message(get_rate_limit_message(mode, retry_after), ephemeral=True)
+            return
+
+        await interaction.response.defer()
+        image_bytes = await image.read()
+        response = await self.analyze_image(
+            image_bytes,
+            prompt or "",
+            mode,
+            interaction.user.display_name,
+        )
+
+        embed = discord.Embed(
+            title="Image Analysis",
+            description=response,
+            color=discord.Color.purple(),
+        )
+        embed.set_thumbnail(url=image.url)
+        await interaction.followup.send(embed=embed)
 
 
 async def setup(bot: commands.Bot):

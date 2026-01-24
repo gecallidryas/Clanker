@@ -19,6 +19,7 @@ from typing import Dict
 
 import pytz
 import discord
+from discord import app_commands
 from discord.ext import commands, tasks
 
 from utils.db_handler import (
@@ -53,7 +54,7 @@ class Scheduler(commands.Cog):
     
     def __init__(self, bot: commands.Bot):
         self.bot = bot
-        self.last_meal_check: Dict[int, datetime] = {}  # user_id -> last_check_time
+        self.last_meal_check: Dict[tuple[int, int], datetime] = {}  # (guild_id, user_id) -> last_check_time
         self.default_bump_channel_id = None
         raw_channel_id = os.getenv("BUMP_CHANNEL_ID", "").strip()
         if raw_channel_id:
@@ -149,68 +150,66 @@ class Scheduler(commands.Cog):
             - [ ] Customize meal check message
             - [ ] Track if user already responded today
         """
-        users = await get_users_with_timezone()
-        
-        for user_data in users:
-            user_id = user_data["user_id"]
-            timezone_str = user_data["timezone"]
-            
+        for guild in self.bot.guilds:
             try:
-                # Get user's local time
-                tz = pytz.timezone(timezone_str)
-                local_time = datetime.now(tz)
-                
-                # Check if it's 10 PM (22:00)
-                if local_time.hour != MEAL_CHECK_HOUR:
-                    continue
-                
-                # Prevent duplicate checks within the same hour
-                last_check = self.last_meal_check.get(user_id)
-                if last_check and (datetime.now() - last_check) < timedelta(hours=1):
-                    continue
-                
-                # Mark as checked
-                self.last_meal_check[user_id] = datetime.now()
-                
-                # Get discorduser
-                user = self.bot.get_user(user_id)
-                if not user:
-                    continue
-                
-                # Check if any of user's mutual servers are in onee-san mode
-                target_guild = None
-                for guild in user.mutual_guilds:
-                    mode = await get_server_mode(guild.id)
-                    if mode == "mode_oneesan":
-                        target_guild = guild
-                        break
-
-                if not target_guild:
+                mode = await get_server_mode(guild.id)
+                if mode != "mode_oneesan":
                     continue
 
-                # Send meal check DM
-                try:
-                    await user.send(
-                        f"Ara ara~ Good evening, {user.display_name}!\n\n"
-                        f"It's getting late, my dear. Have you eaten dinner yet? "
-                        f"You need your strength to grow properly~\n\n"
-                        f"Make sure to have something nutritious, okay? I worry about you!"
-                    )
-                except discord.Forbidden:
-                    ping_channel = self._select_ping_channel(target_guild)
-                    if not ping_channel:
-                        logger.warning("Cannot DM user %s - DMs disabled", user_id)
-                        continue
+                users = await get_users_with_timezone(guild.id)
+
+                for user_data in users:
+                    user_id = user_data["user_id"]
+                    timezone_str = user_data["timezone"]
 
                     try:
-                        await ping_channel.send(
-                            f"Ara ara~ {user.mention}, have you eaten dinner yet? "
-                            f"It's getting late, my dear. Please take care of yourself~"
-                        )
-                    except discord.Forbidden:
-                        logger.warning("Cannot ping user %s in %s", user_id, target_guild.name)
+                        # Get user's local time
+                        tz = pytz.timezone(timezone_str)
+                        local_time = datetime.now(tz)
+
+                        # Check if it's 10 PM (22:00)
+                        if local_time.hour != MEAL_CHECK_HOUR:
+                            continue
+
+                        # Prevent duplicate checks within the same hour
+                        last_key = (guild.id, user_id)
+                        last_check = self.last_meal_check.get(last_key)
+                        if last_check and (datetime.now() - last_check) < timedelta(hours=1):
+                            continue
+
+                        # Mark as checked
+                        self.last_meal_check[last_key] = datetime.now()
+
+                        member = guild.get_member(user_id)
+                        if not member:
+                            continue
+                        user = member
+
+                        # Send meal check DM
+                        try:
+                            await user.send(
+                                f"Ara ara~ Good evening, {user.display_name}!\n\n"
+                                f"It's getting late, my dear. Have you eaten dinner yet? "
+                                f"You need your strength to grow properly~\n\n"
+                                f"Make sure to have something nutritious, okay? I worry about you!"
+                            )
+                        except discord.Forbidden:
+                            ping_channel = self._select_ping_channel(guild)
+                            if not ping_channel:
+                                logger.warning("Cannot DM user %s - DMs disabled", user_id)
+                                continue
+
+                            try:
+                                await ping_channel.send(
+                                    f"Ara ara~ {user.mention}, have you eaten dinner yet? "
+                                    f"It's getting late, my dear. Please take care of yourself~"
+                                )
+                            except discord.Forbidden:
+                                logger.warning("Cannot ping user %s in %s", user_id, guild.name)
+                    except Exception as e:
+                        logger.error("Error in meal check for user %s: %s", user_id, e, exc_info=True)
             except Exception as e:
-                logger.error("Error in meal check for user %s: %s", user_id, e, exc_info=True)
+                logger.error("Error in meal check for guild %s: %s", guild.id, e, exc_info=True)
     
     @meal_check_loop.before_loop
     async def before_meal_check(self):
@@ -253,6 +252,36 @@ class Scheduler(commands.Cog):
         await set_bump_channel(ctx.guild.id, None)
         
         await ctx.send("✅ Bump reminders disabled!")
+
+    @app_commands.command(name="bumpchannel", description="Set the channel for bump reminders.")
+    @app_commands.checks.has_permissions(manage_guild=True)
+    @app_commands.describe(channel="Channel for bump reminders (optional)")
+    async def set_bump_channel_slash(
+        self,
+        interaction: discord.Interaction,
+        channel: discord.TextChannel = None
+    ):
+        if not interaction.guild:
+            await interaction.response.send_message("Use this command in a server.", ephemeral=True)
+            return
+        channel = channel or interaction.channel
+        if not isinstance(channel, discord.TextChannel):
+            await interaction.response.send_message("Please select a text channel.", ephemeral=True)
+            return
+        await set_bump_channel(interaction.guild.id, channel.id)
+        await interaction.response.send_message(
+            f"Bump reminders set to {channel.mention}!\n"
+            "I'll send reminders every 2 hours~"
+        )
+
+    @app_commands.command(name="bumpstop", description="Disable bump reminders.")
+    @app_commands.checks.has_permissions(manage_guild=True)
+    async def clear_bump_channel_slash(self, interaction: discord.Interaction):
+        if not interaction.guild:
+            await interaction.response.send_message("Use this command in a server.", ephemeral=True)
+            return
+        await set_bump_channel(interaction.guild.id, None)
+        await interaction.response.send_message("Bump reminders disabled!")
 
 
 async def setup(bot: commands.Bot):

@@ -12,9 +12,13 @@ Commands (Admin Only):
 """
 
 import discord
+import os
+from discord import app_commands
 from discord.ext import commands
 
 from utils.db_handler import (
+    set_gender_role,
+    delete_gender_role,
     reset_user_data,
     set_affection_value,
     get_user_full_profile,
@@ -27,11 +31,74 @@ from utils.logger import get_logger
 logger = get_logger(__name__)
 
 
+class ModelChangeModal(discord.ui.Modal):
+    """Modal to collect model name and admin password without exposing the password."""
+
+    def __init__(self, admin_password: str, default_model: str | None = None):
+        super().__init__(title="Change AI Model")
+        self.admin_password = admin_password
+        self.model_name = discord.ui.TextInput(
+            label="Model key",
+            placeholder="venice / hermes / deephermes / mistral / flash / flash-lite",
+            default=default_model or "",
+            max_length=100,
+        )
+        self.password = discord.ui.TextInput(
+            label="Admin password",
+            placeholder="Enter the admin password",
+            style=discord.TextStyle.short,
+            max_length=128,
+        )
+        self.add_item(self.model_name)
+        self.add_item(self.password)
+
+    async def on_submit(self, interaction: discord.Interaction):
+        if not self.admin_password or self.password.value != self.admin_password:
+            await interaction.response.send_message("Invalid admin password.", ephemeral=True)
+            return
+
+        from utils.api_manager import set_openrouter_model, set_gemini_model
+
+        model_key = self.model_name.value.strip()
+        try:
+            if set_openrouter_model(model_key):
+                await interaction.response.send_message(
+                    f"OpenRouter model set to `{model_key}`.",
+                    ephemeral=True,
+                )
+                return
+            if set_gemini_model(model_key):
+                await interaction.response.send_message(
+                    f"Gemini model set to `{model_key}`.",
+                    ephemeral=True,
+                )
+                return
+        except ValueError as exc:
+            await interaction.response.send_message(str(exc), ephemeral=True)
+            return
+
+        await interaction.response.send_message(
+            "Unknown model key. Check the configured model list.",
+            ephemeral=True,
+        )
+
+
 class Admin(commands.Cog):
     """Admin commands for user data management."""
+
+    admin_app_group = app_commands.Group(
+        name="admin",
+        description="Admin commands",
+    )
     
     def __init__(self, bot: commands.Bot):
         self.bot = bot
+
+    async def cog_load(self):
+        self.bot.tree.add_command(self.admin_app_group)
+
+    async def cog_unload(self):
+        self.bot.tree.remove_command(self.admin_app_group.name, type=self.admin_app_group.type)
     
     async def cog_check(self, ctx: commands.Context) -> bool:
         """Only allow admins to use these commands."""
@@ -199,6 +266,100 @@ class Admin(commands.Cog):
             f"**{points}** points (Level: {result['affection_level']})"
         )
         logger.info(f"Admin {ctx.author} set affection for {member} to {points}")
+
+    async def _slash_context(self, interaction: discord.Interaction) -> commands.Context:
+        return await commands.Context.from_interaction(interaction)
+
+    @admin_app_group.command(name="reset", description="Reset user data.")
+    @app_commands.checks.has_permissions(manage_guild=True)
+    @app_commands.describe(member="User to reset", reset_type="all, facts, affection, or aliases")
+    @app_commands.choices(reset_type=[
+        app_commands.Choice(name="all", value="all"),
+        app_commands.Choice(name="facts", value="facts"),
+        app_commands.Choice(name="affection", value="affection"),
+        app_commands.Choice(name="aliases", value="aliases"),
+    ])
+    async def reset_user_slash(
+        self,
+        interaction: discord.Interaction,
+        member: discord.Member,
+        reset_type: app_commands.Choice[str] = None
+    ):
+        ctx = await self._slash_context(interaction)
+        target = reset_type.value if reset_type else "all"
+        await self.reset_user(ctx, member=member, reset_type=target)
+
+    @admin_app_group.command(name="view", description="View a user's profile.")
+    @app_commands.checks.has_permissions(manage_guild=True)
+    @app_commands.describe(member="User to view")
+    async def view_user_slash(self, interaction: discord.Interaction, member: discord.Member):
+        ctx = await self._slash_context(interaction)
+        await self.view_user(ctx, member=member)
+
+    @admin_app_group.command(name="setfact", description="Add a fact for a user.")
+    @app_commands.checks.has_permissions(manage_guild=True)
+    @app_commands.describe(member="User", fact="Fact to store")
+    async def set_fact_slash(self, interaction: discord.Interaction, member: discord.Member, fact: str):
+        ctx = await self._slash_context(interaction)
+        await self.set_fact(ctx, member=member, fact=fact)
+
+    @admin_app_group.command(name="delfact", description="Delete a fact by ID.")
+    @app_commands.checks.has_permissions(manage_guild=True)
+    @app_commands.describe(member="User", fact_id="Fact ID")
+    async def del_fact_slash(self, interaction: discord.Interaction, member: discord.Member, fact_id: int):
+        ctx = await self._slash_context(interaction)
+        await self.del_fact(ctx, member=member, fact_id=fact_id)
+
+    @admin_app_group.command(name="affection", description="Set affection points for a user.")
+    @app_commands.checks.has_permissions(manage_guild=True)
+    @app_commands.describe(member="User", points="Affection points")
+    async def set_affection_slash(self, interaction: discord.Interaction, member: discord.Member, points: int):
+        ctx = await self._slash_context(interaction)
+        await self.set_affection(ctx, member=member, points=points)
+
+    @admin_app_group.command(name="model", description="Change the active AI model.")
+    @app_commands.checks.has_permissions(manage_guild=True)
+    @app_commands.describe(name="Model key (optional)")
+    async def set_model_slash(self, interaction: discord.Interaction, name: str = None):
+        admin_password = os.getenv("ADMIN_PASSWORD", "")
+        if not admin_password:
+            await interaction.response.send_message(
+                "ADMIN_PASSWORD is not configured.",
+                ephemeral=True,
+            )
+            return
+
+        await interaction.response.send_modal(ModelChangeModal(admin_password, default_model=name))
+
+    @app_commands.command(name="setgenderrole", description="Configure a gender role for this server.")
+    @app_commands.checks.has_permissions(manage_guild=True)
+    @app_commands.describe(role="Role to map", gender="male, female, or clear")
+    @app_commands.choices(gender=[
+        app_commands.Choice(name="male", value="male"),
+        app_commands.Choice(name="female", value="female"),
+        app_commands.Choice(name="clear", value="clear"),
+    ])
+    async def set_gender_role_slash(
+        self,
+        interaction: discord.Interaction,
+        role: discord.Role,
+        gender: app_commands.Choice[str],
+    ):
+        if not interaction.guild:
+            await interaction.response.send_message("Use this command in a server.", ephemeral=True)
+            return
+
+        if gender.value == "clear":
+            removed = await delete_gender_role(interaction.guild.id, role.id)
+            message = "Gender role mapping removed." if removed else "No mapping found for that role."
+            await interaction.response.send_message(message, ephemeral=True)
+            return
+
+        await set_gender_role(interaction.guild.id, role.id, gender.value)
+        await interaction.response.send_message(
+            f"Gender role mapping set: {role.mention} -> {gender.value}.",
+            ephemeral=True,
+        )
 
 
 async def setup(bot: commands.Bot):

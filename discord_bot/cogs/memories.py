@@ -18,6 +18,7 @@ Examples:
 import pytz
 from discord.ext import commands
 import discord
+from discord import app_commands
 
 from utils.db_handler import (
     set_timezone,
@@ -30,6 +31,22 @@ from utils.db_handler import (
     get_aliases,
     find_user_by_alias,
 )
+from utils.api_manager import get_gemini_summarize_manager, UserInputError
+from utils.logger import get_logger
+
+logger = get_logger(__name__)
+
+FACT_SUMMARY_PROMPT = """You are a database reconciler. Analyze the following user facts.
+If facts contradict (e.g., "User is X" and "User is not X"), delete both and replace with a neutral summary.
+Remove duplicates.
+Output a clean, bulleted list of current truths only.
+
+Facts:
+{existing_facts}
+
+New fact to add:
+{new_fact}
+"""
 
 
 class Memories(commands.Cog):
@@ -46,9 +63,46 @@ class Memories(commands.Cog):
         - [ ] Add export/import functionality
         - [ ] Limit maximum facts per user
     """
-    
+
     def __init__(self, bot: commands.Bot):
         self.bot = bot
+        try:
+            self.summarizer = get_gemini_summarize_manager()
+        except ValueError:
+            self.summarizer = None
+
+    def _parse_fact_summary(self, summary_text: str) -> list[str]:
+        facts = []
+        for line in summary_text.splitlines():
+            stripped = line.strip()
+            if not stripped:
+                continue
+            if stripped[0] in ("-", "*"):
+                stripped = stripped[1:].strip()
+            if not stripped:
+                continue
+            facts.append(stripped)
+        # Deduplicate while preserving order
+        return list(dict.fromkeys(facts))
+
+    async def _summarize_facts(self, existing: list[str], new_fact: str) -> list[str] | None:
+        if not self.summarizer:
+            return None
+
+        prompt = FACT_SUMMARY_PROMPT.format(
+            existing_facts="\n".join(f"- {fact}" for fact in existing) or "(none)",
+            new_fact=new_fact,
+        )
+        try:
+            summary, _ = await self.summarizer.generate(prompt)
+        except UserInputError:
+            return None
+        except Exception as exc:
+            logger.warning("Fact summarization failed: %s", exc)
+            return None
+
+        parsed = self._parse_fact_summary(summary)
+        return parsed or None
     
     @commands.command(name="set_timezone", aliases=["tz", "timezone"])
     async def set_user_timezone(self, ctx: commands.Context, *, timezone: str):
@@ -58,6 +112,10 @@ class Memories(commands.Cog):
         Args:
             timezone: IANA timezone string (e.g., "Asia/Dhaka") or abbreviation (e.g., "EST", "PST")
         """
+        if not ctx.guild:
+            await ctx.send("Please use this command in a server.")
+            return
+
         # Common timezone abbreviation mappings
         TIMEZONE_ALIASES = {
             # North America
@@ -128,7 +186,7 @@ class Memories(commands.Cog):
             return
         
         # Store timezone
-        await set_timezone(ctx.author.id, timezone)
+        await set_timezone(ctx.guild.id, ctx.author.id, timezone)
         
         # Get current time in that timezone
         from datetime import datetime
@@ -139,14 +197,58 @@ class Memories(commands.Cog):
             f"Your current time: `{current_time}`"
         )
     
+    def _extract_remember_target(self, ctx: commands.Context, fact: str) -> tuple[discord.Member, str]:
+        target = ctx.author
+        fact_text = fact.strip()
+        if ctx.message.mentions:
+            mention = ctx.message.mentions[0]
+            tokens = [f"<@{mention.id}>", f"<@!{mention.id}>"]
+            for token in tokens:
+                if fact_text.startswith(token):
+                    target = mention
+                    fact_text = fact_text[len(token):].strip()
+                    break
+        return target, fact_text
+
+    async def _remember_fact_for(self, ctx: commands.Context, target: discord.Member, fact: str) -> None:
+        if not ctx.guild:
+            await ctx.send("Facts are server-specific. Use this in a server.")
+            return
+
+        if len(fact) > 500:
+            await ctx.send("Fact too long! Please keep it under 500 characters.")
+            return
+
+        await create_user(ctx.guild.id, target.id)
+
+        existing = await get_facts(ctx.guild.id, target.id)
+        summarized = await self._summarize_facts(existing, fact) if existing else None
+
+        if summarized:
+            await delete_facts(ctx.guild.id, target.id)
+            for item in summarized:
+                await add_fact(ctx.guild.id, target.id, item)
+
+            await ctx.send(
+                f"Updated memory for {target.display_name} with {len(summarized)} fact(s)."
+            )
+            return
+
+        await add_fact(ctx.guild.id, target.id, fact)
+        target_text = f" for {target.display_name}" if target.id != ctx.author.id else ""
+
+        await ctx.send(
+            f"Got it! I'll remember that{target_text}."
+        )
+
     @commands.command(name="remember")
     async def remember_fact(self, ctx: commands.Context, *, fact: str):
         """
         Store a fact about yourself for AI context.
-        
+
         Args:
             fact: Any information you want Femmy to remember
-            
+
         TODO:
             - [ ] Check for duplicate facts
             - [ ] Implement fact limit (e.g., max 50)
@@ -156,21 +258,13 @@ class Memories(commands.Cog):
             await ctx.send("Facts are server-specific. Use this in a server.")
             return
 
-        if len(fact) > 500:
-            await ctx.send("❌ Fact too long! Please keep it under 500 characters.")
+        target, fact_text = self._extract_remember_target(ctx, fact)
+        if not fact_text:
+            await ctx.send("Please provide a fact to remember.")
             return
-        
-        # Ensure user exists
-        await create_user(ctx.author.id)
-        
-        # Store the fact
-        fact_id = await add_fact(ctx.guild.id, ctx.author.id, fact)
-        
-        await ctx.send(
-            f"📝 Got it! I'll remember that~ ♡\n"
-            f"Stored: *\"{fact}\"*"
-        )
-    
+
+        await self._remember_fact_for(ctx, target, fact_text)
+
     @commands.command(name="forget")
     async def forget_facts(self, ctx: commands.Context):
         """
@@ -204,7 +298,7 @@ class Memories(commands.Cog):
             await ctx.send("Profiles are server-specific. Use this in a server.")
             return
 
-        user = await get_user(ctx.author.id)
+        user = await get_user(ctx.guild.id, ctx.author.id)
         facts = await get_facts(ctx.guild.id, ctx.author.id)
         
         # Build embed
@@ -385,13 +479,18 @@ class Memories(commands.Cog):
         Usage:
             !birthday          - View your birthday
             !birthday @user    - View someone's birthday
-            !birthday set MM-DD - Set your birthday
+            !birthday set MM-DD - Set a birthday
+            !birthday set MM-DD @user - Set someone else's birthday
             !birthday upcoming  - See upcoming birthdays
         """
         from utils.db_handler import get_birthday
+
+        if not ctx.guild:
+            await ctx.send("Please use this command in a server.")
+            return
         
         target = member or ctx.author
-        bday = await get_birthday(target.id)
+        bday = await get_birthday(ctx.guild.id, target.id)
         
         if bday:
             month, day = bday.split("-")
@@ -407,16 +506,21 @@ class Memories(commands.Cog):
                 await ctx.send(f"📅 {target.display_name} hasn't set their birthday yet!")
     
     @birthday.command(name="set")
-    async def birthday_set(self, ctx: commands.Context, date: str):
+    async def birthday_set(self, ctx: commands.Context, date: str, member: discord.Member = None):
         """
-        Set your birthday (format: MM-DD).
+        Set a birthday (format: MM-DD).
         
         Examples:
             !birthday set 03-15  (March 15th)
             !birthday set 12-25  (December 25th)
+            !birthday set 03-15 @user
         """
         from utils.db_handler import set_birthday
         import re
+
+        if not ctx.guild:
+            await ctx.send("Please use this command in a server.")
+            return
         
         # Validate format
         if not re.match(r"^\d{2}-\d{2}$", date):
@@ -435,28 +539,34 @@ class Memories(commands.Cog):
             await ctx.send(f"❌ Invalid day for month {month:02d}!")
             return
         
-        await set_birthday(ctx.author.id, date)
+        target = member or ctx.author
+        await set_birthday(ctx.guild.id, target.id, date)
         
         month_name = [
             "", "January", "February", "March", "April", "May", "June",
             "July", "August", "September", "October", "November", "December"
         ][month]
         
-        await ctx.send(f"🎂 Birthday set to **{month_name} {day}**! I'll remember~ ♡")
+        target_text = target.display_name if target.id != ctx.author.id else "you"
+        await ctx.send(f"🎂 Birthday set to **{month_name} {day}** for {target_text}! I'll remember~ ♡")
     
     @birthday.command(name="upcoming")
     async def birthday_upcoming(self, ctx: commands.Context):
-        """See upcoming birthdays in the next 30 days."""
+        """See upcoming birthdays in the next 3 months."""
         from utils.db_handler import get_upcoming_birthdays
+
+        if not ctx.guild:
+            await ctx.send("Please use this command in a server.")
+            return
         
-        upcoming = await get_upcoming_birthdays(30)
+        upcoming = await get_upcoming_birthdays(ctx.guild.id, 90)
         
         if not upcoming:
-            await ctx.send("📅 No birthdays coming up in the next 30 days!")
+            await ctx.send("📅 No birthdays coming up in the next 3 months!")
             return
         
         embed = discord.Embed(
-            title="🎂 Upcoming Birthdays",
+            title="🎂 Upcoming Birthdays (Next 3 Months)",
             color=discord.Color.pink()
         )
         
@@ -480,6 +590,95 @@ class Memories(commands.Cog):
             )
         
         await ctx.send(embed=embed)
+
+    async def _slash_context(self, interaction: discord.Interaction) -> commands.Context:
+        return await commands.Context.from_interaction(interaction)
+
+    @app_commands.command(name="timezone", description="Set your timezone.")
+    @app_commands.describe(timezone="IANA timezone or abbreviation (e.g., Asia/Dhaka, EST)")
+    async def set_user_timezone_slash(self, interaction: discord.Interaction, timezone: str):
+        ctx = await self._slash_context(interaction)
+        await self.set_user_timezone(ctx, timezone=timezone)
+
+    @app_commands.command(name="remember", description="Save a fact about yourself.")
+    @app_commands.describe(fact="The fact to remember", member="User to store the fact for (optional)")
+    async def remember_fact_slash(self, interaction: discord.Interaction, fact: str, member: discord.Member = None):
+        ctx = await self._slash_context(interaction)
+        target = member or interaction.user
+        await self._remember_fact_for(ctx, target, fact)
+
+    @app_commands.command(name="forget", description="Clear your stored facts.")
+    async def forget_facts_slash(self, interaction: discord.Interaction):
+        ctx = await self._slash_context(interaction)
+        await self.forget_facts(ctx)
+
+    @app_commands.command(name="myinfo", description="View your stored timezone and facts.")
+    async def show_user_info_slash(self, interaction: discord.Interaction):
+        ctx = await self._slash_context(interaction)
+        await self.show_user_info(ctx)
+
+    @app_commands.command(name="aka", description="Add an alias for a user.")
+    @app_commands.describe(member="User to alias", alias="Alias name")
+    async def add_user_alias_slash(self, interaction: discord.Interaction, member: discord.Member, alias: str):
+        ctx = await self._slash_context(interaction)
+        await self.add_user_alias(ctx, member=member, alias=alias)
+
+    @app_commands.command(name="aliases", description="List aliases for a user.")
+    @app_commands.describe(member="User to list aliases for (optional)")
+    async def list_user_aliases_slash(self, interaction: discord.Interaction, member: discord.Member = None):
+        ctx = await self._slash_context(interaction)
+        await self.list_user_aliases(ctx, member=member)
+
+    @app_commands.command(name="whois", description="Find a user by alias.")
+    @app_commands.describe(alias="Alias to look up")
+    async def whois_alias_slash(self, interaction: discord.Interaction, alias: str):
+        ctx = await self._slash_context(interaction)
+        await self.whois_alias(ctx, alias=alias)
+
+    @app_commands.command(name="aboutuser", description="View facts about another user.")
+    @app_commands.describe(member="User to view facts for")
+    async def about_user_slash(self, interaction: discord.Interaction, member: discord.Member):
+        ctx = await self._slash_context(interaction)
+        await self.about_user(ctx, member=member)
+
+    @app_commands.command(name="birthday", description="View or set birthdays.")
+    @app_commands.describe(
+        action="view, set, or upcoming",
+        member="User to view or set (optional)",
+        date="MM-DD (required for set)",
+    )
+    @app_commands.choices(action=[
+        app_commands.Choice(name="view", value="view"),
+        app_commands.Choice(name="set", value="set"),
+        app_commands.Choice(name="upcoming", value="upcoming"),
+    ])
+    async def birthday_slash(
+        self,
+        interaction: discord.Interaction,
+        action: app_commands.Choice[str] = None,
+        date: str = None,
+        member: discord.Member = None,
+    ):
+        ctx = await self._slash_context(interaction)
+        action_value = action.value if action else "view"
+
+        if action_value == "view":
+            await self.birthday(ctx, member=member)
+            return
+
+        if action_value == "set":
+            if not date:
+                await interaction.response.send_message(
+                    "Please provide a date in MM-DD format.",
+                    ephemeral=True,
+                )
+                return
+            await self.birthday_set(ctx, date=date, member=member)
+            return
+
+        if action_value == "upcoming":
+            await self.birthday_upcoming(ctx)
+            return
 
 
 async def setup(bot: commands.Bot):

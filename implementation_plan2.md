@@ -252,18 +252,64 @@ New fact to add:
 
 ---
 
+## Phase 8: Auto Vision Processing (Images & GIFs)
+
+### Overview
+Automatically process images/GIFs attached to messages using Gemini Vision, injecting the description into the conversation context. **Removes the need for a separate `!describe` command.**
+
+### Detection Logic
+```python
+async def on_message(self, message):
+    # Check for image attachments
+    images = [a for a in message.attachments 
+              if a.content_type and a.content_type.startswith("image/")]
+    
+    if images:
+        # Download and process with Gemini Vision
+        descriptions = await self._process_images(images)
+        # Inject into prompt context
+        image_context = f"\n[User attached image(s): {descriptions}]\n"
+```
+
+### Image Processing Flow
+1. Detect image attachments in message
+2. Download image bytes (respect size limits)
+3. Send to Gemini Vision API with prompt: "Describe this image briefly"
+4. Inject description into conversation prompt
+5. Bot responds naturally referencing the image
+
+### GIF Handling
+- Extract first frame of GIF for analysis
+- Note in context: "[User attached a GIF: {description}]"
+
+### Configuration
+```env
+GEMINI_VISION_KEY=...           # Optional separate key for vision
+VISION_MAX_SIZE_MB=10           # Max image size to process
+VISION_ENABLED=true             # Toggle feature
+```
+
+### Files to Modify
+| File | Changes |
+|------|---------|
+| `cogs/ai_brain.py` | Remove `_has_image_attachment` early return, add `_process_images()` |
+| `cogs/vision.py` | **DELETE** or repurpose (no more !describe) |
+| `utils/api_manager.py` | Add vision-specific generate function |
+
+---
+
 ## 📁 Files to Modify
 
 | File | Changes |
 |------|---------|
 | `main.py` | Add CommandTree, sync slash commands |
-| `utils/api_manager.py` | Multi-model, multi-API clients |
+| `utils/api_manager.py` | Multi-model, multi-API clients, vision |
 | `utils/db_handler.py` | guild_id everywhere, gender_roles table |
-| `cogs/ai_brain.py` | Name triggers, gender in prompt |
+| `cogs/ai_brain.py` | Name triggers, gender in prompt, auto-vision |
 | `cogs/social.py` | Slash: /mode, /evil |
 | `cogs/affection.py` | Slash: /affection, /headpat, /hug |
 | `cogs/memories.py` | Slash: /remember, fact dedup |
-| `cogs/utilities.py` | Slash: /help, use bot.user.name |
+| `cogs/utilities.py` | Slash: /help, remove /describe |
 | `cogs/admin.py` | Slash: /admin group, /setgenderrole |
 | `.env.example` | New API keys |
 
@@ -276,3 +322,6 @@ New fact to add:
 - [ ] Name triggers work without @mention
 - [ ] Admin password protects model change
 - [ ] Gender roles detected correctly
+- [ ] Images in messages auto-described and referenced in response
+- [ ] GIFs processed (first frame)
+

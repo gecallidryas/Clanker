@@ -22,10 +22,11 @@ from pathlib import Path
 
 import aiohttp
 import discord
+from discord import app_commands
 from discord.ext import commands
 
 from utils.db_handler import get_server_mode, get_stats, increment_stat
-from utils.api_manager import get_gemini_manager
+from utils.api_manager import get_gemini_manager, get_gemini_translate_manager
 from utils.rate_limiter import ai_limiter, get_rate_limit_message
 from utils.logger import get_logger
 
@@ -78,8 +79,19 @@ class Utilities(commands.Cog):
     def __init__(self, bot: commands.Bot):
         self.bot = bot
         self.gemini = get_gemini_manager()
+        try:
+            self.translate_client = get_gemini_translate_manager()
+        except ValueError:
+            self.translate_client = None
         self.portfolio_url = os.getenv("PORTFOLIO_URL", "")
         self.start_time = datetime.now()
+
+    def _get_bot_name(self, mode: str) -> str:
+        if mode == "mode_oneesan":
+            return "Yumi"
+        if self.bot.user:
+            return self.bot.user.display_name
+        return "Femmy"
     
     # ============================================
     # Help Command
@@ -124,8 +136,9 @@ class Utilities(commands.Cog):
         # Show all commands
         intro = HELP_INTROS.get(mode, HELP_INTROS["mode_femboy"])
         
+        bot_name = self._get_bot_name(mode)
         embed = discord.Embed(
-            title="📚 Femmy's Commands",
+            title=f"📚 {bot_name}'s Commands",
             description=intro,
             color=discord.Color.pink()
         )
@@ -332,7 +345,8 @@ Text to translate:
 """
             
             try:
-                translation, _ = await self.gemini.generate(prompt)
+                client = self.translate_client or self.gemini
+                translation, _ = await client.generate(prompt)
                 translation = translation.strip()
             except RuntimeError:
                 await ctx.send("❌ Translation service busy, try again later!")
@@ -474,8 +488,10 @@ Provide a clear, bulleted summary:
     @commands.command(name="about", aliases=["info", "botinfo"])
     async def about(self, ctx: commands.Context):
         """Display information about the bot."""
+        mode = await get_server_mode(ctx.guild.id) if ctx.guild else "mode_femboy"
+        bot_name = self._get_bot_name(mode)
         embed = discord.Embed(
-            title="🤖 About Femmy",
+            title=f"🤖 About {bot_name}",
             description="An advanced AI Discord bot with multiple personalities!",
             color=discord.Color.pink()
         )
@@ -497,6 +513,112 @@ Provide a clear, bulleted summary:
         embed.set_footer(text="Powered by Gemini AI ♡")
         
         await ctx.send(embed=embed)
+
+    async def _slash_context(self, interaction: discord.Interaction) -> commands.Context:
+        return await commands.Context.from_interaction(interaction)
+
+    @app_commands.command(name="help", description="Show help for commands.")
+    @app_commands.describe(command_name="Specific command to show help for")
+    async def custom_help_slash(self, interaction: discord.Interaction, command_name: str = None):
+        ctx = await self._slash_context(interaction)
+        await self.custom_help(ctx, command_name=command_name)
+
+    @app_commands.command(name="stats", description="Display bot statistics.")
+    async def show_stats_slash(self, interaction: discord.Interaction):
+        ctx = await self._slash_context(interaction)
+        await self.show_stats(ctx)
+
+    @app_commands.command(name="reload", description="Reload a cog or all cogs (owner only).")
+    @app_commands.describe(cog_name="Cog name or 'all'")
+    @app_commands.checks.is_owner()
+    async def reload_cog_slash(self, interaction: discord.Interaction, cog_name: str = None):
+        ctx = await self._slash_context(interaction)
+        await self.reload_cog(ctx, cog_name=cog_name)
+
+    @app_commands.command(name="translate", description="Translate text to another language.")
+    @app_commands.describe(query="Text and target language, e.g. 'hello to japanese'")
+    async def translate_slash(self, interaction: discord.Interaction, query: str):
+        ctx = await self._slash_context(interaction)
+        await self.translate(ctx, query=query)
+
+    @app_commands.command(name="tldr", description="Summarize the last N messages.")
+    @app_commands.describe(count="Number of messages to summarize (5-100)")
+    async def summarize_messages_slash(self, interaction: discord.Interaction, count: int = 50):
+        if count < 5:
+            await interaction.response.send_message("Need at least 5 messages to summarize!", ephemeral=True)
+            return
+        if count > 100:
+            count = 100
+
+        mode = await get_server_mode(interaction.guild.id) if interaction.guild else "mode_femboy"
+        if not await ai_limiter.acquire(interaction.user.id):
+            retry_after = ai_limiter.get_retry_after(interaction.user.id)
+            await interaction.response.send_message(get_rate_limit_message(mode, retry_after), ephemeral=True)
+            return
+
+        await interaction.response.defer()
+        messages = []
+        channel = interaction.channel
+        if channel is None:
+            await interaction.followup.send("Can't access channel history.")
+            return
+
+        async for message in channel.history(limit=count, before=interaction.created_at):
+            if not message.author.bot:
+                messages.append(f"{message.author.display_name}: {message.content}")
+
+        if len(messages) < 5:
+            await interaction.followup.send("Not enough non-bot messages to summarize!")
+            return
+
+        conversation_text = "\n".join(reversed(messages))
+        prompt = f"""
+Summarize the following Discord conversation in a concise, easy-to-read format.
+Highlight key topics, decisions, and any action items.
+Keep the summary under 300 words.
+
+Conversation:
+{conversation_text}
+
+Provide a clear, bulleted summary:
+"""
+        try:
+            summary, _ = await self.gemini.generate(prompt)
+        except RuntimeError:
+            await interaction.followup.send("Summary service busy, try again later!")
+            return
+        except Exception as e:
+            await interaction.followup.send(f"Error generating summary: {e}")
+            return
+
+        embed = discord.Embed(
+            title=f"TL;DR - Last {len(messages)} messages",
+            description=summary,
+            color=discord.Color.blue(),
+        )
+        embed.set_footer(text=f"Requested by {interaction.user.display_name}")
+        await interaction.followup.send(embed=embed)
+
+        try:
+            await increment_stat("messages_processed")
+        except Exception as e:
+            logger.warning("Failed to increment messages_processed: %s", e)
+
+    @app_commands.command(name="portfolio", description="Check if a website is up.")
+    @app_commands.describe(url="URL to check (optional)")
+    async def check_portfolio_slash(self, interaction: discord.Interaction, url: str = None):
+        ctx = await self._slash_context(interaction)
+        await self.check_portfolio(ctx, url=url)
+
+    @app_commands.command(name="ping", description="Check bot latency.")
+    async def ping_slash(self, interaction: discord.Interaction):
+        ctx = await self._slash_context(interaction)
+        await self.ping(ctx)
+
+    @app_commands.command(name="about", description="Display information about the bot.")
+    async def about_slash(self, interaction: discord.Interaction):
+        ctx = await self._slash_context(interaction)
+        await self.about(ctx)
 
 
 async def setup(bot: commands.Bot):
