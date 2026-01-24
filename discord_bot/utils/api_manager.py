@@ -416,7 +416,9 @@ def get_gemini_manager() -> GeminiManager:
 # OpenRouter Integration (Uncensored Models)
 # ============================================
 
-OPENROUTER_BASE_URL = "https://openrouter.ai/api/v1/chat/completions"
+from openai import AsyncOpenAI
+
+OPENROUTER_BASE_URL = "https://openrouter.ai/api/v1"
 
 # Available uncensored models
 # venice/hermes = free tier (rate limited), deepseek = paid (no limits)
@@ -429,22 +431,32 @@ OPENROUTER_MODELS = {
 
 class OpenRouterManager:
     """
-    OpenRouter API manager for uncensored AI models.
+    OpenRouter API manager using OpenAI SDK for compatibility.
     
-    Supports Venice Uncensored and Nous Hermes 3 405B.
+    Supports Venice Uncensored, Nous Hermes 3 405B, and DeepSeek.
     """
     
     def __init__(self):
         self.api_key = os.getenv("OPENROUTER_API_KEY")
         self.model = os.getenv("OPENROUTER_MODEL", "venice")
-        self.timeout = 60
         
-        if not self.api_key:
+        if self.api_key:
+            self.client = AsyncOpenAI(
+                base_url=OPENROUTER_BASE_URL,
+                api_key=self.api_key,
+                default_headers={
+                    "HTTP-Referer": "https://github.com/gecallidryas/femboi",
+                    "X-Title": "Femmy Discord Bot"
+                }
+            )
+            logger.info(f"OpenRouter initialized with model: {self.model}")
+        else:
+            self.client = None
             logger.warning("OPENROUTER_API_KEY not set - uncensored mode unavailable")
     
     def is_available(self) -> bool:
         """Check if OpenRouter is configured."""
-        return bool(self.api_key)
+        return self.client is not None
     
     def get_model_id(self) -> str:
         """Get the full model ID for API calls."""
@@ -460,55 +472,28 @@ class OpenRouterManager:
         Returns:
             Tuple of (response_text, model_used)
         """
-        if not self.api_key:
+        if not self.client:
             raise RuntimeError("OpenRouter API key not configured")
         
         model_id = self.get_model_id()
         
-        headers = {
-            "Authorization": f"Bearer {self.api_key}",
-            "Content-Type": "application/json",
-            "HTTP-Referer": "https://github.com/gecallidryas/femboi",
-            "X-Title": "Femmy Discord Bot"
-        }
-        
-        payload = {
-            "model": model_id,
-            "messages": [
-                {"role": "user", "content": prompt}
-            ],
-            "max_tokens": 2048,
-            "temperature": 0.8
-        }
-        
         try:
-            async with aiohttp.ClientSession() as session:
-                async with session.post(
-                    OPENROUTER_BASE_URL,
-                    headers=headers,
-                    json=payload,
-                    timeout=aiohttp.ClientTimeout(total=self.timeout)
-                ) as response:
-                    if response.status != 200:
-                        error_text = await response.text()
-                        logger.error(f"OpenRouter error {response.status}: {error_text}")
-                        raise RuntimeError(f"OpenRouter API error: {response.status}")
-                    
-                    data = await response.json()
-                    
-                    if "choices" in data and len(data["choices"]) > 0:
-                        content = data["choices"][0]["message"]["content"]
-                        logger.info(f"Generated response using OpenRouter ({model_id})")
-                        return content, model_id
-                    else:
-                        raise RuntimeError("OpenRouter returned empty response")
-                        
-        except asyncio.TimeoutError:
-            logger.error("OpenRouter request timed out")
-            raise RuntimeError("OpenRouter request timed out")
+            response = await self.client.chat.completions.create(
+                model=model_id,
+                messages=[
+                    {"role": "user", "content": prompt}
+                ],
+                max_tokens=2048,
+                temperature=0.8
+            )
+            
+            content = response.choices[0].message.content
+            logger.info(f"Generated response using OpenRouter ({model_id})")
+            return content, model_id
+            
         except Exception as e:
             logger.error(f"OpenRouter error: {e}")
-            raise
+            raise RuntimeError(f"OpenRouter API error: {e}")
 
 
 # Global OpenRouter instance

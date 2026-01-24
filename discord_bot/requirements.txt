@@ -24,3 +24,6 @@ psutil>=5.9.0
 
 # Image processing for vision
 Pillow>=10.0.0
+
+# OpenAI SDK (used for OpenRouter API compatibility)
+openai>=1.0.0
