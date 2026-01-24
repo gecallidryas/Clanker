@@ -681,6 +681,109 @@ class Memories(commands.Cog):
             return
 
 
+    # ============================================
+    # User Profile Analysis
+    # ============================================
+
+    @app_commands.command(name="analyze", description="Get a fun, AI-generated summary of someone's personality based on their messages.")
+    @app_commands.describe(member="User to analyze (default: yourself)")
+    async def analyze_user(self, interaction: discord.Interaction, member: discord.Member = None):
+        """Analyze a user's message history and generate a character summary."""
+        if not interaction.guild:
+            await interaction.response.send_message("Use this command in a server.", ephemeral=True)
+            return
+
+        target = member or interaction.user
+        
+        # Defer response since this takes time
+        await interaction.response.defer(thinking=True)
+
+        try:
+            # Import profile manager
+            from utils.api_manager import get_gemini_profile_manager, UserInputError
+            try:
+                profile_manager = get_gemini_profile_manager()
+            except ValueError:
+                await interaction.followup.send(
+                    "Profile analysis not configured. Ask admin to set GEMINI_PROFILE_KEY.",
+                    ephemeral=True
+                )
+                return
+
+            # Collect messages from all channels the bot can see
+            messages = []
+            for channel in interaction.guild.text_channels:
+                try:
+                    async for msg in channel.history(limit=500):
+                        if msg.author.id == target.id and msg.content.strip():
+                            messages.append(msg.content[:200])
+                            if len(messages) >= 500:
+                                break
+                    if len(messages) >= 500:
+                        break
+                except Exception:
+                    continue
+
+            if len(messages) < 10:
+                await interaction.followup.send(
+                    f"Not enough messages for {target.display_name}. Need 10, found {len(messages)}.",
+                    ephemeral=True
+                )
+                return
+
+            # Get saved facts
+            facts = await get_facts(interaction.guild.id, target.id)
+            facts_text = "
+".join(f"- {fact}" for fact in facts) if facts else "(no saved facts)"
+
+            # Build the analysis prompt
+            sample_messages = messages[:100]
+            messages_text = "
+".join(f"- {msg}" for msg in sample_messages)
+
+            prompt = f"""You are a witty personality analyst. Based on these messages and facts about a Discord user, write a hilarious, thought-provoking character analysis.
+
+Be creative and make interesting observations about:
+- Communication style
+- Likely interests/hobbies
+- Personality quirks
+- What they might be like IRL
+- A funny "warning label" for them
+- A creative nickname
+
+Keep it playful, not mean. Use emojis. Be creative!
+
+=== FACTS ===
+{facts_text}
+
+=== MESSAGES ({len(sample_messages)}/{len(messages)}) ===
+{messages_text}
+
+Write the analysis:"""
+
+            try:
+                response, _ = await profile_manager.generate(prompt)
+            except UserInputError:
+                await interaction.followup.send("Could not analyze - content may be sensitive.", ephemeral=True)
+                return
+
+            embed = discord.Embed(
+                title=f"Character Analysis: {target.display_name}",
+                description=response[:4000] if len(response) > 4000 else response,
+                color=discord.Color.purple()
+            )
+            embed.set_thumbnail(url=target.display_avatar.url)
+            embed.set_footer(text=f"Based on {len(messages)} messages | By {interaction.user.display_name}")
+
+            await interaction.followup.send(embed=embed)
+
+        except Exception as e:
+            logger.error("Error in analyze: %s", e, exc_info=True)
+            await interaction.followup.send("Something went wrong. Try again later.", ephemeral=True)
+
+
+
+
 async def setup(bot: commands.Bot):
     """Load the Memories cog."""
     await bot.add_cog(Memories(bot))

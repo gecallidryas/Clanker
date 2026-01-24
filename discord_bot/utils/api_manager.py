@@ -920,3 +920,15 @@ def get_gemini_summarize_manager() -> GeminiSingleKeyManager:
     if _summarize_manager is None:
         _summarize_manager = GeminiSingleKeyManager("GEMINI_SUMMARIZE_KEY")
     return _summarize_manager
+
+
+_profile_manager: Optional[GeminiSingleKeyManager] = None
+
+
+def get_gemini_profile_manager() -> GeminiSingleKeyManager:
+    """Get or create the Gemini manager for user profile analysis."""
+    global _profile_manager
+    if _profile_manager is None:
+        _profile_manager = GeminiSingleKeyManager("GEMINI_PROFILE_KEY")
+    return _profile_manager
+

@@ -576,6 +576,67 @@ async def set_bump_channel(guild_id: int, channel_id: int) -> None:
         await db.commit()
 
 
+
+async def _ensure_bump_columns():
+    """Ensure bump_enabled and last_bump_time columns exist (migration)."""
+    async with aiosqlite.connect(DATABASE_PATH) as db:
+        async with db.execute("PRAGMA table_info(server_config)") as cursor:
+            columns = {row[1] for row in await cursor.fetchall()}
+        
+        if "bump_enabled" not in columns:
+            await db.execute("ALTER TABLE server_config ADD COLUMN bump_enabled INTEGER DEFAULT 0")
+        if "last_bump_time" not in columns:
+            await db.execute("ALTER TABLE server_config ADD COLUMN last_bump_time TIMESTAMP")
+        await db.commit()
+
+
+async def get_bump_config(guild_id: int) -> dict:
+    """Get full bump configuration for a server."""
+    await _ensure_bump_columns()
+    async with aiosqlite.connect(DATABASE_PATH) as db:
+        async with db.execute(
+            "SELECT bump_channel_id, bump_enabled, last_bump_time FROM server_config WHERE guild_id = ?",
+            (guild_id,)
+        ) as cursor:
+            row = await cursor.fetchone()
+            if row:
+                return {
+                    "channel_id": row[0],
+                    "enabled": bool(row[1]) if row[1] is not None else False,
+                    "last_bump_time": datetime.fromisoformat(row[2]) if row[2] else None
+                }
+            return {"channel_id": None, "enabled": False, "last_bump_time": None}
+
+
+async def set_bump_enabled(guild_id: int, enabled: bool) -> None:
+    """Enable or disable bump reminders for a server."""
+    await _ensure_bump_columns()
+    async with aiosqlite.connect(DATABASE_PATH) as db:
+        await db.execute("""
+            INSERT INTO server_config (guild_id, bump_enabled, updated_at)
+            VALUES (?, ?, ?)
+            ON CONFLICT(guild_id) DO UPDATE SET 
+                bump_enabled = ?,
+                updated_at = ?
+        """, (guild_id, int(enabled), datetime.now(), int(enabled), datetime.now()))
+        await db.commit()
+
+
+async def set_last_bump_time(guild_id: int, bump_time: datetime = None) -> None:
+    """Set the last bump time for a server."""
+    await _ensure_bump_columns()
+    bump_time = bump_time or datetime.now()
+    async with aiosqlite.connect(DATABASE_PATH) as db:
+        await db.execute("""
+            INSERT INTO server_config (guild_id, last_bump_time, updated_at)
+            VALUES (?, ?, ?)
+            ON CONFLICT(guild_id) DO UPDATE SET 
+                last_bump_time = ?,
+                updated_at = ?
+        """, (guild_id, bump_time.isoformat(), datetime.now(), bump_time.isoformat(), datetime.now()))
+        await db.commit()
+
+
 # ============================================
 # Affection System Operations
 # ============================================
