@@ -537,18 +537,21 @@ OPENROUTER_BASE_URL = "https://openrouter.ai/api/v1"
 # Available uncensored models
 # venice/hermes = free tier (rate limited), deepseek = paid (no limits)
 OPENROUTER_MODELS = {
-    # Default aliases
-    "venice": "nousresearch/hermes-3-llama-3.1-405b:free",  # Fallback since Venice edition 404s
+    # Aliases
+    "venice": "venice/uncensored:free",
     "hermes": "nousresearch/hermes-3-llama-3.1-405b:free",
     "dolphin": "cognitivecomputations/dolphin-mixtral-8x7b",
-    
-    # Full IDs
-    "nousresearch/hermes-3-llama-3.1-405b:free": "nousresearch/hermes-3-llama-3.1-405b:free",
-    "cognitivecomputations/dolphin-mixtral-8x7b": "cognitivecomputations/dolphin-mixtral-8x7b",
-    
     "deephermes": "nousresearch/deephermes-3-mistral-24b-preview",
     "mistral": "mistralai/mistral-small-3.1-24b-instruct:free",
     "deepseek": "deepseek/deepseek-chat",
+
+    # Full IDs (for direct use or fallback lists)
+    "venice/uncensored:free": "venice/uncensored:free",
+    "nousresearch/hermes-3-llama-3.1-405b:free": "nousresearch/hermes-3-llama-3.1-405b:free",
+    "cognitivecomputations/dolphin-mixtral-8x7b": "cognitivecomputations/dolphin-mixtral-8x7b",
+    "nousresearch/deephermes-3-mistral-24b-preview": "nousresearch/deephermes-3-mistral-24b-preview",
+    "mistralai/mistral-small-3.1-24b-instruct:free": "mistralai/mistral-small-3.1-24b-instruct:free",
+    "deepseek/deepseek-chat": "deepseek/deepseek-chat",
 }
 
 
@@ -798,22 +801,38 @@ class OpenRouterManager:
                 cooldown_seconds = max(cooldown_seconds, retry_after)
             state.mark_cooldown(cooldown_seconds)
 
-    async def _create_completion(self, model_id: str, prompt: str):
+    async def _create_completion(self, model_id: str, prompt: str, fallbacks: List[str] = None):
+        """Create completion with optional server-side fallback."""
+        extra_body = {}
+        if fallbacks:
+            # OpenRouter server-side fallback - more reliable than client-side
+            extra_body["models"] = [model_id, *fallbacks]
+        
         return await self.client.chat.completions.create(
             model=model_id,
             messages=[{"role": "user", "content": prompt}],
             max_tokens=self.max_tokens,
             temperature=self.temperature,
-            timeout=self.request_timeout
+            timeout=self.request_timeout,
+            extra_body=extra_body if extra_body else None
         )
 
     def _extract_content(self, response) -> str:
+        """Extract content with improved error detection."""
         if not response or not getattr(response, "choices", None):
             raise RuntimeError("OpenRouter returned no choices")
-        message = response.choices[0].message
-        content = message.content if message else None
+
+        choice = response.choices[0]
+        finish_reason = getattr(choice, "finish_reason", None)
+        
+        # Check for error finish reason (OpenRouter can embed errors in responses)
+        if finish_reason == "error":
+            raise RuntimeError(f"OpenRouter finish_reason=error: {choice}")
+        
+        message = getattr(choice, "message", None)
+        content = getattr(message, "content", None) if message else None
         if not content:
-            raise RuntimeError("OpenRouter returned empty response content")
+            raise RuntimeError(f"OpenRouter returned empty content (finish_reason={finish_reason})")
         return content
     
     async def generate(self, prompt: str) -> tuple[str, str]:
@@ -835,8 +854,9 @@ class OpenRouterManager:
 
         for attempt in range(max_attempts):
             model_id = self._pick_model(candidates)
+            fallbacks = [m for m in candidates if m != model_id]
             try:
-                response = await self._create_completion(model_id, prompt)
+                response = await self._create_completion(model_id, prompt, fallbacks)
                 content = self._extract_content(response)
                 self._model_states[model_id].mark_success()
                 logger.info("Generated response using OpenRouter (%s)", model_id)
