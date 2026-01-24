@@ -34,6 +34,7 @@ from utils.db_handler import (
     increment_stat,
     get_affection,
     get_evil_mode,
+    get_strict_alias,
     get_gender_roles,
     get_user,
     get_last_wellbeing_date,
@@ -561,7 +562,10 @@ class AIBrain(commands.Cog):
         if last_date == date_str:
             return "", None
 
-        return "Ask the user how they are doing today. Keep it brief.", date_str
+        return (
+            "Ask exactly one brief question about their wellbeing or whether they've eaten today.",
+            date_str
+        )
 
     async def get_user_gender(
         self,
@@ -606,7 +610,9 @@ class AIBrain(commands.Cog):
         message: str, 
         context: str,
         member: Optional[discord.Member] = None,
-        wellbeing_prompt: str = ""
+        wellbeing_prompt: str = "",
+        affection_data: Optional[Dict[str, int]] = None,
+        allow_evil: bool = True
     ) -> str:
         """
         Build the full prompt for Gemini.
@@ -623,7 +629,7 @@ class AIBrain(commands.Cog):
         """
         # Get current persona mode
         mode = await get_server_mode(guild_id)
-        evil_mode = await get_evil_mode(guild_id)
+        evil_mode = allow_evil and await get_evil_mode(guild_id)
         persona = self._load_persona(mode, evil_mode)
         
         # Get user facts (Current speaker)
@@ -650,7 +656,8 @@ class AIBrain(commands.Cog):
             facts_section = f"\n\nThings you know about the users:\n" + "\n".join(facts_list)
         
         # Get affection level for behavior adjustment
-        affection_data = await get_affection(guild_id, user_id)
+        if affection_data is None:
+            affection_data = await get_affection(guild_id, user_id)
         affection_level = affection_data.get("affection_level", "stranger")
         affection_points = affection_data.get("affection_points", 0)
 
@@ -669,6 +676,21 @@ class AIBrain(commands.Cog):
         else:
             gender_note = f"[User Gender: {gender}. Use matching pronouns/honorifics.]"
         
+        # Addressing preferences for Femmy
+        address_note = ""
+        if mode == "mode_femboy":
+            strict_alias = await get_strict_alias(guild_id, user_id)
+            if strict_alias:
+                address_note = (
+                    f"[Name preference: {strict_alias}. Address the user exactly as \"{strict_alias}\". "
+                    "Do NOT use Master/Mistress or other honorifics.]"
+                )
+            elif affection_points > 800:
+                honorific = "Master"
+                if gender == "female":
+                    honorific = "Mistress"
+                address_note = f"[Addressing: Call the user {honorific}.]"
+
         # Affection prompts that gate compliance and warmth
         affection_prompts = {
             "stranger": """This user is a STRANGER (0-49 affection points).
@@ -726,6 +748,12 @@ You can explain these commands to the user if asked:
             if emojis:
                 emoji_section = f"\n\n=== SERVER EMOJIS ===\nYou can use these server emojis naturally in your responses:\n{emojis}\n"
 
+        wellbeing_note = (
+            f"[Wellbeing check: YES. {wellbeing_prompt}]"
+            if wellbeing_prompt
+            else "[Wellbeing check: NO. Do NOT ask about wellbeing, meals, or sleep today.]"
+        )
+
         # Build full prompt
         prompt = f"""
 {persona}
@@ -738,7 +766,8 @@ IMPORTANT: Your warmth, compliance, and willingness to help MUST match the affec
 Low affection = reserved, won't agree to demands. High affection = eager to please.
 
 {gender_note}
-{wellbeing_prompt}
+{address_note}
+{wellbeing_note}
 
 {commands_help}{emoji_section}
 {facts_section}
@@ -753,18 +782,19 @@ Respond naturally in character. Keep responses concise.
 """
         return prompt
     
-    async def generate_response(self, prompt: str, guild_id: int = None) -> str:
+    async def generate_response(self, prompt: str, guild_id: int = None, allow_evil: bool = True) -> str:
         """
         Generate a response using the appropriate AI provider.
         
         Args:
             prompt: The text prompt
             guild_id: Discord server ID (to check for evil mode)
+            allow_evil: Whether uncensored mode is allowed for this user
         """
         # Check for evil (uncensored) mode
         evil_mode = False
         if guild_id:
-            evil_mode = await get_evil_mode(guild_id)
+            evil_mode = allow_evil and await get_evil_mode(guild_id)
             
         try:
             if evil_mode and self.openrouter.is_available():
@@ -875,6 +905,10 @@ Respond naturally in character. Keep responses concise.
             )
             return
 
+        affection_data = await get_affection(message.guild.id, message.author.id)
+        affection_points = affection_data.get("affection_points", 0)
+        allow_evil = affection_points >= 500
+
         wellbeing_prompt, wellbeing_date = await self._get_wellbeing_prompt(
             message.author,
             message.guild.id,
@@ -895,10 +929,16 @@ Respond naturally in character. Keep responses concise.
                 content_for_prompt,
                 context.get_context(),
                 member=message.author,
-                wellbeing_prompt=wellbeing_prompt
+                wellbeing_prompt=wellbeing_prompt,
+                affection_data=affection_data,
+                allow_evil=allow_evil
             )
             
-            response = await self.generate_response(prompt, message.guild.id)
+            response = await self.generate_response(
+                prompt,
+                message.guild.id,
+                allow_evil=allow_evil
+            )
             
         sent = await message.reply(response, mention_author=False)
 

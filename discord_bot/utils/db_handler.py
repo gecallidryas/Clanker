@@ -956,6 +956,30 @@ async def get_aliases(guild_id: int, user_id: int) -> List[str]:
             return [row[0] for row in rows]
 
 
+async def get_strict_alias(guild_id: int, user_id: int) -> Optional[str]:
+    """
+    Get a strict alias for a user (self-set).
+
+    Strict alias format: "strict:<name>".
+    """
+    async with aiosqlite.connect(DATABASE_PATH) as db:
+        async with db.execute(
+            """SELECT alias FROM user_aliases
+               WHERE guild_id = ? AND user_id = ? AND added_by_user_id = ?
+                 AND alias LIKE ? COLLATE NOCASE
+               ORDER BY id ASC LIMIT 1""",
+            (guild_id, user_id, user_id, "strict:%")
+        ) as cursor:
+            row = await cursor.fetchone()
+            if not row:
+                return None
+            alias = row[0]
+
+    _, _, name = alias.partition(":")
+    name = name.strip()
+    return name or None
+
+
 async def find_user_by_alias(guild_id: int, alias: str) -> Optional[int]:
     """Find a user ID by their alias (case-insensitive)."""
     async with aiosqlite.connect(DATABASE_PATH) as db:
