@@ -539,8 +539,10 @@ OPENROUTER_BASE_URL = "https://openrouter.ai/api/v1"
 OPENROUTER_MODELS = {
     "venice": "cognitivecomputations/dolphin-mistral-24b-venice-edition:free",
     "hermes": "nousresearch/hermes-3-llama-3.1-405b:free",
+    "nousresearch/hermes-3-llama-3.1-405b:free": "nousresearch/hermes-3-llama-3.1-405b:free",
     "deephermes": "nousresearch/deephermes-3-mistral-24b-preview",
     "mistral": "mistralai/mistral-small-3.1-24b-instruct:free",
+    "mistralai/mistral-small-3.1-24b-instruct:free": "mistralai/mistral-small-3.1-24b-instruct:free",
     "deepseek": "deepseek/deepseek-chat",
 }
 
@@ -931,4 +933,3 @@ def get_gemini_profile_manager() -> GeminiSingleKeyManager:
     if _profile_manager is None:
         _profile_manager = GeminiSingleKeyManager("GEMINI_PROFILE_KEY")
     return _profile_manager
-
