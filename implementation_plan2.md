@@ -64,6 +64,8 @@ Major enhancement covering slash commands, server isolation, multi-model support
 | `/admin model <name> <password>` | Change AI model (password: gayboi123) |
 | `/setgenderrole <@role> <gender>` | Configure gender roles |
 
+> ⚠️ **Security**: Password argument must be `ephemeral=True` so other users don't see it in chat.
+
 ---
 
 ## Phase 2: Server Isolation
@@ -101,33 +103,40 @@ CREATE TABLE gender_roles (
 
 ---
 
-## Phase 3.5: Gender Confusion (Hard-Coded Check)
+## Phase 3.5: Gender Detection Pipeline
 
-### Requirement
-Bot must express "confusion" about gender BEFORE calling the LLM if user has no gender roles.
-
-### Implementation
+### Flow (BEFORE LLM call)
 ```python
 async def get_user_gender(member: discord.Member, guild_id: int) -> str:
-    """Check gender roles before LLM call."""
+    """Gender detection with conflict handling."""
     # 1. Get configured gender roles for this server
-    gender_roles = await get_gender_roles(guild_id)
+    gender_roles = await get_gender_roles(guild_id)  # {role_id: "male"/"female"}
     
     # 2. Check user's roles
+    matched_genders = set()
     for role in member.roles:
         if role.id in gender_roles:
-            return gender_roles[role.id]  # "male" or "female"
+            matched_genders.add(gender_roles[role.id])
     
-    # 3. No match = CONFUSION (handled BEFORE LLM)
-    return "unknown"
-
-# In ai_brain.py, BEFORE building prompt:
-if gender == "unknown":
-    # Inject confusion into prompt
-    prompt += "\nNOTE: You are confused about this user's gender. Ask them politely."
+    # 3. Handle results
+    if len(matched_genders) == 0:
+        return "unknown"  # No gender roles
+    elif len(matched_genders) > 1:
+        return "confused"  # Conflicting roles (male + female)
+    else:
+        return matched_genders.pop()  # "male" or "female"
 ```
 
-This ensures the confusion response is deterministic, not relying on LLM interpretation.
+### Prompt Injection
+```python
+# In ai_brain.py, BEFORE building prompt:
+if gender == "unknown":
+    prompt += "\n[User Gender: Unknown. Act confused if asked about their gender.]"
+elif gender == "confused":
+    prompt += "\n[User Gender: Conflicting. They have both male and female roles. Express confusion.]"
+else:
+    prompt += f"\n[User Gender: {gender}]"
+```
 
 ---
 
@@ -175,11 +184,13 @@ ADMIN_PASSWORD=gayboi123    # Model change password
 ### Trigger Words Per Mode
 ```python
 MODE_TRIGGERS = {
-    "mode_femboy": ["femmy", "femboy"],
+    "mode_femboy": ["femmy", "femmy chan", "femmy-chan"],
     "mode_oneesan": ["yumi", "yumi chan", "yumi-chan", "oneesan", "onesan"],
     "mode_tsundere": ["tsun", "tsundere"]
 }
 ```
+
+> ⚠️ Note: "femboy" removed from triggers - only responds to name variants.
 
 Bot responds when message contains trigger word (case-insensitive).
 
@@ -218,12 +229,26 @@ If asked about other personalities, say "I am only Yumi."
 
 ---
 
-## Phase 7: Fact Deduplication
+## Phase 7: Fact Deduplication (Summarizer)
 
 When `!remember @user <fact>`:
 1. Fetch existing facts for user
-2. Send to Gemini: "Summarize, remove contradictions"
-3. Replace old facts with summary + new fact
+2. Send to GEMINI_SUMMARIZE_KEY with this prompt:
+
+```
+You are a database reconciler. Analyze the following user facts.
+If facts contradict (e.g., "User is X" and "User is not X"), delete both and replace with a neutral summary.
+Remove duplicates.
+Output a clean, bulleted list of current truths only.
+
+Facts:
+{existing_facts}
+
+New fact to add:
+{new_fact}
+```
+
+3. Replace old facts with summarized output
 
 ---
 
