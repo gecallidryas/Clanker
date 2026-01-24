@@ -101,6 +101,36 @@ CREATE TABLE gender_roles (
 
 ---
 
+## Phase 3.5: Gender Confusion (Hard-Coded Check)
+
+### Requirement
+Bot must express "confusion" about gender BEFORE calling the LLM if user has no gender roles.
+
+### Implementation
+```python
+async def get_user_gender(member: discord.Member, guild_id: int) -> str:
+    """Check gender roles before LLM call."""
+    # 1. Get configured gender roles for this server
+    gender_roles = await get_gender_roles(guild_id)
+    
+    # 2. Check user's roles
+    for role in member.roles:
+        if role.id in gender_roles:
+            return gender_roles[role.id]  # "male" or "female"
+    
+    # 3. No match = CONFUSION (handled BEFORE LLM)
+    return "unknown"
+
+# In ai_brain.py, BEFORE building prompt:
+if gender == "unknown":
+    # Inject confusion into prompt
+    prompt += "\nNOTE: You are confused about this user's gender. Ask them politely."
+```
+
+This ensures the confusion response is deterministic, not relying on LLM interpretation.
+
+---
+
 ## Phase 3: Multi-Model Support
 
 ### OpenRouter Models
@@ -155,15 +185,36 @@ Bot responds when message contains trigger word (case-insensitive).
 
 ---
 
-## Phase 6: Identity Isolation (Yumi vs Femmy)
+## Phase 6: Identity Isolation (State-Based Prompting)
 
 ### Problem
-Yumi (oneesan mode) sometimes calls itself "Femmy" in help text.
+Yumi (oneesan mode) sometimes calls itself "Femmy" in help text. Simple variable substitution ({bot_name}) is NOT sufficient.
 
-### Fix
-1. Make bot name configurable via `BOT_NAME` env var
-2. Update help embeds to use `self.bot.user.name`
-3. Update personas to reference `{bot_name}` dynamically
+### Solution: Distinct Prompt Files
+Create separate prompt files per mode:
+```
+discord_bot/prompts/
+├── femboy.txt      # Femmy persona
+├── oneesan.txt     # Yumi persona (FORBIDS "femboy", "Femmy")
+└── tsundere.txt    # Tsun persona
+```
+
+### Mode Switch Logic
+```python
+async def switch_mode(guild_id, new_mode):
+    # 1. Update database
+    await set_server_mode(guild_id, new_mode)
+    # 2. Reload system instruction from file
+    prompt_file = f"prompts/{new_mode.replace('mode_', '')}.txt"
+    with open(prompt_file) as f:
+        self.current_persona = f.read()
+```
+
+### Yumi Prompt Must Include
+```
+You are Yumi. NEVER use the words "Femmy" or "femboy".
+If asked about other personalities, say "I am only Yumi."
+```
 
 ---
 
