@@ -163,10 +163,30 @@ class Femmy(commands.Bot):
             logger.warning("Failed to log command: %s", e)
 
 
+# ============================================
+# Standalone Sync Command
+# ============================================
+
+
+@commands.command(name='sync')
+@commands.has_permissions(manage_guild=True)
+async def sync_command(ctx: commands.Context):
+    """
+    Sync slash commands to this server (instant update).
+    Usage: !sync
+    """
+    ctx.bot.tree.copy_global_to(guild=ctx.guild)
+    fmt = await ctx.bot.tree.sync(guild=ctx.guild)
+    await ctx.send(f"✅ Synced {len(fmt)} slash commands to **{ctx.guild.name}**! They should appear now.")
+
+
 async def main():
     """Main entry point for the bot."""
     log_startup()
     bot = Femmy()
+    
+    # Register the standalone !sync command
+    bot.add_command(sync_command)
     
     async with bot:
         await bot.start(DISCORD_TOKEN)
