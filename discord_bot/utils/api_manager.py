@@ -537,12 +537,17 @@ OPENROUTER_BASE_URL = "https://openrouter.ai/api/v1"
 # Available uncensored models
 # venice/hermes = free tier (rate limited), deepseek = paid (no limits)
 OPENROUTER_MODELS = {
-    "venice": "cognitivecomputations/dolphin-mistral-24b-venice-edition:free",
+    # Default aliases
+    "venice": "nousresearch/hermes-3-llama-3.1-405b:free",  # Fallback since Venice edition 404s
     "hermes": "nousresearch/hermes-3-llama-3.1-405b:free",
+    "dolphin": "cognitivecomputations/dolphin-mixtral-8x7b",
+    
+    # Full IDs
     "nousresearch/hermes-3-llama-3.1-405b:free": "nousresearch/hermes-3-llama-3.1-405b:free",
+    "cognitivecomputations/dolphin-mixtral-8x7b": "cognitivecomputations/dolphin-mixtral-8x7b",
+    
     "deephermes": "nousresearch/deephermes-3-mistral-24b-preview",
     "mistral": "mistralai/mistral-small-3.1-24b-instruct:free",
-    "mistralai/mistral-small-3.1-24b-instruct:free": "mistralai/mistral-small-3.1-24b-instruct:free",
     "deepseek": "deepseek/deepseek-chat",
 }
 
