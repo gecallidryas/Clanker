@@ -67,7 +67,6 @@ _USER_INPUT_TOKEN_HINTS = (
 )
 
 GEMINI_MODELS = {
-    "flash": "gemini-2.5-flash",
     "flash-lite": "gemini-2.5-flash-lite",
 }
 
@@ -83,8 +82,8 @@ class GeminiSingleKeyManager:
         if not self.api_key:
             raise ValueError(f"Missing required environment variable: {key_env}")
 
-        self.text_model_name = os.getenv("GEMINI_TEXT_MODEL", "gemini-2.5-flash")
-        self.vision_model_name = os.getenv("GEMINI_VISION_MODEL", "gemini-2.5-flash")
+        self.text_model_name = os.getenv("GEMINI_TEXT_MODEL", "gemini-2.5-flash-lite")
+        self.vision_model_name = os.getenv("GEMINI_VISION_MODEL", "gemini-2.5-flash-lite")
         if request_timeout is None:
             request_timeout = 30.0
         self.request_timeout = _parse_timeout(
@@ -259,8 +258,8 @@ class GeminiManager:
         GEMINI_API_KEY_2 - Second key (optional)
         GEMINI_API_KEY_3 - Third key (optional)
         ... up to GEMINI_API_KEY_10
-        GEMINI_TEXT_MODEL   - Optional text model name (default: gemini-2.5-flash)
-        GEMINI_VISION_MODEL - Optional vision model name (default: gemini-2.5-flash)
+        GEMINI_TEXT_MODEL   - Optional text model name (default: gemini-2.5-flash-lite)
+        GEMINI_VISION_MODEL - Optional vision model name (default: gemini-2.5-flash-lite)
         GEMINI_REQUEST_TIMEOUT_SECONDS - Optional request timeout (default: 30)
     """
     
@@ -268,8 +267,8 @@ class GeminiManager:
         self.cooldown_minutes = cooldown_minutes
         self.keys: List[APIKey] = []
         self.current_index = 0
-        self.text_model_name = os.getenv("GEMINI_TEXT_MODEL", "gemini-2.5-flash")
-        self.vision_model_name = os.getenv("GEMINI_VISION_MODEL", "gemini-2.5-flash")
+        self.text_model_name = os.getenv("GEMINI_TEXT_MODEL", "gemini-2.5-flash-lite")
+        self.vision_model_name = os.getenv("GEMINI_VISION_MODEL", "gemini-2.5-flash-lite")
         if request_timeout is None:
             request_timeout = 30.0
         self.request_timeout = _parse_timeout(

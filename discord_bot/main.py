@@ -182,9 +182,15 @@ async def sync_command(ctx: commands.Context):
     Sync slash commands to this server (instant update).
     Usage: !sync
     """
-    ctx.bot.tree.copy_global_to(guild=ctx.guild)
-    fmt = await ctx.bot.tree.sync(guild=ctx.guild)
-    await ctx.send(f"✅ Synced {len(fmt)} slash commands to **{ctx.guild.name}**! They should appear now.")
+    try:
+        ctx.bot.tree.copy_global_to(guild=ctx.guild)
+        fmt = await ctx.bot.tree.sync(guild=ctx.guild)
+        await ctx.send(
+            f"Synced {len(fmt)} slash commands to **{ctx.guild.name}**! They should appear now."
+        )
+    except Exception as e:
+        logger.error("Sync failed: %s", e, exc_info=True)
+        await ctx.send("Sync failed. Check logs for details.")
 
 
 async def main():

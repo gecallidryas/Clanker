@@ -17,11 +17,14 @@ Usage:
 """
 
 from collections import deque
+import asyncio
 from datetime import datetime, timedelta
 from io import BytesIO
 from pathlib import Path
 from typing import Dict, Optional
+import os
 import re
+import tempfile
 
 import discord
 import pytz
@@ -49,8 +52,19 @@ MAX_CONTEXT_SIZE = 20
 CONTEXT_EXPIRY_MINUTES = 30
 CHAIN_MEMORY_LIMIT = 1000
 MAX_IMAGE_SIZE = 10 * 1024 * 1024  # 10 MB
+MAX_VIDEO_SIZE = 20 * 1024 * 1024  # 20 MB
 MAX_AUTO_IMAGE_COUNT = 3
+MAX_AUTO_VIDEO_COUNT = 1
 SUPPORTED_IMAGE_FORMATS = {"image/png", "image/jpeg", "image/gif", "image/webp"}
+SUPPORTED_VIDEO_FORMATS = {
+    "video/mp4",
+    "video/webm",
+    "video/quicktime",
+    "video/x-msvideo",
+    "video/mpeg",
+    "video/ogg",
+}
+SUPPORTED_VIDEO_EXTENSIONS = {".mp4", ".webm", ".mov", ".avi", ".mpeg", ".mpg", ".ogv", ".mkv"}
 
 # Conversation continuation settings
 ACTIVE_CONVO_MESSAGES = 3  # Stay engaged for N messages after trigger
@@ -64,7 +78,7 @@ WELLBEING_NIGHT_END = 23
 
 MODE_TRIGGERS = {
     "mode_femboy": ["femmy", "femmy chan", "femmy-chan"],
-    "mode_oneesan": ["yumi", "yumi chan", "yumi-chan", "oneesan", "onesan"],
+    "mode_oneesan": ["yumi", "yumi chan", "yumi-chan", "yumi-san", "yumi san", "oneesan", "onesan"],
     "mode_tsundere": ["tsun", "tsundere"],
 }
 
@@ -297,6 +311,18 @@ class AIBrain(commands.Cog):
         self.chain_memory: Dict[int, int] = {}  # message_id -> user_id
         self.chain_order: deque[int] = deque()
         self.chain_limit = CHAIN_MEMORY_LIMIT
+        self.video_client = None
+        self.video_types = None
+        api_key = os.getenv("GEMINI_API_KEY")
+        if api_key:
+            try:
+                from google import genai as genai_client
+                from google.genai import types as genai_types
+            except Exception as exc:
+                logger.warning("Gemini video client unavailable: %s", exc)
+            else:
+                self.video_client = genai_client.Client(api_key=api_key)
+                self.video_types = genai_types
         # Active conversations: (channel_id, user_id) -> {"remaining": int, "last_active": datetime}
         self.active_convos: Dict[tuple[int, int], dict] = {}
     
@@ -504,6 +530,120 @@ class AIBrain(commands.Cog):
         descriptions = []
         for attachment in attachments:
             description = await self._describe_image(attachment)
+            if description:
+                descriptions.append(description)
+        return descriptions
+
+    def _has_video_attachment(self, message: discord.Message) -> bool:
+        """Return True if the message includes a video attachment."""
+        for attachment in message.attachments:
+            content_type = attachment.content_type or ""
+            ext = Path(attachment.filename or "").suffix.lower()
+            if content_type.startswith("video/") or content_type in SUPPORTED_VIDEO_FORMATS or ext in SUPPORTED_VIDEO_EXTENSIONS:
+                return True
+        return False
+
+    def _get_video_attachments(self, message: discord.Message) -> list[discord.Attachment]:
+        """Collect supported video attachments for auto analysis."""
+        videos = []
+        for attachment in message.attachments:
+            content_type = attachment.content_type or ""
+            ext = Path(attachment.filename or "").suffix.lower()
+            if content_type.startswith("video/") or content_type in SUPPORTED_VIDEO_FORMATS or ext in SUPPORTED_VIDEO_EXTENSIONS:
+                if attachment.size <= MAX_VIDEO_SIZE:
+                    videos.append(attachment)
+            if len(videos) >= MAX_AUTO_VIDEO_COUNT:
+                break
+        return videos
+
+    def _format_video_descriptions(self, descriptions: list[str]) -> str:
+        """Format video descriptions for prompt context."""
+        if not descriptions:
+            return ""
+        if len(descriptions) == 1:
+            return f"[User attached video: {descriptions[0]}]"
+        numbered = [f"Video {idx + 1}: {desc}" for idx, desc in enumerate(descriptions)]
+        return f"[User attached video(s): {'; '.join(numbered)}]"
+
+    async def _describe_video(self, attachment: discord.Attachment) -> Optional[str]:
+        """Describe a video using the Gemini File API."""
+        if not self.video_client or not self.video_types:
+            logger.warning("Gemini video client not configured.")
+            return None
+
+        tmp_video_path = None
+        uploaded_name = None
+        try:
+            suffix = Path(attachment.filename or "").suffix or ".mp4"
+            with tempfile.NamedTemporaryFile(delete=False, suffix=suffix) as tmp_video:
+                tmp_video_path = tmp_video.name
+            await attachment.save(tmp_video_path)
+
+            video_file = await asyncio.to_thread(
+                self.video_client.files.upload,
+                file=tmp_video_path,
+                config={"display_name": attachment.filename or "video"},
+            )
+            uploaded_name = video_file.name
+
+            while getattr(video_file, "state", None) and getattr(video_file.state, "name", None) == "PROCESSING":
+                await asyncio.sleep(2)
+                video_file = await asyncio.to_thread(self.video_client.files.get, name=video_file.name)
+
+            if getattr(video_file, "state", None) and getattr(video_file.state, "name", None) == "FAILED":
+                logger.warning("Gemini failed to process video %s", attachment.filename)
+                return None
+
+            model_id = os.getenv("GEMINI_VIDEO_MODEL", "gemini-2.5-flash-lite")
+            response = await asyncio.to_thread(
+                self.video_client.models.generate_content,
+                model=model_id,
+                contents=[
+                    self.video_types.Part.from_uri(
+                        file_uri=video_file.uri,
+                        mime_type=video_file.mime_type,
+                    ),
+                    "Describe this video briefly.",
+                ],
+            )
+            response_text = getattr(response, "text", None)
+        except Exception as exc:
+            logger.error("Video analysis error for %s: %s", attachment.filename, exc, exc_info=True)
+            return None
+        finally:
+            if tmp_video_path and os.path.exists(tmp_video_path):
+                try:
+                    os.unlink(tmp_video_path)
+                except OSError:
+                    logger.warning("Failed to remove temp file %s", tmp_video_path)
+            if uploaded_name and os.getenv("GEMINI_DELETE_UPLOADED_FILES", "").lower() == "true":
+                try:
+                    await asyncio.to_thread(self.video_client.files.delete, name=uploaded_name)
+                except Exception as exc:
+                    logger.warning("Failed to delete Gemini file %s: %s", uploaded_name, exc)
+
+        if not response_text:
+            return None
+        description = response_text.strip()
+        if not description:
+            return None
+
+        try:
+            await increment_stat("images_analyzed")
+        except Exception as exc:
+            logger.warning("Failed to increment images_analyzed: %s", exc)
+
+        return description
+
+    async def _describe_videos(self, message: discord.Message) -> list[str]:
+        """Describe supported video attachments in a message."""
+        attachments = self._get_video_attachments(message)
+        if not attachments:
+            return []
+
+        descriptions = []
+        for attachment in attachments:
+            description = await self._describe_video(attachment)
             if description:
                 descriptions.append(description)
         return descriptions
@@ -843,22 +983,64 @@ Respond naturally in character. Keep responses concise.
         # Get channel context
         context = self.get_context(message.channel.id)
 
+        mentioned = self.bot.user in message.mentions
+        content_lower = message.content.lower()
+        mode = await get_server_mode(message.guild.id)
+
+        # Check if we're in an active conversation with this user
+        is_active = self._is_active_conversation(message.channel.id, message.author.id)
+        has_trigger = self._has_trigger_word(content_lower, mode)
+
+        # Determine if we should respond
+        should_respond = mentioned or has_trigger or is_active
+
+        if not should_respond:
+            _, reply_to_username = self._resolve_reply_to(message)
+            context.add_message(
+                message.id,
+                message.author.id,
+                message.author.display_name,
+                message.content,
+                reply_to_username=reply_to_username,
+            )
+            return
+
+        video_descriptions = []
         image_descriptions = []
         if message.attachments:
+            video_descriptions = await self._describe_videos(message)
             image_descriptions = await self._describe_images(message)
-        has_image_attachments = any(
-            attachment.content_type and attachment.content_type.startswith("image/")
-            for attachment in message.attachments
-        )
+
+        has_video_attachments = self._has_video_attachment(message)
+        has_image_attachments = self._has_image_attachment(message)
+
+        if has_video_attachments and not video_descriptions:
+            await message.reply(
+                "I couldn't analyze that video. Try a smaller or supported format.",
+                mention_author=False,
+            )
+            return
+        if has_image_attachments and not image_descriptions:
+            await message.reply(
+                "I couldn't analyze that image. Try a smaller or supported format.",
+                mention_author=False,
+            )
+            return
 
         content_for_prompt = message.content
+        if video_descriptions:
+            video_context = self._format_video_descriptions(video_descriptions)
+            if content_for_prompt.strip():
+                content_for_prompt = f"{content_for_prompt}\n{video_context}"
+            else:
+                content_for_prompt = video_context
         if image_descriptions:
             image_context = self._format_image_descriptions(image_descriptions)
             if content_for_prompt.strip():
                 content_for_prompt = f"{content_for_prompt}\n{image_context}"
             else:
                 content_for_prompt = image_context
-        
+
         # Always add message to context
         _, reply_to_username = self._resolve_reply_to(message)
         context.add_message(
@@ -866,34 +1048,11 @@ Respond naturally in character. Keep responses concise.
             message.author.id,
             message.author.display_name,
             content_for_prompt,
-            reply_to_username=reply_to_username
+            reply_to_username=reply_to_username,
         )
-        
-        mentioned = self.bot.user in message.mentions
-        content_lower = message.content.lower()
-        mode = await get_server_mode(message.guild.id)
-        
-        # Check if we're in an active conversation with this user
-        is_active = self._is_active_conversation(message.channel.id, message.author.id)
-        has_trigger = self._has_trigger_word(content_lower, mode)
-        
-        # Determine if we should respond
-        should_respond = mentioned or has_trigger or is_active
-        
-        if not should_respond:
-            # Quick check for any trigger word (for performance)
-            if not any(trigger in content_lower for trigger in ALL_TRIGGERS):
-                return
-            # No triggers, no active convo, skip
-            return
 
         # Let other cogs handle mention-only messages without images
-        if self._is_mention_only(message) and not image_descriptions:
-            if has_image_attachments:
-                await message.reply(
-                    "I couldn't analyze that image. Try a smaller or supported format.",
-                    mention_author=False
-                )
+        if self._is_mention_only(message) and not image_descriptions and not video_descriptions:
             return
 
         # Rate limit AI responses per user

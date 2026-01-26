@@ -39,7 +39,7 @@ class ModelChangeModal(discord.ui.Modal):
         self.admin_password = admin_password
         self.model_name = discord.ui.TextInput(
             label="Model key",
-            placeholder="venice / hermes / deephermes / mistral / flash / flash-lite / full-id",
+            placeholder="venice / hermes / deephermes / mistral / flash-lite / full-id",
             default=default_model or "",
             max_length=100,
         )
@@ -276,15 +276,23 @@ class Admin(commands.Cog):
             !admin sync global - Sync globally (takes up to 1h)
         """
         if target == "guild":
-            self.bot.tree.copy_global_to(guild=ctx.guild)
-            await self.bot.tree.sync(guild=ctx.guild)
-            await ctx.send(f"✅ Synced slash commands to **{ctx.guild.name}**! (Instant)")
+            try:
+                self.bot.tree.copy_global_to(guild=ctx.guild)
+                await self.bot.tree.sync(guild=ctx.guild)
+                await ctx.send(f"Synced slash commands to **{ctx.guild.name}**! (Instant)")
+            except Exception as e:
+                logger.error("Guild sync failed: %s", e, exc_info=True)
+                await ctx.send("Sync failed. Check logs for details.")
         elif target == "global":
             if await self.bot.is_owner(ctx.author):
-                await self.bot.tree.sync()
-                await ctx.send("✅ Synced **global** commands. (Updates take up to 1h)")
-            else:
-                 await ctx.send("❌ Only bot owner can sync globally.")
+                try:
+                    await self.bot.tree.sync()
+                    await ctx.send("Synced **global** commands. (Updates take up to 1h)")
+                except Exception as e:
+                    logger.error("Global sync failed: %s", e, exc_info=True)
+                    await ctx.send("Sync failed. Check logs for details.")
+             else:
+                  await ctx.send("Only bot owner can sync globally.")
         else:
             await ctx.send("Usage: `!admin sync [guild|global]`")
 
