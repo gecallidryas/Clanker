@@ -514,32 +514,249 @@ Provide a clear, bulleted summary:
         
         await ctx.send(embed=embed)
 
-    async def _slash_context(self, interaction: discord.Interaction) -> commands.Context:
-        return await commands.Context.from_interaction(interaction)
-
     @app_commands.command(name="help", description="Show help for commands.")
     @app_commands.describe(command_name="Specific command to show help for")
     async def custom_help_slash(self, interaction: discord.Interaction, command_name: str = None):
-        ctx = await self._slash_context(interaction)
-        await self.custom_help(ctx, command_name=command_name)
+        mode = await get_server_mode(interaction.guild.id) if interaction.guild else "mode_femboy"
+
+        if command_name:
+            cmd = self.bot.get_command(command_name)
+            if not cmd:
+                await interaction.response.send_message(
+                    f"âŒ Command `{command_name}` not found!",
+                    ephemeral=True,
+                )
+                return
+
+            embed = discord.Embed(
+                title=f"ðŸ“– Help: !{cmd.name}",
+                description=cmd.help or "No description available.",
+                color=discord.Color.blue(),
+            )
+
+            if cmd.aliases:
+                embed.add_field(
+                    name="Aliases",
+                    value=", ".join(f"`!{a}`" for a in cmd.aliases),
+                    inline=False,
+                )
+
+            usage = f"!{cmd.name}"
+            if cmd.signature:
+                usage += f" {cmd.signature}"
+            embed.add_field(name="Usage", value=f"`{usage}`", inline=False)
+
+            await interaction.response.send_message(embed=embed)
+            return
+
+        intro = HELP_INTROS.get(mode, HELP_INTROS["mode_femboy"])
+        bot_name = self._get_bot_name(mode)
+        embed = discord.Embed(
+            title=f"ðŸ“š {bot_name}'s Commands",
+            description=intro,
+            color=discord.Color.pink(),
+        )
+
+        for category_name, category_data in COMMAND_CATEGORIES.items():
+            valid_commands = []
+            for cmd_name in category_data["commands"]:
+                cmd = self.bot.get_command(cmd_name)
+                if cmd and not cmd.hidden:
+                    valid_commands.append(f"`!{cmd_name}`")
+
+            if valid_commands:
+                embed.add_field(
+                    name=f"{category_name}",
+                    value=" ".join(valid_commands),
+                    inline=False,
+                )
+
+        embed.set_footer(text="Use !help <command> for more details on a specific command")
+        await interaction.response.send_message(embed=embed)
 
     @app_commands.command(name="stats", description="Display bot statistics.")
     async def show_stats_slash(self, interaction: discord.Interaction):
-        ctx = await self._slash_context(interaction)
-        await self.show_stats(ctx)
+        stats = await get_stats()
+
+        now = datetime.now()
+        uptime = now - self.start_time
+        days = uptime.days
+        hours, remainder = divmod(uptime.seconds, 3600)
+        minutes, seconds = divmod(remainder, 60)
+
+        if days > 0:
+            uptime_str = f"{days}d {hours}h {minutes}m"
+        elif hours > 0:
+            uptime_str = f"{hours}h {minutes}m {seconds}s"
+        else:
+            uptime_str = f"{minutes}m {seconds}s"
+
+        process = psutil.Process()
+        memory_mb = process.memory_info().rss / 1024 / 1024
+
+        total_users = sum(g.member_count or 0 for g in self.bot.guilds)
+
+        embed = discord.Embed(
+            title="ðŸ“Š Bot Statistics",
+            color=discord.Color.blue(),
+        )
+
+        embed.add_field(name="â±ï¸ Uptime", value=uptime_str, inline=True)
+        embed.add_field(name="ðŸ  Servers", value=str(len(self.bot.guilds)), inline=True)
+        embed.add_field(name="ðŸ‘¥ Users", value=f"{total_users:,}", inline=True)
+
+        embed.add_field(
+            name="ðŸ’¬ Messages Processed",
+            value=f"{stats.get('messages_processed', 0):,}",
+            inline=True,
+        )
+        embed.add_field(
+            name="ðŸ–¼ï¸ Images Analyzed",
+            value=f"{stats.get('images_analyzed', 0):,}",
+            inline=True,
+        )
+        embed.add_field(
+            name="ðŸ’¾ Memory",
+            value=f"{memory_mb:.1f} MB",
+            inline=True,
+        )
+
+        if interaction.guild:
+            mode = await get_server_mode(interaction.guild.id)
+            mode_display = {
+                "mode_femboy": "ðŸŽ€ Femboy",
+                "mode_tsundere": "ðŸ˜¤ Tsundere",
+                "mode_oneesan": "ðŸ’• Onee-san",
+            }
+            embed.add_field(
+                name="ðŸŽ­ Current Mode",
+                value=mode_display.get(mode, mode),
+                inline=True,
+            )
+
+        embed.set_footer(text="Powered by Gemini AI â™¡")
+        await interaction.response.send_message(embed=embed)
 
     @app_commands.command(name="reload", description="Reload a cog or all cogs (owner only).")
     @app_commands.describe(cog_name="Cog name or 'all'")
     @app_commands.checks.is_owner()
     async def reload_cog_slash(self, interaction: discord.Interaction, cog_name: str = None):
-        ctx = await self._slash_context(interaction)
-        await self.reload_cog(ctx, cog_name=cog_name)
+        await interaction.response.defer(thinking=True)
+
+        cogs_dir = Path(__file__).parent
+        available_cogs = [
+            p.stem for p in cogs_dir.glob("*.py")
+            if p.stem != "__init__" and not p.stem.startswith("_")
+        ]
+
+        if cog_name is None:
+            cog_list = ", ".join(f"`{c}`" for c in sorted(available_cogs))
+            await interaction.followup.send(
+                f"**Available cogs:**\n{cog_list}\n\n"
+                f"Use `!reload <cog>` or `!reload all`"
+            )
+            return
+
+        if cog_name.lower() == "all":
+            success = []
+            failed = []
+
+            for cog in available_cogs:
+                try:
+                    await self.bot.reload_extension(f"cogs.{cog}")
+                    success.append(cog)
+                except Exception as e:
+                    failed.append(f"{cog}: {str(e)[:50]}")
+
+            result = f"âœ… Reloaded: {', '.join(success)}"
+            if failed:
+                result += f"\nâŒ Failed: {', '.join(failed)}"
+            await interaction.followup.send(result)
+            return
+
+        cog_name = cog_name.lower()
+        if cog_name not in available_cogs:
+            await interaction.followup.send(f"âŒ Cog `{cog_name}` not found!")
+            return
+
+        try:
+            await self.bot.reload_extension(f"cogs.{cog_name}")
+            await interaction.followup.send(f"âœ… Reloaded `{cog_name}`!")
+        except Exception as e:
+            await interaction.followup.send(f"âŒ Failed to reload `{cog_name}`: {e}")
 
     @app_commands.command(name="translate", description="Translate text to another language.")
     @app_commands.describe(query="Text and target language, e.g. 'hello to japanese'")
     async def translate_slash(self, interaction: discord.Interaction, query: str):
-        ctx = await self._slash_context(interaction)
-        await self.translate(ctx, query=query)
+        if " to " not in query.lower():
+            await interaction.response.send_message(
+                "**Usage:** `!translate <text> to <language>`\n"
+                "**Example:** `!translate hello world to japanese`",
+                ephemeral=True,
+            )
+            return
+
+        parts = query.lower().rsplit(" to ", 1)
+        text = query[:query.lower().rfind(" to ")]
+        target_lang = parts[1].strip()
+
+        if not text or not target_lang:
+            await interaction.response.send_message(
+                "âŒ Please provide both text and target language!",
+                ephemeral=True,
+            )
+            return
+
+        mode = await get_server_mode(interaction.guild.id) if interaction.guild else "mode_femboy"
+        if not await ai_limiter.acquire(interaction.user.id):
+            retry_after = ai_limiter.get_retry_after(interaction.user.id)
+            await interaction.response.send_message(
+                get_rate_limit_message(mode, retry_after),
+                ephemeral=True,
+            )
+            return
+
+        await interaction.response.defer(thinking=True)
+
+        prompt = f"""
+Translate the following text to {target_lang}.
+Only output the translation, nothing else.
+If you cannot translate, say "Translation not possible."
+
+Text to translate:
+{text}
+"""
+
+        try:
+            client = self.translate_client or self.gemini
+            translation, _ = await client.generate(prompt)
+            translation = translation.strip()
+        except RuntimeError:
+            await interaction.followup.send(
+                "âŒ Translation service busy, try again later!",
+                ephemeral=True,
+            )
+            return
+        except Exception as e:
+            await interaction.followup.send(
+                f"âŒ Translation failed: {e}",
+                ephemeral=True,
+            )
+            return
+
+        embed = discord.Embed(
+            title="ðŸŒ Translation",
+            color=discord.Color.blue(),
+        )
+        embed.add_field(name="Original", value=text[:1024], inline=False)
+        embed.add_field(name=f"â†’ {target_lang.title()}", value=translation[:1024], inline=False)
+
+        await interaction.followup.send(embed=embed)
+
+        try:
+            await increment_stat("messages_processed")
+        except Exception as e:
+            logger.warning("Failed to increment messages_processed: %s", e)
 
     @app_commands.command(name="tldr", description="Summarize the last N messages.")
     @app_commands.describe(count="Number of messages to summarize (5-100)")
@@ -607,18 +824,81 @@ Provide a clear, bulleted summary:
     @app_commands.command(name="portfolio", description="Check if a website is up.")
     @app_commands.describe(url="URL to check (optional)")
     async def check_portfolio_slash(self, interaction: discord.Interaction, url: str = None):
-        ctx = await self._slash_context(interaction)
-        await self.check_portfolio(ctx, url=url)
+        target_url = url or self.portfolio_url
+
+        if not target_url:
+            await interaction.response.send_message(
+                "âŒ No URL configured!\n"
+                "Use `!portfolio <url>` or set `PORTFOLIO_URL` in `.env`",
+                ephemeral=True,
+            )
+            return
+
+        if not target_url.startswith(("http://", "https://")):
+            target_url = "https://" + target_url
+
+        await interaction.response.defer(thinking=True)
+
+        try:
+            async with aiohttp.ClientSession(timeout=aiohttp.ClientTimeout(total=10)) as session:
+                async with session.get(target_url) as response:
+                    status = response.status
+
+                    if 200 <= status < 300:
+                        status_emoji, status_text, color = "âœ…", "Online", discord.Color.green()
+                    elif 300 <= status < 400:
+                        status_emoji, status_text, color = "â†ªï¸", "Redirect", discord.Color.yellow()
+                    elif status == 503:
+                        status_emoji, status_text, color = "ðŸ”§", "Maintenance", discord.Color.orange()
+                    else:
+                        status_emoji, status_text, color = "âŒ", "Error", discord.Color.red()
+
+        except aiohttp.ClientConnectorError:
+            status_emoji, status_text, status, color = "ðŸ”Œ", "Connection Failed", "N/A", discord.Color.red()
+        except asyncio.TimeoutError:
+            status_emoji, status_text, status, color = "â°", "Timeout", "N/A", discord.Color.orange()
+        except Exception as e:
+            status_emoji, status_text, status, color = "â“", f"Error: {str(e)[:50]}", "N/A", discord.Color.red()
+
+        embed = discord.Embed(title=f"{status_emoji} Portfolio Status", color=color)
+        embed.add_field(name="URL", value=target_url, inline=False)
+        embed.add_field(name="Status", value=f"{status_text} ({status})", inline=True)
+
+        await interaction.followup.send(embed=embed)
 
     @app_commands.command(name="ping", description="Check bot latency.")
     async def ping_slash(self, interaction: discord.Interaction):
-        ctx = await self._slash_context(interaction)
-        await self.ping(ctx)
+        latency = round(self.bot.latency * 1000)
+        emoji = "ðŸŸ¢" if latency < 100 else "ðŸŸ¡" if latency < 200 else "ðŸ”´"
+        await interaction.response.send_message(f"{emoji} Pong! Latency: **{latency}ms**")
 
     @app_commands.command(name="about", description="Display information about the bot.")
     async def about_slash(self, interaction: discord.Interaction):
-        ctx = await self._slash_context(interaction)
-        await self.about(ctx)
+        mode = await get_server_mode(interaction.guild.id) if interaction.guild else "mode_femboy"
+        bot_name = self._get_bot_name(mode)
+        embed = discord.Embed(
+            title=f"ðŸ¤– About {bot_name}",
+            description="An advanced AI Discord bot with multiple personalities!",
+            color=discord.Color.pink(),
+        )
+
+        embed.add_field(
+            name="âœ¨ Features",
+            value=(
+                "â€¢ Three personality modes\n"
+                "â€¢ AI-powered conversations\n"
+                "â€¢ Image analysis\n"
+                "â€¢ Affection & Mood system\n"
+                "â€¢ Reminders & Translation"
+            ),
+            inline=False,
+        )
+
+        embed.add_field(name="ðŸ“Š Servers", value=str(len(self.bot.guilds)), inline=True)
+        embed.add_field(name="ðŸ”— Commands", value="Use `!help`", inline=True)
+        embed.set_footer(text="Powered by Gemini AI â™¡")
+
+        await interaction.response.send_message(embed=embed)
 
 
 async def setup(bot: commands.Bot):

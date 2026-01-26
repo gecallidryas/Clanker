@@ -20,9 +20,16 @@ from utils.db_handler import increment_stat
 
 BASE_DIR = Path(__file__).resolve().parent
 ENV_PATH = BASE_DIR / ".env"
+ENV_OVERRIDE_PATHS = [
+    BASE_DIR / ".env.femmy",
+    BASE_DIR.parent / ".env.femmy",
+]
 
 # Load environment variables
-load_dotenv(ENV_PATH)
+for env_path in ENV_OVERRIDE_PATHS:
+    if env_path.exists():
+        load_dotenv(env_path, override=True)
+load_dotenv(ENV_PATH, override=False)
 
 COG_PACKAGE = "cogs"
 
@@ -32,7 +39,7 @@ def _require_env(name: str) -> str:
         return value
     raise RuntimeError(
         f"Missing required environment variable: {name}. "
-        f"Set it in your environment or {ENV_PATH}"
+        f"Set it in your environment, {ENV_PATH}, or one of: {', '.join(str(p) for p in ENV_OVERRIDE_PATHS)}"
     )
 
 

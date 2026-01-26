@@ -300,25 +300,134 @@ class Reminders(commands.Cog):
     async def before_reminder_check(self):
         await self.bot.wait_until_ready()
 
-    async def _slash_context(self, interaction: discord.Interaction) -> commands.Context:
-        return await commands.Context.from_interaction(interaction)
-
     @app_commands.command(name="remind", description="Set a reminder.")
     @app_commands.describe(time="When to remind you (e.g., 30m, 2h, tomorrow)", message="Reminder message")
     async def remind_slash(self, interaction: discord.Interaction, time: str, message: str):
-        ctx = await self._slash_context(interaction)
-        await self.remind(ctx, time=time, message=message)
+        if not time:
+            await interaction.response.send_message(
+                "**Usage:** `!remind <time> <message>`\n"
+                "**Examples:**\n"
+                "â€¢ `!remind 30m drink water`\n"
+                "â€¢ `!remind 2h check the oven`\n"
+                "â€¢ `!remind 1d submit assignment`\n\n"
+                "**Time formats:** `Xm` (minutes), `Xh` (hours), `Xd` (days), `Xw` (weeks), `tomorrow`, `next week`",
+                ephemeral=True,
+            )
+            return
+
+        if not message:
+            await interaction.response.send_message(
+                "âŒ Please provide a message for your reminder!",
+                ephemeral=True,
+            )
+            return
+
+        existing = await get_user_reminders(interaction.user.id)
+        if len(existing) >= MAX_REMINDERS:
+            await interaction.response.send_message(
+                f"âŒ You have too many reminders! Maximum is {MAX_REMINDERS}.",
+                ephemeral=True,
+            )
+            return
+
+        seconds = parse_time(time)
+        if seconds is None:
+            await interaction.response.send_message(
+                f"âŒ Couldn't parse time: `{time}`\n"
+                "Use formats like: `30m`, `2h`, `1d`, `1w`, `tomorrow`, `next week`",
+                ephemeral=True,
+            )
+            return
+
+        if seconds < 60:
+            await interaction.response.send_message(
+                "âŒ Minimum reminder time is 1 minute!",
+                ephemeral=True,
+            )
+            return
+        if seconds > 30 * 86400:
+            await interaction.response.send_message(
+                "âŒ Maximum reminder time is 30 days!",
+                ephemeral=True,
+            )
+            return
+
+        remind_at = datetime.now() + timedelta(seconds=seconds)
+
+        channel_id = interaction.channel.id if interaction.channel else None
+        reminder_id = await add_reminder(
+            user_id=interaction.user.id,
+            guild_id=interaction.guild.id if interaction.guild else None,
+            channel_id=channel_id,
+            message=message,
+            remind_at=remind_at,
+        )
+
+        duration = format_duration(seconds)
+        embed = discord.Embed(
+            title="â° Reminder Set!",
+            description=f"I'll remind you in **{duration}**",
+            color=discord.Color.green(),
+        )
+        embed.add_field(name="Message", value=message, inline=False)
+        embed.add_field(name="ID", value=f"`{reminder_id}`", inline=True)
+        embed.set_footer(text=f"Reminds at {remind_at.strftime('%Y-%m-%d %H:%M')}")
+
+        await interaction.response.send_message(embed=embed)
 
     @app_commands.command(name="reminders", description="List your active reminders.")
     async def reminders_slash(self, interaction: discord.Interaction):
-        ctx = await self._slash_context(interaction)
-        await self.remind_list(ctx)
+        reminders = await get_user_reminders(interaction.user.id)
+
+        if not reminders:
+            await interaction.response.send_message(
+                "ðŸ“­ You don't have any active reminders!",
+                ephemeral=True,
+            )
+            return
+
+        embed = discord.Embed(
+            title="ðŸ“‹ Your Reminders",
+            color=discord.Color.blue(),
+        )
+
+        for rem in reminders[:10]:
+            remind_at = rem["remind_at"]
+            if isinstance(remind_at, str):
+                remind_at = datetime.fromisoformat(remind_at)
+
+            time_left = remind_at - datetime.now()
+            duration = (
+                format_duration(int(time_left.total_seconds()))
+                if time_left.total_seconds() > 0
+                else "Soon!"
+            )
+
+            embed.add_field(
+                name=f"#{rem['id']} - in {duration}",
+                value=rem["message"][:100],
+                inline=False,
+            )
+
+        if len(reminders) > 10:
+            embed.set_footer(text=f"And {len(reminders) - 10} more...")
+
+        await interaction.response.send_message(embed=embed)
 
     @app_commands.command(name="remindcancel", description="Cancel a reminder by ID.")
     @app_commands.describe(reminder_id="Reminder ID to cancel")
     async def remind_cancel_slash(self, interaction: discord.Interaction, reminder_id: int):
-        ctx = await self._slash_context(interaction)
-        await self.remind_cancel(ctx, reminder_id=reminder_id)
+        success = await delete_reminder(reminder_id, interaction.user.id)
+
+        if success:
+            await interaction.response.send_message(
+                f"âœ… Reminder #{reminder_id} cancelled!"
+            )
+        else:
+            await interaction.response.send_message(
+                f"âŒ Couldn't find reminder #{reminder_id} (or it's not yours)",
+                ephemeral=True,
+            )
 
 
 async def setup(bot: commands.Bot):

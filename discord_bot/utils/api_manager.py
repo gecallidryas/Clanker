@@ -535,10 +535,10 @@ from openai import (
 OPENROUTER_BASE_URL = "https://openrouter.ai/api/v1"
 
 # Available uncensored models
-# venice/hermes = free tier (rate limited), deepseek = paid (no limits)
+# venice/hermes/mistral = free tier (rate limited), deepseek = paid (no limits)
 OPENROUTER_MODELS = {
     # Aliases
-    "venice": "venice/uncensored:free",
+    "venice": "cognitivecomputations/dolphin-mistral-24b-venice-edition:free",
     "hermes": "nousresearch/hermes-3-llama-3.1-405b:free",
     "dolphin": "cognitivecomputations/dolphin-mixtral-8x7b",
     "deephermes": "nousresearch/deephermes-3-mistral-24b-preview",
@@ -546,7 +546,7 @@ OPENROUTER_MODELS = {
     "deepseek": "deepseek/deepseek-chat",
 
     # Full IDs (for direct use or fallback lists)
-    "venice/uncensored:free": "venice/uncensored:free",
+    "cognitivecomputations/dolphin-mistral-24b-venice-edition:free": "cognitivecomputations/dolphin-mistral-24b-venice-edition:free",
     "nousresearch/hermes-3-llama-3.1-405b:free": "nousresearch/hermes-3-llama-3.1-405b:free",
     "cognitivecomputations/dolphin-mixtral-8x7b": "cognitivecomputations/dolphin-mixtral-8x7b",
     "nousresearch/deephermes-3-mistral-24b-preview": "nousresearch/deephermes-3-mistral-24b-preview",
@@ -597,7 +597,11 @@ class OpenRouterManager:
     
     def __init__(self):
         self.api_key = os.getenv("OPENROUTER_API_KEY")
-        self.model = os.getenv("OPENROUTER_MODEL", "venice")
+        raw_model = os.getenv("OPENROUTER_MODEL")
+        if raw_model and raw_model.strip():
+            self.model = raw_model.strip()
+        else:
+            self.model = "venice"
         self.request_timeout = _parse_timeout(
             os.getenv("OPENROUTER_REQUEST_TIMEOUT_SECONDS"),
             45.0
@@ -676,7 +680,9 @@ class OpenRouterManager:
     def get_model_id(self) -> str:
         """Get the full model ID for API calls."""
         model_id = self._resolve_model_id(self.model)
-        return model_id or OPENROUTER_MODELS["venice"]
+        if not model_id:
+            raise RuntimeError(f"Unknown OpenRouter model: {self.model}")
+        return model_id
 
     def set_model(self, model_key: str) -> None:
         """Set the active OpenRouter model key."""
@@ -698,27 +704,29 @@ class OpenRouterManager:
 
     def _get_model_candidates(self) -> List[str]:
         if self.fallback_models:
-            candidates = list(self.fallback_models)
+            candidates = [self.model, *self.fallback_models]
         else:
             candidates = [self.model]
-            candidates.extend(key for key in OPENROUTER_MODELS.keys() if key != self.model)
 
         resolved: List[str] = []
+        unknown: List[str] = []
         for model_key in candidates:
             model_id = self._resolve_model_id(model_key)
             if not model_id:
-                logger.warning("Unknown OpenRouter model key: %s", model_key)
+                unknown.append(model_key)
                 continue
             if model_id not in resolved:
                 resolved.append(model_id)
             if model_id not in self._model_states:
                 self._model_states[model_id] = OpenRouterModelState(model_id=model_id)
 
+        if unknown:
+            logger.warning("Ignoring unknown OpenRouter model keys: %s", ", ".join(unknown))
+
         if not resolved:
-            resolved = [OPENROUTER_MODELS["venice"]]
-            self._model_states.setdefault(
-                resolved[0],
-                OpenRouterModelState(model_id=resolved[0])
+            raise RuntimeError(
+                "No valid OpenRouter models configured. "
+                "Check OPENROUTER_MODEL/OPENROUTER_FALLBACK_MODELS."
             )
         return resolved
 
@@ -905,7 +913,7 @@ def set_openrouter_model(model_key: str) -> bool:
     manager = get_openrouter_manager()
     if not manager.is_available():
         return False
-    if model_key not in OPENROUTER_MODELS:
+    if model_key not in OPENROUTER_MODELS and "/" not in model_key:
         return False
     manager.set_model(model_key)
     return True

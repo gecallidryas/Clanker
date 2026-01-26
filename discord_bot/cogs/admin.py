@@ -39,7 +39,7 @@ class ModelChangeModal(discord.ui.Modal):
         self.admin_password = admin_password
         self.model_name = discord.ui.TextInput(
             label="Model key",
-            placeholder="venice / hermes / deephermes / mistral / flash / flash-lite",
+            placeholder="venice / hermes / deephermes / mistral / flash / flash-lite / full-id",
             default=default_model or "",
             max_length=100,
         )
@@ -288,9 +288,6 @@ class Admin(commands.Cog):
         else:
             await ctx.send("Usage: `!admin sync [guild|global]`")
 
-    async def _slash_context(self, interaction: discord.Interaction) -> commands.Context:
-        return await commands.Context.from_interaction(interaction)
-
     @admin_app_group.command(name="reset", description="Reset user data.")
     @app_commands.checks.has_permissions(manage_guild=True)
     @app_commands.describe(member="User to reset", reset_type="all, facts, affection, or aliases")
@@ -306,37 +303,160 @@ class Admin(commands.Cog):
         member: discord.Member,
         reset_type: app_commands.Choice[str] = None
     ):
-        ctx = await self._slash_context(interaction)
+        if not interaction.guild:
+            await interaction.response.send_message("Use this command in a server.", ephemeral=True)
+            return
+
         target = reset_type.value if reset_type else "all"
-        await self.reset_user(ctx, member=member, reset_type=target)
+        valid_types = ["all", "facts", "affection", "aliases"]
+        if target not in valid_types:
+            await interaction.response.send_message(
+                f"âŒ Invalid type. Use one of: {', '.join(valid_types)}",
+                ephemeral=True,
+            )
+            return
+
+        deleted = await reset_user_data(interaction.guild.id, member.id, target)
+
+        embed = discord.Embed(
+            title=f"ðŸ—‘ï¸ Reset Data for {member.display_name}",
+            color=discord.Color.red(),
+        )
+
+        if target == "all":
+            embed.add_field(name="Facts Deleted", value=str(deleted["facts"]), inline=True)
+            embed.add_field(name="Affection Reset", value="Yes" if deleted["affection"] else "No", inline=True)
+            embed.add_field(name="Aliases Deleted", value=str(deleted["aliases"]), inline=True)
+        else:
+            embed.description = f"Reset `{target}` for {member.mention}"
+
+        await interaction.response.send_message(embed=embed)
+        logger.info("Admin %s reset %s for %s", interaction.user, target, member)
 
     @admin_app_group.command(name="view", description="View a user's profile.")
     @app_commands.checks.has_permissions(manage_guild=True)
     @app_commands.describe(member="User to view")
     async def view_user_slash(self, interaction: discord.Interaction, member: discord.Member):
-        ctx = await self._slash_context(interaction)
-        await self.view_user(ctx, member=member)
+        if not interaction.guild:
+            await interaction.response.send_message("Use this command in a server.", ephemeral=True)
+            return
+
+        profile = await get_user_full_profile(interaction.guild.id, member.id)
+
+        embed = discord.Embed(
+            title=f"ðŸ‘¤ Profile: {member.display_name}",
+            color=discord.Color.blue(),
+        )
+
+        aff = profile.get("affection", {})
+        embed.add_field(
+            name="ðŸ’• Affection",
+            value=f"{aff.get('affection_points', 0)} pts ({aff.get('affection_level', 'stranger')})",
+            inline=True,
+        )
+
+        embed.add_field(
+            name="ðŸŒ Timezone",
+            value=profile.get("timezone", "Not set"),
+            inline=True,
+        )
+
+        embed.add_field(
+            name="ðŸŽ‚ Birthday",
+            value=profile.get("birthday") or "Not set",
+            inline=True,
+        )
+
+        aliases = profile.get("aliases", [])
+        if aliases:
+            embed.add_field(
+                name=f"ðŸ“› Aliases ({len(aliases)})",
+                value=", ".join(aliases[:10]) + ("..." if len(aliases) > 10 else ""),
+                inline=False,
+            )
+
+        facts = profile.get("facts", [])
+        if facts:
+            fact_list = []
+            for f in facts[:5]:
+                source = f.get("source", "manual")
+                source_emoji = "ðŸ“" if source == "manual" else "ðŸ§ " if source == "learned" else "ðŸ”§"
+                fact_list.append(f"{source_emoji} `{f['id']}` {f['fact'][:50]}...")
+
+            embed.add_field(
+                name=f"ðŸ“‹ Facts ({len(facts)} total)",
+                value="\n".join(fact_list) if fact_list else "None",
+                inline=False,
+            )
+
+        await interaction.response.send_message(embed=embed)
 
     @admin_app_group.command(name="setfact", description="Add a fact for a user.")
     @app_commands.checks.has_permissions(manage_guild=True)
     @app_commands.describe(member="User", fact="Fact to store")
     async def set_fact_slash(self, interaction: discord.Interaction, member: discord.Member, fact: str):
-        ctx = await self._slash_context(interaction)
-        await self.set_fact(ctx, member=member, fact=fact)
+        if not interaction.guild:
+            await interaction.response.send_message("Use this command in a server.", ephemeral=True)
+            return
+
+        fact_id = await add_fact_with_source(
+            interaction.guild.id,
+            member.id,
+            fact,
+            source="admin",
+            learned_from_user_id=interaction.user.id,
+        )
+
+        await interaction.response.send_message(
+            f"âœ… Added fact #{fact_id} for {member.display_name}:\n> {fact}"
+        )
+        logger.info("Admin %s added fact for %s: %s", interaction.user, member, fact[:50])
 
     @admin_app_group.command(name="delfact", description="Delete a fact by ID.")
     @app_commands.checks.has_permissions(manage_guild=True)
     @app_commands.describe(member="User", fact_id="Fact ID")
     async def del_fact_slash(self, interaction: discord.Interaction, member: discord.Member, fact_id: int):
-        ctx = await self._slash_context(interaction)
-        await self.del_fact(ctx, member=member, fact_id=fact_id)
+        if not interaction.guild:
+            await interaction.response.send_message("Use this command in a server.", ephemeral=True)
+            return
+
+        facts = await get_facts_detailed(interaction.guild.id, member.id)
+        fact_ids = [f["id"] for f in facts]
+
+        if fact_id not in fact_ids:
+            await interaction.response.send_message(
+                f"âŒ Fact #{fact_id} not found for {member.display_name}",
+                ephemeral=True,
+            )
+            return
+
+        success = await delete_fact_by_id(interaction.guild.id, fact_id)
+        if success:
+            await interaction.response.send_message(
+                f"âœ… Deleted fact #{fact_id} for {member.display_name}"
+            )
+            logger.info("Admin %s deleted fact #%s for %s", interaction.user, fact_id, member)
+        else:
+            await interaction.response.send_message("âŒ Failed to delete fact", ephemeral=True)
 
     @admin_app_group.command(name="affection", description="Set affection points for a user.")
     @app_commands.checks.has_permissions(manage_guild=True)
     @app_commands.describe(member="User", points="Affection points")
     async def set_affection_slash(self, interaction: discord.Interaction, member: discord.Member, points: int):
-        ctx = await self._slash_context(interaction)
-        await self.set_affection(ctx, member=member, points=points)
+        if not interaction.guild:
+            await interaction.response.send_message("Use this command in a server.", ephemeral=True)
+            return
+        if points < 0:
+            await interaction.response.send_message("âŒ Points cannot be negative", ephemeral=True)
+            return
+
+        result = await set_affection_value(interaction.guild.id, member.id, points)
+
+        await interaction.response.send_message(
+            f"âœ… Set {member.display_name}'s affection to "
+            f"**{points}** points (Level: {result['affection_level']})"
+        )
+        logger.info("Admin %s set affection for %s to %s", interaction.user, member, points)
 
     @admin_app_group.command(name="model", description="Change the active AI model.")
     @app_commands.checks.has_permissions(manage_guild=True)

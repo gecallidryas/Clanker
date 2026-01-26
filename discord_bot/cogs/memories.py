@@ -591,55 +591,293 @@ class Memories(commands.Cog):
         
         await ctx.send(embed=embed)
 
-    async def _slash_context(self, interaction: discord.Interaction) -> commands.Context:
-        return await commands.Context.from_interaction(interaction)
-
     @app_commands.command(name="timezone", description="Set your timezone.")
     @app_commands.describe(timezone="IANA timezone or abbreviation (e.g., Asia/Dhaka, EST)")
     async def set_user_timezone_slash(self, interaction: discord.Interaction, timezone: str):
-        ctx = await self._slash_context(interaction)
-        await self.set_user_timezone(ctx, timezone=timezone)
+        if not interaction.guild:
+            await interaction.response.send_message("Please use this command in a server.", ephemeral=True)
+            return
+
+        TIMEZONE_ALIASES = {
+            "EST": "America/New_York",
+            "EDT": "America/New_York",
+            "CST": "America/Chicago",
+            "CDT": "America/Chicago",
+            "MST": "America/Denver",
+            "MDT": "America/Denver",
+            "PST": "America/Los_Angeles",
+            "PDT": "America/Los_Angeles",
+            "AKST": "America/Anchorage",
+            "AKDT": "America/Anchorage",
+            "HST": "Pacific/Honolulu",
+            "GMT": "Europe/London",
+            "BST": "Europe/London",
+            "CET": "Europe/Paris",
+            "CEST": "Europe/Paris",
+            "EET": "Europe/Helsinki",
+            "EEST": "Europe/Helsinki",
+            "WET": "Europe/Lisbon",
+            "IST": "Asia/Kolkata",
+            "BDT": "Asia/Dhaka",
+            "JST": "Asia/Tokyo",
+            "KST": "Asia/Seoul",
+            "CST_CHINA": "Asia/Shanghai",
+            "HKT": "Asia/Hong_Kong",
+            "SGT": "Asia/Singapore",
+            "PHT": "Asia/Manila",
+            "ICT": "Asia/Bangkok",
+            "WIB": "Asia/Jakarta",
+            "AEST": "Australia/Sydney",
+            "AEDT": "Australia/Sydney",
+            "ACST": "Australia/Adelaide",
+            "AWST": "Australia/Perth",
+            "UTC": "UTC",
+            "MTC": "Europe/Moscow",
+            "MSK": "Europe/Moscow",
+            "GST": "Asia/Dubai",
+            "AST": "Asia/Riyadh",
+            "NZST": "Pacific/Auckland",
+            "NZDT": "Pacific/Auckland",
+        }
+
+        tz_input = timezone.strip().upper()
+        if tz_input in TIMEZONE_ALIASES:
+            timezone = TIMEZONE_ALIASES[tz_input]
+
+        try:
+            tz = pytz.timezone(timezone)
+        except pytz.UnknownTimeZoneError:
+            abbrev_examples = ", ".join(list(TIMEZONE_ALIASES.keys())[:8])
+            await interaction.response.send_message(
+                f"âŒ Unknown timezone: `{timezone}`\n"
+                f"**Abbreviations:** `{abbrev_examples}`, ...\n"
+                f"**Full format:** `Asia/Dhaka`, `America/New_York`, `Europe/London`\n"
+                f"Find more: https://en.wikipedia.org/wiki/List_of_tz_database_time_zones",
+                ephemeral=True,
+            )
+            return
+
+        await set_timezone(interaction.guild.id, interaction.user.id, timezone)
+
+        from datetime import datetime
+        current_time = datetime.now(tz).strftime("%H:%M")
+
+        await interaction.response.send_message(
+            f"âœ… Timezone set to **{timezone}**!\n"
+            f"Your current time: `{current_time}`"
+        )
 
     @app_commands.command(name="remember", description="Save a fact about yourself.")
     @app_commands.describe(fact="The fact to remember", member="User to store the fact for (optional)")
     async def remember_fact_slash(self, interaction: discord.Interaction, fact: str, member: discord.Member = None):
-        ctx = await self._slash_context(interaction)
+        if not interaction.guild:
+            await interaction.response.send_message(
+                "Facts are server-specific. Use this in a server.",
+                ephemeral=True,
+            )
+            return
+
+        if len(fact) > 500:
+            await interaction.response.send_message(
+                "Fact too long! Please keep it under 500 characters.",
+                ephemeral=True,
+            )
+            return
+
         target = member or interaction.user
-        await self._remember_fact_for(ctx, target, fact)
+        await interaction.response.defer(thinking=True)
+
+        await create_user(interaction.guild.id, target.id)
+        existing = await get_facts(interaction.guild.id, target.id)
+        summarized = await self._summarize_facts(existing, fact) if existing else None
+
+        if summarized:
+            await delete_facts(interaction.guild.id, target.id)
+            for item in summarized:
+                await add_fact(interaction.guild.id, target.id, item)
+
+            await interaction.followup.send(
+                f"Updated memory for {target.display_name} with {len(summarized)} fact(s)."
+            )
+            return
+
+        await add_fact(interaction.guild.id, target.id, fact)
+        target_text = f" for {target.display_name}" if target.id != interaction.user.id else ""
+        await interaction.followup.send(f"Got it! I'll remember that{target_text}.")
 
     @app_commands.command(name="forget", description="Clear your stored facts.")
     async def forget_facts_slash(self, interaction: discord.Interaction):
-        ctx = await self._slash_context(interaction)
-        await self.forget_facts(ctx)
+        if not interaction.guild:
+            await interaction.response.send_message(
+                "Facts are server-specific. Use this in a server.",
+                ephemeral=True,
+            )
+            return
+
+        count = await delete_facts(interaction.guild.id, interaction.user.id)
+
+        if count == 0:
+            await interaction.response.send_message("ðŸ¤” I don't have any facts stored about you!")
+        else:
+            await interaction.response.send_message(f"ðŸ—‘ï¸ Cleared {count} fact(s) from memory!")
 
     @app_commands.command(name="myinfo", description="View your stored timezone and facts.")
     async def show_user_info_slash(self, interaction: discord.Interaction):
-        ctx = await self._slash_context(interaction)
-        await self.show_user_info(ctx)
+        if not interaction.guild:
+            await interaction.response.send_message(
+                "Profiles are server-specific. Use this in a server.",
+                ephemeral=True,
+            )
+            return
+
+        user = await get_user(interaction.guild.id, interaction.user.id)
+        facts = await get_facts(interaction.guild.id, interaction.user.id)
+
+        embed = discord.Embed(
+            title=f"ðŸ“‹ {interaction.user.display_name}'s Profile",
+            color=discord.Color.pink(),
+        )
+
+        timezone = user.get("timezone", "Not set") if user else "Not set"
+        embed.add_field(
+            name="ðŸŒ Timezone",
+            value=f"`{timezone}`",
+            inline=True,
+        )
+
+        if facts:
+            facts_text = "\n".join(f"â€¢ {fact}" for fact in facts[:10])
+            if len(facts) > 10:
+                facts_text += f"\n... and {len(facts) - 10} more"
+            embed.add_field(
+                name=f"ðŸ“ Remembered Facts ({len(facts)})",
+                value=facts_text,
+                inline=False,
+            )
+        else:
+            embed.add_field(
+                name="ðŸ“ Remembered Facts",
+                value="*No facts stored yet. Use `/remember <fact>` to add some!*",
+                inline=False,
+            )
+
+        embed.set_footer(text="Use /remember to add facts, /forget to clear them")
+        await interaction.response.send_message(embed=embed)
 
     @app_commands.command(name="aka", description="Add an alias for a user.")
     @app_commands.describe(member="User to alias", alias="Alias name")
     async def add_user_alias_slash(self, interaction: discord.Interaction, member: discord.Member, alias: str):
-        ctx = await self._slash_context(interaction)
-        await self.add_user_alias(ctx, member=member, alias=alias)
+        if not interaction.guild:
+            await interaction.response.send_message("Please use this command in a server.", ephemeral=True)
+            return
+        if not member or not alias:
+            await interaction.response.send_message("Usage: `/aka @user <alias>`", ephemeral=True)
+            return
+
+        alias = alias.strip()
+        if not alias:
+            await interaction.response.send_message("Please provide a non-empty alias.", ephemeral=True)
+            return
+        if len(alias) > 64:
+            await interaction.response.send_message("Alias too long. Please keep it under 64 characters.", ephemeral=True)
+            return
+
+        added = await add_alias(interaction.guild.id, member.id, alias, interaction.user.id)
+        if added:
+            await interaction.response.send_message(f"Added alias `{alias}` for {member.display_name}.")
+        else:
+            await interaction.response.send_message(
+                f"`{alias}` is already an alias for {member.display_name}.",
+                ephemeral=True,
+            )
 
     @app_commands.command(name="aliases", description="List aliases for a user.")
     @app_commands.describe(member="User to list aliases for (optional)")
     async def list_user_aliases_slash(self, interaction: discord.Interaction, member: discord.Member = None):
-        ctx = await self._slash_context(interaction)
-        await self.list_user_aliases(ctx, member=member)
+        if not interaction.guild:
+            await interaction.response.send_message("Please use this command in a server.", ephemeral=True)
+            return
+
+        target = member or interaction.user
+        aliases = await get_aliases(interaction.guild.id, target.id)
+        if not aliases:
+            await interaction.response.send_message(
+                f"No aliases found for {target.display_name}.",
+                ephemeral=True,
+            )
+            return
+
+        alias_text = ", ".join(aliases[:20])
+        if len(aliases) > 20:
+            alias_text += f", ... (+{len(aliases) - 20} more)"
+
+        embed = discord.Embed(
+            title=f"Aliases for {target.display_name}",
+            description=alias_text,
+            color=discord.Color.blue(),
+        )
+        await interaction.response.send_message(embed=embed)
 
     @app_commands.command(name="whois", description="Find a user by alias.")
     @app_commands.describe(alias="Alias to look up")
     async def whois_alias_slash(self, interaction: discord.Interaction, alias: str):
-        ctx = await self._slash_context(interaction)
-        await self.whois_alias(ctx, alias=alias)
+        if not interaction.guild:
+            await interaction.response.send_message("Please use this command in a server.", ephemeral=True)
+            return
+
+        alias = alias.strip()
+        if not alias:
+            await interaction.response.send_message("Usage: `/whois <alias>`", ephemeral=True)
+            return
+
+        user_id = await find_user_by_alias(interaction.guild.id, alias)
+        if not user_id:
+            await interaction.response.send_message(
+                f"No user found with alias `{alias}`.",
+                ephemeral=True,
+            )
+            return
+
+        member = interaction.guild.get_member(user_id)
+        if member:
+            await interaction.response.send_message(f"`{alias}` belongs to {member.mention}.")
+            return
+
+        user = self.bot.get_user(user_id)
+        if user:
+            await interaction.response.send_message(f"`{alias}` belongs to {user.name} (`{user_id}`).")
+        else:
+            await interaction.response.send_message(f"`{alias}` belongs to user ID `{user_id}`.")
 
     @app_commands.command(name="aboutuser", description="View facts about another user.")
     @app_commands.describe(member="User to view facts for")
     async def about_user_slash(self, interaction: discord.Interaction, member: discord.Member):
-        ctx = await self._slash_context(interaction)
-        await self.about_user(ctx, member=member)
+        if not interaction.guild:
+            await interaction.response.send_message("Please use this command in a server.", ephemeral=True)
+            return
+
+        if member is None:
+            await interaction.response.send_message("Usage: `/aboutuser @user`", ephemeral=True)
+            return
+
+        facts = await get_facts(interaction.guild.id, member.id)
+        if not facts:
+            await interaction.response.send_message(
+                f"I don't have any facts stored about {member.display_name}.",
+                ephemeral=True,
+            )
+            return
+
+        facts_text = "\n".join(f"- {fact}" for fact in facts[:10])
+        if len(facts) > 10:
+            facts_text += f"\n... and {len(facts) - 10} more"
+
+        embed = discord.Embed(
+            title=f"Facts about {member.display_name}",
+            description=facts_text,
+            color=discord.Color.pink(),
+        )
+        await interaction.response.send_message(embed=embed)
 
     @app_commands.command(name="birthday", description="View or set birthdays.")
     @app_commands.describe(
@@ -659,11 +897,39 @@ class Memories(commands.Cog):
         date: str = None,
         member: discord.Member = None,
     ):
-        ctx = await self._slash_context(interaction)
+        if not interaction.guild:
+            await interaction.response.send_message("Please use this command in a server.", ephemeral=True)
+            return
+
+        from utils.db_handler import get_birthday, set_birthday, get_upcoming_birthdays
+        import re
+
         action_value = action.value if action else "view"
 
         if action_value == "view":
-            await self.birthday(ctx, member=member)
+            target = member or interaction.user
+            bday = await get_birthday(interaction.guild.id, target.id)
+
+            if bday:
+                month, day = bday.split("-")
+                month_name = [
+                    "", "January", "February", "March", "April", "May", "June",
+                    "July", "August", "September", "October", "November", "December"
+                ][int(month)]
+                await interaction.response.send_message(
+                    f"ðŸŽ‚ {target.display_name}'s birthday is **{month_name} {int(day)}**!"
+                )
+            else:
+                if target == interaction.user:
+                    await interaction.response.send_message(
+                        "ðŸ“… You haven't set your birthday yet! Use `/birthday set MM-DD`",
+                        ephemeral=True,
+                    )
+                else:
+                    await interaction.response.send_message(
+                        f"ðŸ“… {target.display_name} hasn't set their birthday yet!",
+                        ephemeral=True,
+                    )
             return
 
         if action_value == "set":
@@ -673,11 +939,76 @@ class Memories(commands.Cog):
                     ephemeral=True,
                 )
                 return
-            await self.birthday_set(ctx, date=date, member=member)
+
+            if not re.match(r"^\d{2}-\d{2}$", date):
+                await interaction.response.send_message(
+                    "âŒ Invalid format! Use `MM-DD` (e.g., `03-15` for March 15th)",
+                    ephemeral=True,
+                )
+                return
+
+            month, day = map(int, date.split("-"))
+            if month < 1 or month > 12:
+                await interaction.response.send_message("âŒ Month must be between 01 and 12!", ephemeral=True)
+                return
+
+            days_in_month = [0, 31, 29, 31, 30, 31, 30, 31, 31, 30, 31, 30, 31]
+            if day < 1 or day > days_in_month[month]:
+                await interaction.response.send_message(
+                    f"âŒ Invalid day for month {month:02d}!",
+                    ephemeral=True,
+                )
+                return
+
+            target = member or interaction.user
+            await set_birthday(interaction.guild.id, target.id, date)
+
+            month_name = [
+                "", "January", "February", "March", "April", "May", "June",
+                "July", "August", "September", "October", "November", "December"
+            ][month]
+
+            target_text = target.display_name if target.id != interaction.user.id else "you"
+            await interaction.response.send_message(
+                f"ðŸŽ‚ Birthday set to **{month_name} {day}** for {target_text}! I'll remember~ â™¡"
+            )
             return
 
         if action_value == "upcoming":
-            await self.birthday_upcoming(ctx)
+            upcoming = await get_upcoming_birthdays(interaction.guild.id, 90)
+
+            if not upcoming:
+                await interaction.response.send_message(
+                    "ðŸ“… No birthdays coming up in the next 3 months!",
+                    ephemeral=True,
+                )
+                return
+
+            embed = discord.Embed(
+                title="ðŸŽ‚ Upcoming Birthdays (Next 3 Months)",
+                color=discord.Color.pink(),
+            )
+
+            for entry in upcoming[:10]:
+                user = self.bot.get_user(entry["user_id"])
+                name = user.display_name if user else f"User {entry['user_id']}"
+                days = entry["days_until"]
+
+                if days == 0:
+                    when = "**Today!** ðŸŽ‰"
+                elif days == 1:
+                    when = "Tomorrow"
+                else:
+                    when = f"In {days} days"
+
+                month, day = entry["birthday"].split("-")
+                embed.add_field(
+                    name=f"{name}",
+                    value=f"{month}/{day} - {when}",
+                    inline=True,
+                )
+
+            await interaction.response.send_message(embed=embed)
             return
 
 
