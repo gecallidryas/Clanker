@@ -298,8 +298,8 @@ class Admin(commands.Cog):
                 except Exception as e:
                     logger.error("Global sync failed: %s", e, exc_info=True)
                     await ctx.send("Sync failed. Check logs for details.")
-             else:
-                  await ctx.send("Only bot owner can sync globally.")
+            else:
+                await ctx.send("Only bot owner can sync globally.")
         else:
             await ctx.send("Usage: `!admin sync [guild|global]`")
 
