@@ -327,6 +327,20 @@ class Admin(commands.Cog):
             logger.error("Clear global commands failed: %s", e, exc_info=True)
             await ctx.send("Clear global commands failed. Check logs for details.")
 
+    @admin_group.command(name="clearguild")
+    async def clear_guild_commands(self, ctx: commands.Context):
+        """Clear all guild-specific slash commands for this server."""
+        if not ctx.guild:
+            await ctx.send("Use this command in a server.")
+            return
+        try:
+            self.bot.tree.clear_commands(guild=ctx.guild)
+            await self.bot.tree.sync(guild=ctx.guild)
+            await ctx.send(f"Cleared all guild slash commands for **{ctx.guild.name}**.")
+        except Exception as e:
+            logger.error("Clear guild commands failed: %s", e, exc_info=True)
+            await ctx.send("Clear guild commands failed. Check logs for details.")
+
     @admin_app_group.command(name="reset", description="Reset user data.")
     @app_commands.checks.has_permissions(manage_guild=True)
     @app_commands.describe(member="User to reset", reset_type="all, facts, affection, or aliases")
@@ -522,6 +536,29 @@ class Admin(commands.Cog):
             logger.error("Clear global commands failed: %s", e, exc_info=True)
             await interaction.response.send_message(
                 "Clear global commands failed. Check logs for details.",
+                ephemeral=True,
+            )
+
+    @admin_app_group.command(
+        name="clearguild",
+        description="Clear all guild-specific slash commands for this server.",
+    )
+    @app_commands.checks.has_permissions(manage_guild=True)
+    async def clear_guild_commands_slash(self, interaction: discord.Interaction):
+        if not interaction.guild:
+            await interaction.response.send_message("Use this command in a server.", ephemeral=True)
+            return
+        try:
+            self.bot.tree.clear_commands(guild=interaction.guild)
+            await self.bot.tree.sync(guild=interaction.guild)
+            await interaction.response.send_message(
+                f"Cleared all guild slash commands for **{interaction.guild.name}**.",
+                ephemeral=True,
+            )
+        except Exception as e:
+            logger.error("Clear guild commands failed: %s", e, exc_info=True)
+            await interaction.response.send_message(
+                "Clear guild commands failed. Check logs for details.",
                 ephemeral=True,
             )
 
