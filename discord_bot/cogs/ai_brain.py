@@ -710,13 +710,26 @@ class AIBrain(commands.Cog):
     async def get_user_gender(
         self,
         member: Optional[discord.Member],
-        guild_id: int
+        guild_id: int,
+        user_id: int
     ) -> str:
         """Infer gender from configured roles for this server."""
-        if not member or not member.guild:
-            return "unknown"
+        if not member or not isinstance(member, discord.Member) or not member.guild:
+            guild = self.bot.get_guild(guild_id)
+            if not guild:
+                return "unknown"
+            cached_member = guild.get_member(user_id)
+            if cached_member:
+                member = cached_member
+            else:
+                try:
+                    member = await guild.fetch_member(user_id)
+                except (discord.Forbidden, discord.NotFound, discord.HTTPException):
+                    return "unknown"
 
         gender_roles = await get_gender_roles(guild_id)
+        if not gender_roles:
+            return "unknown"
         matched_genders = set()
         for role in member.roles:
             gender = gender_roles.get(role.id)
@@ -802,7 +815,7 @@ class AIBrain(commands.Cog):
         affection_points = affection_data.get("affection_points", 0)
 
         # Determine user gender from configured roles
-        gender = await self.get_user_gender(member, guild_id)
+        gender = await self.get_user_gender(member, guild_id, user_id)
         if gender == "unknown":
             gender_note = (
                 "[User Gender: Unknown. Avoid gendered pronouns or honorifics, "

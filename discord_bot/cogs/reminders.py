@@ -160,7 +160,10 @@ class Reminders(commands.Cog):
             return
         
         # Check reminder limit
-        existing = await get_user_reminders(ctx.author.id)
+        if not ctx.guild:
+            await ctx.send("Please use reminders inside a server.")
+            return
+        existing = await get_user_reminders(ctx.author.id, ctx.guild.id)
         if len(existing) >= MAX_REMINDERS:
             await ctx.send(f"❌ You have too many reminders! Maximum is {MAX_REMINDERS}.")
             return
@@ -188,7 +191,7 @@ class Reminders(commands.Cog):
         # Store reminder
         reminder_id = await add_reminder(
             user_id=ctx.author.id,
-            guild_id=ctx.guild.id if ctx.guild else None,
+            guild_id=ctx.guild.id,
             channel_id=ctx.channel.id,
             message=message,
             remind_at=remind_at
@@ -210,7 +213,10 @@ class Reminders(commands.Cog):
     @remind.command(name="list")
     async def remind_list(self, ctx: commands.Context):
         """List all your active reminders."""
-        reminders = await get_user_reminders(ctx.author.id)
+        if not ctx.guild:
+            await ctx.send("Please use reminders inside a server.")
+            return
+        reminders = await get_user_reminders(ctx.author.id, ctx.guild.id)
         
         if not reminders:
             await ctx.send("📭 You don't have any active reminders!")
@@ -243,7 +249,10 @@ class Reminders(commands.Cog):
     @remind.command(name="cancel", aliases=["delete", "remove"])
     async def remind_cancel(self, ctx: commands.Context, reminder_id: int):
         """Cancel a reminder by ID."""
-        success = await delete_reminder(reminder_id, ctx.author.id)
+        if not ctx.guild:
+            await ctx.send("Please use reminders inside a server.")
+            return
+        success = await delete_reminder(reminder_id, ctx.author.id, ctx.guild.id)
         
         if success:
             await ctx.send(f"✅ Reminder #{reminder_id} cancelled!")
@@ -269,13 +278,8 @@ class Reminders(commands.Cog):
                 # Get channel
                 channel = self.bot.get_channel(reminder["channel_id"])
                 if not channel:
-                    # Try DM
-                    user = self.bot.get_user(reminder["user_id"])
-                    if user:
-                        channel = await user.create_dm()
-                    else:
-                        await complete_reminder(reminder["id"])
-                        continue
+                    await complete_reminder(reminder["id"], reminder["guild_id"])
+                    continue
                 
                 # Get mode for personality
                 mode = "mode_femboy"
@@ -294,7 +298,7 @@ class Reminders(commands.Cog):
                 logger.error("Error sending reminder %s: %s", reminder["id"], e, exc_info=True)
             
             # Mark as complete
-            await complete_reminder(reminder["id"])
+            await complete_reminder(reminder["id"], reminder["guild_id"])
     
     @reminder_check_loop.before_loop
     async def before_reminder_check(self):
@@ -322,7 +326,14 @@ class Reminders(commands.Cog):
             )
             return
 
-        existing = await get_user_reminders(interaction.user.id)
+        if not interaction.guild:
+            await interaction.response.send_message(
+                "Please use reminders inside a server.",
+                ephemeral=True,
+            )
+            return
+
+        existing = await get_user_reminders(interaction.user.id, interaction.guild.id)
         if len(existing) >= MAX_REMINDERS:
             await interaction.response.send_message(
                 f"âŒ You have too many reminders! Maximum is {MAX_REMINDERS}.",
@@ -357,7 +368,7 @@ class Reminders(commands.Cog):
         channel_id = interaction.channel.id if interaction.channel else None
         reminder_id = await add_reminder(
             user_id=interaction.user.id,
-            guild_id=interaction.guild.id if interaction.guild else None,
+            guild_id=interaction.guild.id,
             channel_id=channel_id,
             message=message,
             remind_at=remind_at,
@@ -377,7 +388,14 @@ class Reminders(commands.Cog):
 
     @app_commands.command(name="reminders", description="List your active reminders.")
     async def reminders_slash(self, interaction: discord.Interaction):
-        reminders = await get_user_reminders(interaction.user.id)
+        if not interaction.guild:
+            await interaction.response.send_message(
+                "Please use reminders inside a server.",
+                ephemeral=True,
+            )
+            return
+
+        reminders = await get_user_reminders(interaction.user.id, interaction.guild.id)
 
         if not reminders:
             await interaction.response.send_message(
@@ -417,7 +435,14 @@ class Reminders(commands.Cog):
     @app_commands.command(name="remindcancel", description="Cancel a reminder by ID.")
     @app_commands.describe(reminder_id="Reminder ID to cancel")
     async def remind_cancel_slash(self, interaction: discord.Interaction, reminder_id: int):
-        success = await delete_reminder(reminder_id, interaction.user.id)
+        if not interaction.guild:
+            await interaction.response.send_message(
+                "Please use reminders inside a server.",
+                ephemeral=True,
+            )
+            return
+
+        success = await delete_reminder(reminder_id, interaction.user.id, interaction.guild.id)
 
         if success:
             await interaction.response.send_message(

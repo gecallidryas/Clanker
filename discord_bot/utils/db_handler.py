@@ -19,8 +19,9 @@ Usage:
 import os
 from pathlib import Path
 import aiosqlite
-from typing import Optional, List, Dict, Any
+from typing import Optional, List, Dict, Any, Set
 from datetime import datetime
+from contextlib import asynccontextmanager
 
 from utils.logger import get_logger
 
@@ -36,114 +37,53 @@ def _resolve_db_path(value: Optional[str]) -> str:
     return str(path)
 
 
-# Database file path
-DATABASE_PATH = _resolve_db_path(os.getenv("DATABASE_PATH"))
+def _resolve_data_dir(value: Optional[str]) -> Path:
+    if not value:
+        return BASE_DIR / "data"
+    path = Path(value)
+    if not path.is_absolute():
+        path = BASE_DIR / path
+    return path
+
+
+DATA_DIR = _resolve_data_dir(os.getenv("DATABASE_DIR"))
+DATA_DIR.mkdir(parents=True, exist_ok=True)
+
+# Legacy single-db path (used for migrations only)
+LEGACY_DATABASE_PATH = _resolve_db_path(os.getenv("LEGACY_DATABASE_PATH") or os.getenv("DATABASE_PATH"))
+
+# Global database (bot stats + registry)
+GLOBAL_DATABASE_PATH = _resolve_db_path(os.getenv("GLOBAL_DATABASE_PATH") or str(DATA_DIR / "global.db"))
 
 logger = get_logger(__name__)
 
+_initialized_guilds: Set[int] = set()
+_global_initialized = False
 
-async def init_db() -> None:
-    """
-    Initialize the database and create tables if they don't exist.
-    """
-    async with aiosqlite.connect(DATABASE_PATH) as db:
-        # Users table (global registry)
-        await db.execute("""
-            CREATE TABLE IF NOT EXISTS users (
-                user_id INTEGER PRIMARY KEY,
-                timezone TEXT DEFAULT 'UTC',
-                birthday TEXT,
-                created_at TIMESTAMP DEFAULT CURRENT_TIMESTAMP
-            )
-        """)
 
-        # Guild-scoped user profiles (timezone/birthday)
-        await db.execute("""
-            CREATE TABLE IF NOT EXISTS user_profiles (
-                guild_id INTEGER NOT NULL,
-                user_id INTEGER NOT NULL,
-                timezone TEXT DEFAULT 'UTC',
-                birthday TEXT,
-                created_at TIMESTAMP DEFAULT CURRENT_TIMESTAMP,
-                PRIMARY KEY (guild_id, user_id),
-                FOREIGN KEY (user_id) REFERENCES users(user_id)
-            )
-        """)
-        
-        # User facts table (for !remember command)
-        await db.execute("""
-            CREATE TABLE IF NOT EXISTS user_facts (
-                id INTEGER PRIMARY KEY AUTOINCREMENT,
-                guild_id INTEGER NOT NULL,
-                user_id INTEGER NOT NULL,
-                fact TEXT NOT NULL,
-                created_at TIMESTAMP DEFAULT CURRENT_TIMESTAMP,
-                FOREIGN KEY (user_id) REFERENCES users(user_id)
-            )
-        """)
-        
-        # Server configuration table
-        await db.execute("""
-            CREATE TABLE IF NOT EXISTS server_config (
-                guild_id INTEGER PRIMARY KEY,
-                persona_mode TEXT DEFAULT 'mode_femboy',
-                bump_channel_id INTEGER,
-                updated_at TIMESTAMP DEFAULT CURRENT_TIMESTAMP
-            )
-        """)
-        
-        # ============================================
-        # Phase 6: New Tables
-        # ============================================
-        
-        # User affection tracking (guild scoped)
-        await db.execute("""
-            CREATE TABLE IF NOT EXISTS user_affection_v2 (
-                guild_id INTEGER NOT NULL,
-                user_id INTEGER NOT NULL,
-                affection_points INTEGER DEFAULT 0,
-                total_interactions INTEGER DEFAULT 0,
-                last_interaction TIMESTAMP,
-                affection_level TEXT DEFAULT 'stranger',
-                PRIMARY KEY (guild_id, user_id)
-            )
-        """)
-        
-        # Bot mood per server
-        await db.execute("""
-            CREATE TABLE IF NOT EXISTS bot_mood (
-                guild_id INTEGER PRIMARY KEY,
-                mood TEXT DEFAULT 'neutral',
-                mood_value INTEGER DEFAULT 50,
-                last_updated TIMESTAMP DEFAULT CURRENT_TIMESTAMP
-            )
-        """)
-        
-        # Reminders
-        await db.execute("""
-            CREATE TABLE IF NOT EXISTS reminders (
-                id INTEGER PRIMARY KEY AUTOINCREMENT,
-                user_id INTEGER NOT NULL,
-                guild_id INTEGER,
-                channel_id INTEGER NOT NULL,
-                message TEXT NOT NULL,
-                remind_at TIMESTAMP NOT NULL,
-                created_at TIMESTAMP DEFAULT CURRENT_TIMESTAMP,
-                completed BOOLEAN DEFAULT FALSE
-            )
-        """)
+def get_guild_db_path(guild_id: int) -> str:
+    return str(DATA_DIR / f"guild_{guild_id}.db")
 
-        # Wellbeing checks (one per user per day, per guild)
-        await db.execute("""
-            CREATE TABLE IF NOT EXISTS wellbeing_checks (
-                guild_id INTEGER NOT NULL,
-                user_id INTEGER NOT NULL,
-                last_asked_date TEXT,
-                PRIMARY KEY (guild_id, user_id)
-            )
-        """)
-        
-        # Bot stats (singleton row)
+
+@asynccontextmanager
+async def guild_db(guild_id: int):
+    await _ensure_guild_db(guild_id)
+    async with aiosqlite.connect(get_guild_db_path(guild_id)) as db:
+        yield db
+
+
+@asynccontextmanager
+async def global_db():
+    await _ensure_global_db()
+    async with aiosqlite.connect(GLOBAL_DATABASE_PATH) as db:
+        yield db
+
+
+async def _ensure_global_db() -> None:
+    global _global_initialized
+    if _global_initialized:
+        return
+    async with aiosqlite.connect(GLOBAL_DATABASE_PATH) as db:
         await db.execute("""
             CREATE TABLE IF NOT EXISTS bot_stats (
                 id INTEGER PRIMARY KEY CHECK (id = 1),
@@ -153,116 +93,243 @@ async def init_db() -> None:
                 start_time TIMESTAMP
             )
         """)
-        
-        # Initialize bot_stats if empty
+        await db.execute("""
+            CREATE TABLE IF NOT EXISTS guild_registry (
+                guild_id INTEGER PRIMARY KEY,
+                created_at TIMESTAMP DEFAULT CURRENT_TIMESTAMP
+            )
+        """)
         await db.execute("""
             INSERT OR IGNORE INTO bot_stats (id, start_time) VALUES (1, ?)
         """, (datetime.now(),))
-        
-        # Add birthday column if missing (migration)
-        try:
-            await db.execute("ALTER TABLE users ADD COLUMN birthday TEXT")
-        except:
-            pass  # Column already exists
-
-        # Best-effort migration to guild_id=0 profile (legacy data)
-        try:
-            await db.execute("""
-                INSERT OR IGNORE INTO user_profiles (guild_id, user_id, timezone, birthday, created_at)
-                SELECT 0, user_id, timezone, birthday, created_at FROM users
-            """)
-        except:
-            pass
-
-        # Add guild_id column to user_facts if missing (migration)
-        try:
-            await db.execute("ALTER TABLE user_facts ADD COLUMN guild_id INTEGER DEFAULT 0")
-        except:
-            pass
-        
-        # ============================================
-        # Phase 7: Enhanced Memory System Tables
-        # ============================================
-        
-        # Add source tracking to user_facts (migration)
-        try:
-            await db.execute("ALTER TABLE user_facts ADD COLUMN source TEXT DEFAULT 'manual'")
-        except:
-            pass
-        try:
-            await db.execute("ALTER TABLE user_facts ADD COLUMN learned_from_user_id INTEGER")
-        except:
-            pass
-
-        # Add guild_id column to user_aliases if missing (migration)
-        try:
-            await db.execute("ALTER TABLE user_aliases ADD COLUMN guild_id INTEGER DEFAULT 0")
-        except:
-            pass
-
-        # Add guild_id column to pending_facts if missing (migration)
-        try:
-            await db.execute("ALTER TABLE pending_facts ADD COLUMN guild_id INTEGER DEFAULT 0")
-        except:
-            pass
-
-        # Add last_asked_date to wellbeing_checks if missing (migration)
-        try:
-            await db.execute("ALTER TABLE wellbeing_checks ADD COLUMN last_asked_date TEXT")
-        except:
-            pass
-        
-        # User aliases table
-        await db.execute("""
-            CREATE TABLE IF NOT EXISTS user_aliases (
-                id INTEGER PRIMARY KEY AUTOINCREMENT,
-                guild_id INTEGER NOT NULL,
-                user_id INTEGER NOT NULL,
-                alias TEXT NOT NULL COLLATE NOCASE,
-                added_by_user_id INTEGER,
-                created_at TIMESTAMP DEFAULT CURRENT_TIMESTAMP,
-                UNIQUE(guild_id, user_id, alias)
-            )
-        """)
-
-        # Gender roles per server
-        await db.execute("""
-            CREATE TABLE IF NOT EXISTS gender_roles (
-                guild_id INTEGER NOT NULL,
-                role_id INTEGER NOT NULL,
-                gender TEXT NOT NULL,
-                PRIMARY KEY (guild_id, role_id)
-            )
-        """)
-        
-        # Pending facts (for ask-before-saving)
-        await db.execute("""
-            CREATE TABLE IF NOT EXISTS pending_facts (
-                id INTEGER PRIMARY KEY AUTOINCREMENT,
-                guild_id INTEGER NOT NULL,
-                about_user_id INTEGER NOT NULL,
-                fact TEXT NOT NULL,
-                learned_from_user_id INTEGER NOT NULL,
-                channel_id INTEGER NOT NULL,
-                message_id INTEGER,
-                created_at TIMESTAMP DEFAULT CURRENT_TIMESTAMP,
-                expires_at TIMESTAMP NOT NULL
-            )
-        """)
-        
-        # Add evil_mode column to server_config (migration)
-        try:
-            await db.execute("ALTER TABLE server_config ADD COLUMN evil_mode BOOLEAN DEFAULT FALSE")
-        except:
-            pass  # Column already exists
-        
         await db.commit()
-        logger.info("Database initialized successfully")
+    _global_initialized = True
 
 
-# ============================================
-# User Operations
-# ============================================
+async def _register_guild(guild_id: int) -> None:
+    await _ensure_global_db()
+    async with aiosqlite.connect(GLOBAL_DATABASE_PATH) as db:
+        await db.execute(
+            "INSERT OR IGNORE INTO guild_registry (guild_id) VALUES (?)",
+            (guild_id,),
+        )
+        await db.commit()
+
+
+async def _ensure_guild_db(guild_id: int) -> None:
+    if guild_id in _initialized_guilds:
+        return
+    await _ensure_global_db()
+    await _register_guild(guild_id)
+
+    async with aiosqlite.connect(get_guild_db_path(guild_id)) as db:
+        await _init_guild_schema(db)
+        await db.commit()
+    _initialized_guilds.add(guild_id)
+
+
+async def init_db() -> None:
+    """
+    Initialize the global database (bot stats + guild registry).
+    Guild databases are created lazily on first use.
+    """
+    await _ensure_global_db()
+
+
+async def init_guild_db(guild_id: int) -> None:
+    """Initialize a specific guild database."""
+    await _ensure_guild_db(guild_id)
+
+
+async def get_registered_guild_ids() -> List[int]:
+    """Return all guild IDs that have registered a database."""
+    await _ensure_global_db()
+    async with aiosqlite.connect(GLOBAL_DATABASE_PATH) as db:
+        async with db.execute("SELECT guild_id FROM guild_registry") as cursor:
+            rows = await cursor.fetchall()
+            return [row[0] for row in rows]
+
+
+async def _init_guild_schema(db: aiosqlite.Connection) -> None:
+    """
+    Initialize the per-guild database schema and run migrations.
+    """
+    # Users table (global registry within this guild DB)
+    await db.execute("""
+        CREATE TABLE IF NOT EXISTS users (
+            user_id INTEGER PRIMARY KEY,
+            timezone TEXT DEFAULT 'UTC',
+            birthday TEXT,
+            created_at TIMESTAMP DEFAULT CURRENT_TIMESTAMP
+        )
+    """)
+
+    # Guild-scoped user profiles (timezone/birthday)
+    await db.execute("""
+        CREATE TABLE IF NOT EXISTS user_profiles (
+            guild_id INTEGER NOT NULL,
+            user_id INTEGER NOT NULL,
+            timezone TEXT DEFAULT 'UTC',
+            birthday TEXT,
+            created_at TIMESTAMP DEFAULT CURRENT_TIMESTAMP,
+            PRIMARY KEY (guild_id, user_id),
+            FOREIGN KEY (user_id) REFERENCES users(user_id)
+        )
+    """)
+    
+    # User facts table (for !remember command)
+    await db.execute("""
+        CREATE TABLE IF NOT EXISTS user_facts (
+            id INTEGER PRIMARY KEY AUTOINCREMENT,
+            guild_id INTEGER NOT NULL,
+            user_id INTEGER NOT NULL,
+            fact TEXT NOT NULL,
+            created_at TIMESTAMP DEFAULT CURRENT_TIMESTAMP,
+            FOREIGN KEY (user_id) REFERENCES users(user_id)
+        )
+    """)
+    
+    # Server configuration table
+    await db.execute("""
+        CREATE TABLE IF NOT EXISTS server_config (
+            guild_id INTEGER PRIMARY KEY,
+            persona_mode TEXT DEFAULT 'mode_femboy',
+            bump_channel_id INTEGER,
+            updated_at TIMESTAMP DEFAULT CURRENT_TIMESTAMP
+        )
+    """)
+    
+    # ============================================
+    # Phase 6: New Tables
+    # ============================================
+    
+    # User affection tracking (guild scoped)
+    await db.execute("""
+        CREATE TABLE IF NOT EXISTS user_affection_v2 (
+            guild_id INTEGER NOT NULL,
+            user_id INTEGER NOT NULL,
+            affection_points INTEGER DEFAULT 0,
+            total_interactions INTEGER DEFAULT 0,
+            last_interaction TIMESTAMP,
+            affection_level TEXT DEFAULT 'stranger',
+            PRIMARY KEY (guild_id, user_id)
+        )
+    """)
+    
+    # Bot mood per server
+    await db.execute("""
+        CREATE TABLE IF NOT EXISTS bot_mood (
+            guild_id INTEGER PRIMARY KEY,
+            mood TEXT DEFAULT 'neutral',
+            mood_value INTEGER DEFAULT 50,
+            last_updated TIMESTAMP DEFAULT CURRENT_TIMESTAMP
+        )
+    """)
+    
+    # Reminders
+    await db.execute("""
+        CREATE TABLE IF NOT EXISTS reminders (
+            id INTEGER PRIMARY KEY AUTOINCREMENT,
+            user_id INTEGER NOT NULL,
+            guild_id INTEGER,
+            channel_id INTEGER NOT NULL,
+            message TEXT NOT NULL,
+            remind_at TIMESTAMP NOT NULL,
+            created_at TIMESTAMP DEFAULT CURRENT_TIMESTAMP,
+            completed BOOLEAN DEFAULT FALSE
+        )
+    """)
+
+    # Wellbeing checks (one per user per day, per guild)
+    await db.execute("""
+        CREATE TABLE IF NOT EXISTS wellbeing_checks (
+            guild_id INTEGER NOT NULL,
+            user_id INTEGER NOT NULL,
+            last_asked_date TEXT,
+            PRIMARY KEY (guild_id, user_id)
+        )
+    """)
+
+    # Add birthday column if missing (migration)
+    try:
+        await db.execute("ALTER TABLE users ADD COLUMN birthday TEXT")
+    except Exception:
+        pass  # Column already exists
+
+    # Add guild_id column to user_facts if missing (migration)
+    try:
+        await db.execute("ALTER TABLE user_facts ADD COLUMN guild_id INTEGER DEFAULT 0")
+    except Exception:
+        pass
+    
+    # ============================================
+    # Phase 7: Enhanced Memory System Tables
+    # ============================================
+    
+    # Add source tracking to user_facts (migration)
+    try:
+        await db.execute("ALTER TABLE user_facts ADD COLUMN source TEXT DEFAULT 'manual'")
+    except Exception:
+        pass
+    try:
+        await db.execute("ALTER TABLE user_facts ADD COLUMN learned_from_user_id INTEGER")
+    except Exception:
+        pass
+
+    # Add guild_id column to user_aliases if missing (migration)
+    try:
+        await db.execute("ALTER TABLE user_aliases ADD COLUMN guild_id INTEGER DEFAULT 0")
+    except Exception:
+        pass
+
+    # Add guild_id column to pending_facts if missing (migration)
+    try:
+        await db.execute("ALTER TABLE pending_facts ADD COLUMN guild_id INTEGER DEFAULT 0")
+    except Exception:
+        pass
+
+    # Add last_asked_date to wellbeing_checks if missing (migration)
+    try:
+        await db.execute("ALTER TABLE wellbeing_checks ADD COLUMN last_asked_date TEXT")
+    except Exception:
+        pass
+    
+    # User aliases table
+    await db.execute("""
+        CREATE TABLE IF NOT EXISTS user_aliases (
+            id INTEGER PRIMARY KEY AUTOINCREMENT,
+            guild_id INTEGER NOT NULL,
+            user_id INTEGER NOT NULL,
+            alias TEXT NOT NULL,
+            added_by_user_id INTEGER,
+            created_at TIMESTAMP DEFAULT CURRENT_TIMESTAMP
+        )
+    """)
+
+    # Pending facts table
+    await db.execute("""
+        CREATE TABLE IF NOT EXISTS pending_facts (
+            id INTEGER PRIMARY KEY AUTOINCREMENT,
+            guild_id INTEGER NOT NULL,
+            about_user_id INTEGER NOT NULL,
+            fact TEXT NOT NULL,
+            learned_from_user_id INTEGER NOT NULL,
+            channel_id INTEGER NOT NULL,
+            message_id INTEGER,
+            expires_at TIMESTAMP NOT NULL,
+            created_at TIMESTAMP DEFAULT CURRENT_TIMESTAMP
+        )
+    """)
+
+    # Gender roles table
+    await db.execute("""
+        CREATE TABLE IF NOT EXISTS gender_roles (
+            guild_id INTEGER NOT NULL,
+            role_id INTEGER NOT NULL,
+            gender TEXT NOT NULL,
+            PRIMARY KEY (guild_id, role_id)
+        )
+    """)
 
 async def get_user(guild_id: int, user_id: int) -> Optional[Dict[str, Any]]:
     """
@@ -278,7 +345,7 @@ async def get_user(guild_id: int, user_id: int) -> Optional[Dict[str, Any]]:
     TODO:
         - [ ] Implement caching for frequently accessed users
     """
-    async with aiosqlite.connect(DATABASE_PATH) as db:
+    async with guild_db(guild_id) as db:
         db.row_factory = aiosqlite.Row
         async with db.execute(
             "SELECT * FROM user_profiles WHERE guild_id = ? AND user_id = ?",
@@ -300,7 +367,7 @@ async def create_user(guild_id: int, user_id: int, timezone: str = "UTC") -> Non
     TODO:
         - [ ] Add validation for timezone string
     """
-    async with aiosqlite.connect(DATABASE_PATH) as db:
+    async with guild_db(guild_id) as db:
         await db.execute(
             "INSERT OR IGNORE INTO users (user_id, timezone) VALUES (?, ?)",
             (user_id, timezone)
@@ -326,7 +393,7 @@ async def set_timezone(guild_id: int, user_id: int, timezone: str) -> None:
         - [ ] Validate timezone using pytz
         - [ ] Create user if doesn't exist
     """
-    async with aiosqlite.connect(DATABASE_PATH) as db:
+    async with guild_db(guild_id) as db:
         await db.execute(
             "INSERT OR IGNORE INTO users (user_id) VALUES (?)",
             (user_id,)
@@ -349,7 +416,7 @@ async def get_users_with_timezone(guild_id: int) -> List[Dict[str, Any]]:
     TODO:
         - [ ] Add filtering for active users only
     """
-    async with aiosqlite.connect(DATABASE_PATH) as db:
+    async with guild_db(guild_id) as db:
         db.row_factory = aiosqlite.Row
         async with db.execute(
             "SELECT * FROM user_profiles WHERE guild_id = ? AND timezone != 'UTC'",
@@ -379,7 +446,7 @@ async def add_fact(guild_id: int, user_id: int, fact: str) -> int:
         - [ ] Limit facts per user (e.g., max 50)
         - [ ] Add duplicate detection
     """
-    async with aiosqlite.connect(DATABASE_PATH) as db:
+    async with guild_db(guild_id) as db:
         cursor = await db.execute(
             "INSERT INTO user_facts (guild_id, user_id, fact) VALUES (?, ?, ?)",
             (guild_id, user_id, fact)
@@ -402,7 +469,7 @@ async def get_facts(guild_id: int, user_id: int) -> List[str]:
     TODO:
         - [ ] Add pagination for users with many facts
     """
-    async with aiosqlite.connect(DATABASE_PATH) as db:
+    async with guild_db(guild_id) as db:
         async with db.execute(
             "SELECT fact FROM user_facts WHERE guild_id = ? AND user_id = ? ORDER BY created_at DESC",
             (guild_id, user_id)
@@ -425,7 +492,7 @@ async def delete_facts(guild_id: int, user_id: int) -> int:
     TODO:
         - [ ] Add confirmation before deletion
     """
-    async with aiosqlite.connect(DATABASE_PATH) as db:
+    async with guild_db(guild_id) as db:
         cursor = await db.execute(
             "DELETE FROM user_facts WHERE guild_id = ? AND user_id = ?",
             (guild_id, user_id)
@@ -458,7 +525,7 @@ async def get_server_mode(guild_id: int) -> str:
         return mode_map[locked_mode]
     
     # Otherwise use server-specific mode
-    async with aiosqlite.connect(DATABASE_PATH) as db:
+    async with guild_db(guild_id) as db:
         async with db.execute(
             "SELECT persona_mode FROM server_config WHERE guild_id = ?",
             (guild_id,)
@@ -483,7 +550,7 @@ async def set_server_mode(guild_id: int, mode: str) -> None:
     if mode not in valid_modes:
         raise ValueError(f"Invalid mode. Must be one of: {valid_modes}")
     
-    async with aiosqlite.connect(DATABASE_PATH) as db:
+    async with guild_db(guild_id) as db:
         await db.execute("""
             INSERT INTO server_config (guild_id, persona_mode, updated_at)
             VALUES (?, ?, ?)
@@ -504,7 +571,7 @@ async def get_evil_mode(guild_id: int) -> bool:
     Returns:
         True if evil mode is enabled
     """
-    async with aiosqlite.connect(DATABASE_PATH) as db:
+    async with guild_db(guild_id) as db:
         async with db.execute(
             "SELECT evil_mode FROM server_config WHERE guild_id = ?",
             (guild_id,)
@@ -521,7 +588,7 @@ async def set_evil_mode(guild_id: int, enabled: bool) -> None:
         guild_id: Discord guild/server ID
         enabled: True to enable evil mode
     """
-    async with aiosqlite.connect(DATABASE_PATH) as db:
+    async with guild_db(guild_id) as db:
         await db.execute("""
             INSERT INTO server_config (guild_id, evil_mode, updated_at)
             VALUES (?, ?, ?)
@@ -545,7 +612,7 @@ async def get_bump_channel(guild_id: int) -> Optional[int]:
     TODO:
         - [ ] Implement this for scheduler.py
     """
-    async with aiosqlite.connect(DATABASE_PATH) as db:
+    async with guild_db(guild_id) as db:
         async with db.execute(
             "SELECT bump_channel_id FROM server_config WHERE guild_id = ?",
             (guild_id,)
@@ -565,7 +632,7 @@ async def set_bump_channel(guild_id: int, channel_id: int) -> None:
     TODO:
         - [ ] Validate channel exists and bot has permissions
     """
-    async with aiosqlite.connect(DATABASE_PATH) as db:
+    async with guild_db(guild_id) as db:
         await db.execute("""
             INSERT INTO server_config (guild_id, bump_channel_id, updated_at)
             VALUES (?, ?, ?)
@@ -577,9 +644,9 @@ async def set_bump_channel(guild_id: int, channel_id: int) -> None:
 
 
 
-async def _ensure_bump_columns():
+async def _ensure_bump_columns(guild_id: int) -> None:
     """Ensure bump_enabled and last_bump_time columns exist (migration)."""
-    async with aiosqlite.connect(DATABASE_PATH) as db:
+    async with guild_db(guild_id) as db:
         async with db.execute("PRAGMA table_info(server_config)") as cursor:
             columns = {row[1] for row in await cursor.fetchall()}
         
@@ -592,8 +659,8 @@ async def _ensure_bump_columns():
 
 async def get_bump_config(guild_id: int) -> dict:
     """Get full bump configuration for a server."""
-    await _ensure_bump_columns()
-    async with aiosqlite.connect(DATABASE_PATH) as db:
+    await _ensure_bump_columns(guild_id)
+    async with guild_db(guild_id) as db:
         async with db.execute(
             "SELECT bump_channel_id, bump_enabled, last_bump_time FROM server_config WHERE guild_id = ?",
             (guild_id,)
@@ -610,8 +677,8 @@ async def get_bump_config(guild_id: int) -> dict:
 
 async def set_bump_enabled(guild_id: int, enabled: bool) -> None:
     """Enable or disable bump reminders for a server."""
-    await _ensure_bump_columns()
-    async with aiosqlite.connect(DATABASE_PATH) as db:
+    await _ensure_bump_columns(guild_id)
+    async with guild_db(guild_id) as db:
         await db.execute("""
             INSERT INTO server_config (guild_id, bump_enabled, updated_at)
             VALUES (?, ?, ?)
@@ -624,9 +691,9 @@ async def set_bump_enabled(guild_id: int, enabled: bool) -> None:
 
 async def set_last_bump_time(guild_id: int, bump_time: datetime = None) -> None:
     """Set the last bump time for a server."""
-    await _ensure_bump_columns()
+    await _ensure_bump_columns(guild_id)
     bump_time = bump_time or datetime.now()
-    async with aiosqlite.connect(DATABASE_PATH) as db:
+    async with guild_db(guild_id) as db:
         await db.execute("""
             INSERT INTO server_config (guild_id, last_bump_time, updated_at)
             VALUES (?, ?, ?)
@@ -661,7 +728,7 @@ def _calculate_level(points: int) -> str:
 
 async def get_affection(guild_id: int, user_id: int) -> Dict[str, Any]:
     """Get user's affection data."""
-    async with aiosqlite.connect(DATABASE_PATH) as db:
+    async with guild_db(guild_id) as db:
         db.row_factory = aiosqlite.Row
         async with db.execute(
             "SELECT * FROM user_affection_v2 WHERE guild_id = ? AND user_id = ?",
@@ -681,7 +748,7 @@ async def get_affection(guild_id: int, user_id: int) -> Dict[str, Any]:
 
 async def add_affection(guild_id: int, user_id: int, points: int = 1) -> Dict[str, Any]:
     """Add affection points and return updated data."""
-    async with aiosqlite.connect(DATABASE_PATH) as db:
+    async with guild_db(guild_id) as db:
         # Get current data
         async with db.execute(
             "SELECT affection_points, total_interactions FROM user_affection_v2 WHERE guild_id = ? AND user_id = ?",
@@ -725,7 +792,7 @@ async def add_affection(guild_id: int, user_id: int, points: int = 1) -> Dict[st
 
 async def get_mood(guild_id: int) -> Dict[str, Any]:
     """Get bot mood for a server."""
-    async with aiosqlite.connect(DATABASE_PATH) as db:
+    async with guild_db(guild_id) as db:
         db.row_factory = aiosqlite.Row
         async with db.execute(
             "SELECT * FROM bot_mood WHERE guild_id = ?",
@@ -759,7 +826,7 @@ async def update_mood(guild_id: int, delta: int) -> Dict[str, Any]:
     new_value = max(0, min(100, current["mood_value"] + delta))
     new_mood = _mood_from_value(new_value)
     
-    async with aiosqlite.connect(DATABASE_PATH) as db:
+    async with guild_db(guild_id) as db:
         await db.execute("""
             INSERT INTO bot_mood (guild_id, mood, mood_value, last_updated)
             VALUES (?, ?, ?, ?)
@@ -780,7 +847,7 @@ async def update_mood(guild_id: int, delta: int) -> Dict[str, Any]:
 
 async def set_birthday(guild_id: int, user_id: int, birthday: str) -> None:
     """Set user birthday (format: MM-DD) for a guild."""
-    async with aiosqlite.connect(DATABASE_PATH) as db:
+    async with guild_db(guild_id) as db:
         await db.execute(
             "INSERT OR IGNORE INTO users (user_id) VALUES (?)",
             (user_id,)
@@ -794,7 +861,7 @@ async def set_birthday(guild_id: int, user_id: int, birthday: str) -> None:
 
 async def get_birthday(guild_id: int, user_id: int) -> Optional[str]:
     """Get user birthday for a guild."""
-    async with aiosqlite.connect(DATABASE_PATH) as db:
+    async with guild_db(guild_id) as db:
         async with db.execute(
             "SELECT birthday FROM user_profiles WHERE guild_id = ? AND user_id = ?",
             (guild_id, user_id)
@@ -808,7 +875,7 @@ async def get_upcoming_birthdays(guild_id: int, days: int = 30) -> List[Dict[str
     today = datetime.now()
     upcoming = []
     
-    async with aiosqlite.connect(DATABASE_PATH) as db:
+    async with guild_db(guild_id) as db:
         db.row_factory = aiosqlite.Row
         async with db.execute(
             "SELECT user_id, birthday FROM user_profiles WHERE guild_id = ? AND birthday IS NOT NULL",
@@ -838,10 +905,12 @@ async def get_upcoming_birthdays(guild_id: int, days: int = 30) -> List[Dict[str
 # Reminder Operations
 # ============================================
 
-async def add_reminder(user_id: int, guild_id: int | None, channel_id: int, 
+async def add_reminder(user_id: int, guild_id: int, channel_id: int, 
                        message: str, remind_at: datetime) -> int:
     """Add a reminder and return its ID."""
-    async with aiosqlite.connect(DATABASE_PATH) as db:
+    if guild_id is None:
+        raise ValueError("guild_id is required for reminders.")
+    async with guild_db(guild_id) as db:
         cursor = await db.execute("""
             INSERT INTO reminders (user_id, guild_id, channel_id, message, remind_at)
             VALUES (?, ?, ?, ?, ?)
@@ -850,9 +919,9 @@ async def add_reminder(user_id: int, guild_id: int | None, channel_id: int,
         return cursor.lastrowid
 
 
-async def get_user_reminders(user_id: int) -> List[Dict[str, Any]]:
+async def get_user_reminders(user_id: int, guild_id: int) -> List[Dict[str, Any]]:
     """Get all active reminders for a user."""
-    async with aiosqlite.connect(DATABASE_PATH) as db:
+    async with guild_db(guild_id) as db:
         db.row_factory = aiosqlite.Row
         async with db.execute("""
             SELECT * FROM reminders 
@@ -864,18 +933,21 @@ async def get_user_reminders(user_id: int) -> List[Dict[str, Any]]:
 
 async def get_due_reminders() -> List[Dict[str, Any]]:
     """Get all reminders that are due now."""
-    async with aiosqlite.connect(DATABASE_PATH) as db:
-        db.row_factory = aiosqlite.Row
-        async with db.execute("""
-            SELECT * FROM reminders 
-            WHERE remind_at <= ? AND completed = FALSE
-        """, (datetime.now(),)) as cursor:
-            return [dict(row) async for row in cursor]
+    due: List[Dict[str, Any]] = []
+    for guild_id in await get_registered_guild_ids():
+        async with guild_db(guild_id) as db:
+            db.row_factory = aiosqlite.Row
+            async with db.execute("""
+                SELECT * FROM reminders 
+                WHERE remind_at <= ? AND completed = FALSE
+            """, (datetime.now(),)) as cursor:
+                due.extend([dict(row) async for row in cursor])
+    return due
 
 
-async def complete_reminder(reminder_id: int) -> None:
+async def complete_reminder(reminder_id: int, guild_id: int) -> None:
     """Mark a reminder as completed."""
-    async with aiosqlite.connect(DATABASE_PATH) as db:
+    async with guild_db(guild_id) as db:
         await db.execute(
             "UPDATE reminders SET completed = TRUE WHERE id = ?",
             (reminder_id,)
@@ -883,9 +955,9 @@ async def complete_reminder(reminder_id: int) -> None:
         await db.commit()
 
 
-async def delete_reminder(reminder_id: int, user_id: int) -> bool:
+async def delete_reminder(reminder_id: int, user_id: int, guild_id: int) -> bool:
     """Delete a reminder (must belong to user)."""
-    async with aiosqlite.connect(DATABASE_PATH) as db:
+    async with guild_db(guild_id) as db:
         cursor = await db.execute(
             "DELETE FROM reminders WHERE id = ? AND user_id = ?",
             (reminder_id, user_id)
@@ -904,7 +976,7 @@ async def increment_stat(stat_name: str, amount: int = 1) -> None:
     if stat_name not in valid_stats:
         return
     
-    async with aiosqlite.connect(DATABASE_PATH) as db:
+    async with global_db() as db:
         await db.execute(f"""
             UPDATE bot_stats SET {stat_name} = {stat_name} + ? WHERE id = 1
         """, (amount,))
@@ -913,7 +985,7 @@ async def increment_stat(stat_name: str, amount: int = 1) -> None:
 
 async def get_stats() -> Dict[str, Any]:
     """Get all bot statistics."""
-    async with aiosqlite.connect(DATABASE_PATH) as db:
+    async with global_db() as db:
         db.row_factory = aiosqlite.Row
         async with db.execute("SELECT * FROM bot_stats WHERE id = 1") as cursor:
             row = await cursor.fetchone()
@@ -933,7 +1005,7 @@ async def get_stats() -> Dict[str, Any]:
 
 async def add_alias(guild_id: int, user_id: int, alias: str, added_by_user_id: int) -> bool:
     """Add an alias for a user. Returns True if added, False if already exists."""
-    async with aiosqlite.connect(DATABASE_PATH) as db:
+    async with guild_db(guild_id) as db:
         try:
             await db.execute(
                 "INSERT INTO user_aliases (guild_id, user_id, alias, added_by_user_id) VALUES (?, ?, ?, ?)",
@@ -947,7 +1019,7 @@ async def add_alias(guild_id: int, user_id: int, alias: str, added_by_user_id: i
 
 async def get_aliases(guild_id: int, user_id: int) -> List[str]:
     """Get all aliases for a user."""
-    async with aiosqlite.connect(DATABASE_PATH) as db:
+    async with guild_db(guild_id) as db:
         async with db.execute(
             "SELECT alias FROM user_aliases WHERE guild_id = ? AND user_id = ?",
             (guild_id, user_id)
@@ -962,7 +1034,7 @@ async def get_strict_alias(guild_id: int, user_id: int) -> Optional[str]:
 
     Strict alias format: "strict:<name>".
     """
-    async with aiosqlite.connect(DATABASE_PATH) as db:
+    async with guild_db(guild_id) as db:
         async with db.execute(
             """SELECT alias FROM user_aliases
                WHERE guild_id = ? AND user_id = ? AND added_by_user_id = ?
@@ -982,7 +1054,7 @@ async def get_strict_alias(guild_id: int, user_id: int) -> Optional[str]:
 
 async def find_user_by_alias(guild_id: int, alias: str) -> Optional[int]:
     """Find a user ID by their alias (case-insensitive)."""
-    async with aiosqlite.connect(DATABASE_PATH) as db:
+    async with guild_db(guild_id) as db:
         async with db.execute(
             "SELECT user_id FROM user_aliases WHERE guild_id = ? AND alias = ? COLLATE NOCASE",
             (guild_id, alias)
@@ -993,7 +1065,7 @@ async def find_user_by_alias(guild_id: int, alias: str) -> Optional[int]:
 
 async def delete_alias(guild_id: int, user_id: int, alias: str) -> bool:
     """Delete an alias for a user."""
-    async with aiosqlite.connect(DATABASE_PATH) as db:
+    async with guild_db(guild_id) as db:
         cursor = await db.execute(
             "DELETE FROM user_aliases WHERE guild_id = ? AND user_id = ? AND alias = ? COLLATE NOCASE",
             (guild_id, user_id, alias)
@@ -1008,7 +1080,7 @@ async def delete_alias(guild_id: int, user_id: int, alias: str) -> bool:
 
 async def get_last_wellbeing_date(guild_id: int, user_id: int) -> Optional[str]:
     """Get the last wellbeing check date for a user (YYYY-MM-DD)."""
-    async with aiosqlite.connect(DATABASE_PATH) as db:
+    async with guild_db(guild_id) as db:
         async with db.execute(
             "SELECT last_asked_date FROM wellbeing_checks WHERE guild_id = ? AND user_id = ?",
             (guild_id, user_id)
@@ -1019,7 +1091,7 @@ async def get_last_wellbeing_date(guild_id: int, user_id: int) -> Optional[str]:
 
 async def set_last_wellbeing_date(guild_id: int, user_id: int, date_str: str) -> None:
     """Set the last wellbeing check date for a user (YYYY-MM-DD)."""
-    async with aiosqlite.connect(DATABASE_PATH) as db:
+    async with guild_db(guild_id) as db:
         await db.execute(
             """INSERT INTO wellbeing_checks (guild_id, user_id, last_asked_date)
                VALUES (?, ?, ?)
@@ -1045,7 +1117,7 @@ async def set_gender_role(guild_id: int, role_id: int, gender: str) -> None:
     if gender == "clear":
         raise ValueError("Use the clear option to remove a gender role mapping.")
 
-    async with aiosqlite.connect(DATABASE_PATH) as db:
+    async with guild_db(guild_id) as db:
         await db.execute("""
             INSERT INTO gender_roles (guild_id, role_id, gender)
             VALUES (?, ?, ?)
@@ -1057,7 +1129,7 @@ async def set_gender_role(guild_id: int, role_id: int, gender: str) -> None:
 
 async def delete_gender_role(guild_id: int, role_id: int) -> bool:
     """Delete a gender role mapping for a server."""
-    async with aiosqlite.connect(DATABASE_PATH) as db:
+    async with guild_db(guild_id) as db:
         cursor = await db.execute(
             "DELETE FROM gender_roles WHERE guild_id = ? AND role_id = ?",
             (guild_id, role_id)
@@ -1068,7 +1140,7 @@ async def delete_gender_role(guild_id: int, role_id: int) -> bool:
 
 async def get_gender_roles(guild_id: int) -> Dict[int, str]:
     """Get gender role mappings for a server."""
-    async with aiosqlite.connect(DATABASE_PATH) as db:
+    async with guild_db(guild_id) as db:
         async with db.execute(
             "SELECT role_id, gender FROM gender_roles WHERE guild_id = ?",
             (guild_id,)
@@ -1089,7 +1161,7 @@ async def add_fact_with_source(
     learned_from_user_id: Optional[int] = None
 ) -> int:
     """Store a fact about a user with source tracking."""
-    async with aiosqlite.connect(DATABASE_PATH) as db:
+    async with guild_db(guild_id) as db:
         cursor = await db.execute(
             """INSERT INTO user_facts (guild_id, user_id, fact, source, learned_from_user_id) 
                VALUES (?, ?, ?, ?, ?)""",
@@ -1101,7 +1173,7 @@ async def add_fact_with_source(
 
 async def get_facts_detailed(guild_id: int, user_id: int) -> List[Dict[str, Any]]:
     """Get all facts about a user with full details."""
-    async with aiosqlite.connect(DATABASE_PATH) as db:
+    async with guild_db(guild_id) as db:
         db.row_factory = aiosqlite.Row
         async with db.execute(
             """SELECT id, fact, source, learned_from_user_id, created_at 
@@ -1114,7 +1186,7 @@ async def get_facts_detailed(guild_id: int, user_id: int) -> List[Dict[str, Any]
 
 async def delete_fact_by_id(guild_id: int, fact_id: int) -> bool:
     """Delete a specific fact by ID."""
-    async with aiosqlite.connect(DATABASE_PATH) as db:
+    async with guild_db(guild_id) as db:
         cursor = await db.execute(
             "DELETE FROM user_facts WHERE guild_id = ? AND id = ?",
             (guild_id, fact_id)
@@ -1138,7 +1210,7 @@ async def create_pending_fact(
 ) -> int:
     """Create a pending fact awaiting confirmation."""
     expires_at = datetime.now() + __import__('datetime').timedelta(minutes=expires_minutes)
-    async with aiosqlite.connect(DATABASE_PATH) as db:
+    async with guild_db(guild_id) as db:
         cursor = await db.execute(
             """INSERT INTO pending_facts 
                (guild_id, about_user_id, fact, learned_from_user_id, channel_id, message_id, expires_at)
@@ -1149,9 +1221,9 @@ async def create_pending_fact(
         return cursor.lastrowid
 
 
-async def get_pending_fact(pending_id: int) -> Optional[Dict[str, Any]]:
+async def get_pending_fact(guild_id: int, pending_id: int) -> Optional[Dict[str, Any]]:
     """Get a pending fact by ID."""
-    async with aiosqlite.connect(DATABASE_PATH) as db:
+    async with guild_db(guild_id) as db:
         db.row_factory = aiosqlite.Row
         async with db.execute(
             "SELECT * FROM pending_facts WHERE id = ?",
@@ -1161,15 +1233,15 @@ async def get_pending_fact(pending_id: int) -> Optional[Dict[str, Any]]:
             return dict(row) if row else None
 
 
-async def confirm_pending_fact(pending_id: int) -> bool:
+async def confirm_pending_fact(guild_id: int, pending_id: int) -> bool:
     """Confirm a pending fact and move it to user_facts."""
-    pending = await get_pending_fact(pending_id)
+    pending = await get_pending_fact(guild_id, pending_id)
     if not pending:
         return False
     
     # Check if expired
     if datetime.fromisoformat(pending["expires_at"]) < datetime.now():
-        await delete_pending_fact(pending_id)
+        await delete_pending_fact(guild_id, pending_id)
         return False
     
     # Move to user_facts
@@ -1180,13 +1252,13 @@ async def confirm_pending_fact(pending_id: int) -> bool:
         source="learned",
         learned_from_user_id=pending["learned_from_user_id"]
     )
-    await delete_pending_fact(pending_id)
+    await delete_pending_fact(guild_id, pending_id)
     return True
 
 
-async def delete_pending_fact(pending_id: int) -> bool:
+async def delete_pending_fact(guild_id: int, pending_id: int) -> bool:
     """Delete a pending fact."""
-    async with aiosqlite.connect(DATABASE_PATH) as db:
+    async with guild_db(guild_id) as db:
         cursor = await db.execute(
             "DELETE FROM pending_facts WHERE id = ?",
             (pending_id,)
@@ -1195,9 +1267,9 @@ async def delete_pending_fact(pending_id: int) -> bool:
         return cursor.rowcount > 0
 
 
-async def cleanup_expired_pending_facts() -> int:
+async def cleanup_expired_pending_facts(guild_id: int) -> int:
     """Delete all expired pending facts."""
-    async with aiosqlite.connect(DATABASE_PATH) as db:
+    async with guild_db(guild_id) as db:
         cursor = await db.execute(
             "DELETE FROM pending_facts WHERE expires_at < ?",
             (datetime.now(),)
@@ -1214,7 +1286,7 @@ async def reset_user_data(guild_id: int, user_id: int, reset_type: str = "all") 
     """Reset user data. reset_type: 'all', 'facts', 'affection', 'aliases'"""
     deleted = {"facts": 0, "affection": 0, "aliases": 0}
     
-    async with aiosqlite.connect(DATABASE_PATH) as db:
+    async with guild_db(guild_id) as db:
         if reset_type in ("all", "facts"):
             cursor = await db.execute(
                 "DELETE FROM user_facts WHERE guild_id = ? AND user_id = ?",
@@ -1245,7 +1317,7 @@ async def set_affection_value(guild_id: int, user_id: int, points: int) -> Dict[
     """Set a user's affection points to a specific value."""
     new_level = _calculate_level(points)
     
-    async with aiosqlite.connect(DATABASE_PATH) as db:
+    async with guild_db(guild_id) as db:
         await db.execute("""
             INSERT INTO user_affection_v2 (guild_id, user_id, affection_points, affection_level, last_interaction)
             VALUES (?, ?, ?, ?, ?)

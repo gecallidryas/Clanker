@@ -471,25 +471,25 @@ class Affection(commands.Cog):
     @tasks.loop(hours=1)
     async def mood_decay_loop(self):
         """Decay mood over time when inactive."""
-        from utils.db_handler import DATABASE_PATH
-        import aiosqlite
+        from utils.db_handler import get_registered_guild_ids, guild_db
         from datetime import datetime, timedelta
-        
-        async with aiosqlite.connect(DATABASE_PATH) as db:
-            # Decay mood by 3 for servers inactive for 1+ hours
-            cutoff = datetime.now() - timedelta(hours=1)
-            await db.execute("""
-                UPDATE bot_mood 
-                SET mood_value = MAX(0, mood_value - 3),
-                    mood = CASE 
-                        WHEN mood_value - 3 >= 70 THEN 'happy'
-                        WHEN mood_value - 3 >= 40 THEN 'neutral'
-                        WHEN mood_value - 3 >= 20 THEN 'sad'
-                        ELSE 'neglected'
-                    END
-                WHERE last_updated < ?
-            """, (cutoff,))
-            await db.commit()
+        cutoff = datetime.now() - timedelta(hours=1)
+
+        for guild_id in await get_registered_guild_ids():
+            async with guild_db(guild_id) as db:
+                # Decay mood by 3 for servers inactive for 1+ hours
+                await db.execute("""
+                    UPDATE bot_mood 
+                    SET mood_value = MAX(0, mood_value - 3),
+                        mood = CASE 
+                            WHEN mood_value - 3 >= 70 THEN 'happy'
+                            WHEN mood_value - 3 >= 40 THEN 'neutral'
+                            WHEN mood_value - 3 >= 20 THEN 'sad'
+                            ELSE 'neglected'
+                        END
+                    WHERE last_updated < ?
+                """, (cutoff,))
+                await db.commit()
     
     @mood_decay_loop.before_loop
     async def before_mood_decay(self):

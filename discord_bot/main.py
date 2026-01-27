@@ -57,7 +57,7 @@ LOCKED_MODE = VALID_MODES.get(BOT_MODE)
 intents = discord.Intents.default()
 intents.message_content = True
 intents.members = True
-intents.dm_messages = True
+intents.dm_messages = False
 
 logger = get_logger(__name__)
 
@@ -90,6 +90,13 @@ class Femmy(commands.Bot):
             description="Femmy - Your AI companion with personality!",
             help_command=None  # Use custom help in utilities.py
         )
+        self.add_check(self._guild_only_check)
+
+    async def _guild_only_check(self, ctx: commands.Context) -> bool:
+        if ctx.guild is None:
+            await ctx.send("Commands can only be used inside servers.")
+            return False
+        return True
     
     async def setup_hook(self):
         """
@@ -115,6 +122,25 @@ class Femmy(commands.Bot):
             except Exception as e:
                 logger.error("Failed to load cog %s: %s", cog, e, exc_info=True)
 
+        @self.tree.check
+        async def _guild_only_interactions(interaction: discord.Interaction) -> bool:
+            if interaction.guild is None:
+                try:
+                    if interaction.response.is_done():
+                        await interaction.followup.send(
+                            "Commands can only be used inside servers.",
+                            ephemeral=True,
+                        )
+                    else:
+                        await interaction.response.send_message(
+                            "Commands can only be used inside servers.",
+                            ephemeral=True,
+                        )
+                except Exception:
+                    pass
+                return False
+            return True
+
         try:
             await self.tree.sync()
             logger.info("Slash commands synced.")
@@ -128,6 +154,14 @@ class Femmy(commands.Bot):
         logger.info("Connected to %s server(s)", len(self.guilds))
         logger.info("Bot ID: %s", self.user.id)
         logger.info("=" * 50)
+
+        # Ensure per-guild databases are created/registered
+        from utils.db_handler import init_guild_db
+        for guild in self.guilds:
+            try:
+                await init_guild_db(guild.id)
+            except Exception as e:
+                logger.warning("Failed to init DB for guild %s: %s", guild.id, e)
         
         # Set custom status
         activity = discord.Activity(
