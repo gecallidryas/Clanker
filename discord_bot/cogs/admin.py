@@ -99,13 +99,10 @@ class Admin(commands.Cog):
         self.bot = bot
 
     async def cog_load(self):
-        try:
-            self.bot.tree.add_command(self.admin_app_group)
-        except app_commands.CommandAlreadyRegistered:
-            pass
+        pass
 
     async def cog_unload(self):
-        self.bot.tree.remove_command(self.admin_app_group.name, type=self.admin_app_group.type)
+        pass
     
     async def cog_check(self, ctx: commands.Context) -> bool:
         """Only allow admins to use these commands."""
@@ -548,4 +545,5 @@ class Admin(commands.Cog):
 
 async def setup(bot: commands.Bot):
     """Load the Admin cog."""
-    await bot.add_cog(Admin(bot))
+    bot.tree.remove_command("admin")
+    await bot.add_cog(Admin(bot), override=True)
