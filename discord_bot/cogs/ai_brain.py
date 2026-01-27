@@ -813,8 +813,13 @@ class AIBrain(commands.Cog):
                 "[User Gender: Conflicting roles. Avoid gendered pronouns or honorifics, "
                 "and express mild confusion if asked.]"
             )
-        else:
+        elif gender in ("male", "female"):
             gender_note = f"[User Gender: {gender}. Use matching pronouns/honorifics.]"
+        else:
+            gender_note = (
+                f"[User Gender: {gender}. Use the user's stated pronouns if known; "
+                "otherwise avoid gendered language or honorifics.]"
+            )
         
         # Addressing preferences for Femmy
         address_note = ""
@@ -826,10 +831,13 @@ class AIBrain(commands.Cog):
                     "Do NOT use Master/Mistress or other honorifics.]"
                 )
             elif affection_points > 800:
-                honorific = "Master"
+                honorific = None
                 if gender == "female":
                     honorific = "Mistress"
-                address_note = f"[Addressing: Call the user {honorific}.]"
+                elif gender == "male":
+                    honorific = "Master"
+                if honorific:
+                    address_note = f"[Addressing: Call the user {honorific}.]"
 
         # Affection prompts that gate compliance and warmth
         affection_prompts = {

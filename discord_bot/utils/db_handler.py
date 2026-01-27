@@ -1036,9 +1036,14 @@ async def set_last_wellbeing_date(guild_id: int, user_id: int, date_str: str) ->
 
 async def set_gender_role(guild_id: int, role_id: int, gender: str) -> None:
     """Set or update a gender role for a server."""
-    gender = gender.strip().lower()
-    if gender not in ("male", "female"):
-        raise ValueError("Gender must be 'male' or 'female'.")
+    gender = gender.strip()
+    if not gender:
+        raise ValueError("Gender cannot be empty.")
+    if len(gender) > 32:
+        raise ValueError("Gender must be 32 characters or fewer.")
+    gender = gender.lower()
+    if gender == "clear":
+        raise ValueError("Use the clear option to remove a gender role mapping.")
 
     async with aiosqlite.connect(DATABASE_PATH) as db:
         await db.execute("""

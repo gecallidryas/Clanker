@@ -94,6 +94,19 @@ class Admin(commands.Cog):
         name="admin",
         description="Admin commands",
     )
+    gender_suggestions = [
+        "male",
+        "female",
+        "nonbinary",
+        "genderfluid",
+        "agender",
+        "trans",
+        "transmasc",
+        "transfem",
+        "intersex",
+        "queer",
+        "other",
+    ]
     
     def __init__(self, bot: commands.Bot):
         self.bot = bot
@@ -514,33 +527,63 @@ class Admin(commands.Cog):
 
     @app_commands.command(name="setgenderrole", description="Configure a gender role for this server.")
     @app_commands.checks.has_permissions(manage_guild=True)
-    @app_commands.describe(role="Role to map", gender="male, female, or clear")
-    @app_commands.choices(gender=[
-        app_commands.Choice(name="male", value="male"),
-        app_commands.Choice(name="female", value="female"),
-        app_commands.Choice(name="clear", value="clear"),
-    ])
+    @app_commands.describe(role="Role to map", gender="Gender label (e.g. male, female, nonbinary) or 'clear'")
     async def set_gender_role_slash(
         self,
         interaction: discord.Interaction,
         role: discord.Role,
-        gender: app_commands.Choice[str],
+        gender: str,
     ):
         if not interaction.guild:
             await interaction.response.send_message("Use this command in a server.", ephemeral=True)
             return
 
-        if gender.value == "clear":
+        gender_value = gender.strip()
+        if not gender_value:
+            await interaction.response.send_message("Gender cannot be empty.", ephemeral=True)
+            return
+        if len(gender_value) > 32:
+            await interaction.response.send_message("Gender must be 32 characters or fewer.", ephemeral=True)
+            return
+        if gender_value.lower() == "clear":
             removed = await delete_gender_role(interaction.guild.id, role.id)
             message = "Gender role mapping removed." if removed else "No mapping found for that role."
             await interaction.response.send_message(message, ephemeral=True)
             return
 
-        await set_gender_role(interaction.guild.id, role.id, gender.value)
+        try:
+            await set_gender_role(interaction.guild.id, role.id, gender_value)
+        except ValueError as exc:
+            await interaction.response.send_message(str(exc), ephemeral=True)
+            return
         await interaction.response.send_message(
-            f"Gender role mapping set: {role.mention} -> {gender.value}.",
+            f"Gender role mapping set: {role.mention} -> {gender_value}.",
             ephemeral=True,
         )
+
+    @set_gender_role_slash.autocomplete("gender")
+    async def set_gender_role_gender_autocomplete(
+        self,
+        interaction: discord.Interaction,
+        current: str,
+    ) -> list[app_commands.Choice[str]]:
+        current_lower = current.lower().strip()
+        if not current_lower:
+            return [
+                app_commands.Choice(name=label, value=label)
+                for label in self.gender_suggestions[:25]
+            ]
+
+        matches = [
+            label for label in self.gender_suggestions if current_lower in label
+        ]
+        if not matches and current_lower not in self.gender_suggestions:
+            matches = [current_lower]
+
+        return [
+            app_commands.Choice(name=label, value=label)
+            for label in matches[:25]
+        ]
 
 
 async def setup(bot: commands.Bot):
