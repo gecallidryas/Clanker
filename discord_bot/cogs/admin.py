@@ -31,6 +31,10 @@ from utils.logger import get_logger
 logger = get_logger(__name__)
 
 
+async def _is_owner_check(interaction: discord.Interaction) -> bool:
+    return await interaction.client.is_owner(interaction.user)
+
+
 class ModelChangeModal(discord.ui.Modal):
     """Modal to collect model name and admin password without exposing the password."""
 
@@ -95,7 +99,10 @@ class Admin(commands.Cog):
         self.bot = bot
 
     async def cog_load(self):
-        self.bot.tree.add_command(self.admin_app_group)
+        try:
+            self.bot.tree.add_command(self.admin_app_group)
+        except app_commands.CommandAlreadyRegistered:
+            pass
 
     async def cog_unload(self):
         self.bot.tree.remove_command(self.admin_app_group.name, type=self.admin_app_group.type)
@@ -296,6 +303,20 @@ class Admin(commands.Cog):
         else:
             await ctx.send("Usage: `!admin sync [guild|global]`")
 
+    @admin_group.command(name="clearglobal")
+    async def clear_global_commands(self, ctx: commands.Context):
+        """Clear all global slash commands (owner only)."""
+        if not await self.bot.is_owner(ctx.author):
+            await ctx.send("Only bot owner can clear global commands.")
+            return
+        try:
+            self.bot.tree.clear_commands(guild=None)
+            await self.bot.tree.sync()
+            await ctx.send("Cleared all global slash commands.")
+        except Exception as e:
+            logger.error("Clear global commands failed: %s", e, exc_info=True)
+            await ctx.send("Clear global commands failed. Check logs for details.")
+
     @admin_app_group.command(name="reset", description="Reset user data.")
     @app_commands.checks.has_permissions(manage_guild=True)
     @app_commands.describe(member="User to reset", reset_type="all, facts, affection, or aliases")
@@ -479,6 +500,20 @@ class Admin(commands.Cog):
             return
 
         await interaction.response.send_modal(ModelChangeModal(admin_password, default_model=name))
+
+    @admin_app_group.command(name="clearglobal", description="Clear all global slash commands (owner only).")
+    @app_commands.check(_is_owner_check)
+    async def clear_global_commands_slash(self, interaction: discord.Interaction):
+        try:
+            self.bot.tree.clear_commands(guild=None)
+            await self.bot.tree.sync()
+            await interaction.response.send_message("Cleared all global slash commands.")
+        except Exception as e:
+            logger.error("Clear global commands failed: %s", e, exc_info=True)
+            await interaction.response.send_message(
+                "Clear global commands failed. Check logs for details.",
+                ephemeral=True,
+            )
 
     @app_commands.command(name="setgenderrole", description="Configure a gender role for this server.")
     @app_commands.checks.has_permissions(manage_guild=True)

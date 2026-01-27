@@ -1005,14 +1005,23 @@ Respond naturally in character. Keep responses concise.
             )
             return
 
+        has_video_attachments = self._has_video_attachment(message)
+        has_image_attachments = self._has_image_attachment(message)
+
+        if has_video_attachments and not self.video_client:
+            await message.reply(
+                "Video analysis is not configured. Install google-genai and set GEMINI_API_KEY.",
+                mention_author=False,
+            )
+            return
+
         video_descriptions = []
         image_descriptions = []
         if message.attachments:
-            video_descriptions = await self._describe_videos(message)
-            image_descriptions = await self._describe_images(message)
-
-        has_video_attachments = self._has_video_attachment(message)
-        has_image_attachments = self._has_image_attachment(message)
+            if has_video_attachments:
+                video_descriptions = await self._describe_videos(message)
+            if has_image_attachments:
+                image_descriptions = await self._describe_images(message)
 
         if has_video_attachments and not video_descriptions:
             await message.reply(

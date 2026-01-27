@@ -1064,13 +1064,11 @@ class Memories(commands.Cog):
 
             # Get saved facts
             facts = await get_facts(interaction.guild.id, target.id)
-            facts_text = "
-".join(f"- {fact}" for fact in facts) if facts else "(no saved facts)"
+            facts_text = "\n".join(f"- {fact}" for fact in facts) if facts else "(no saved facts)"
 
             # Build the analysis prompt
             sample_messages = messages[:100]
-            messages_text = "
-".join(f"- {msg}" for msg in sample_messages)
+            messages_text = "\n".join(f"- {msg}" for msg in sample_messages)
 
             prompt = f"""You are a witty personality analyst. Based on these messages and facts about a Discord user, write a hilarious, thought-provoking character analysis.
 

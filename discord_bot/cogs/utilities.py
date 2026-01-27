@@ -71,6 +71,10 @@ HELP_INTROS = {
 logger = get_logger(__name__)
 
 
+async def _is_owner_check(interaction: discord.Interaction) -> bool:
+    return await interaction.client.is_owner(interaction.user)
+
+
 class Utilities(commands.Cog):
     """
     Utilities Cog - General purpose commands.
@@ -639,7 +643,7 @@ Provide a clear, bulleted summary:
 
     @app_commands.command(name="reload", description="Reload a cog or all cogs (owner only).")
     @app_commands.describe(cog_name="Cog name or 'all'")
-    @app_commands.checks.is_owner()
+    @app_commands.check(_is_owner_check)
     async def reload_cog_slash(self, interaction: discord.Interaction, cog_name: str = None):
         await interaction.response.defer(thinking=True)
 
