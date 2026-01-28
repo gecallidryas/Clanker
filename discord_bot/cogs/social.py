@@ -19,6 +19,13 @@ import discord
 from discord import app_commands
 from discord.ext import commands
 
+from utils.app_emojis import (
+    filter_emojis_by_prefix,
+    format_custom_emoji,
+    get_application_emojis,
+    FEMMY_EMOJI_PREFIX,
+    YUMI_EMOJI_PREFIX,
+)
 from utils.db_handler import get_server_mode, set_server_mode, get_evil_mode, set_evil_mode
 
 
@@ -81,6 +88,27 @@ class Social(commands.Cog):
     
     def __init__(self, bot: commands.Bot):
         self.bot = bot
+
+    async def _get_app_emojis_by_prefix(self, prefix: str) -> list:
+        emojis = await get_application_emojis(self.bot)
+        return filter_emojis_by_prefix(emojis, prefix)
+
+    async def _get_mode_icon(self, mode_key: str) -> str:
+        if mode_key == "mode_femboy":
+            prefix = FEMMY_EMOJI_PREFIX
+        elif mode_key == "mode_oneesan":
+            prefix = YUMI_EMOJI_PREFIX
+        else:
+            prefix = ""
+
+        if prefix:
+            emojis = await self._get_app_emojis_by_prefix(prefix)
+            for emoji in emojis:
+                token = format_custom_emoji(emoji)
+                if token:
+                    return token
+
+        return MODE_INFO.get(mode_key, MODE_INFO["mode_femboy"])["emoji"]
 
     def _is_mention_only(self, message: discord.Message) -> bool:
         """Return True when the message only mentions the bot."""
@@ -184,8 +212,9 @@ class Social(commands.Cog):
         current_mode = await get_server_mode(ctx.guild.id)
         if current_mode == target_mode:
             mode_info = MODE_INFO[target_mode]
+            mode_icon = await self._get_mode_icon(target_mode)
             await ctx.send(
-                f"{mode_info['emoji']} Already in **{mode_info['name']}** mode!"
+                f"{mode_icon} Already in **{mode_info['name']}** mode!"
             )
             return
         
@@ -193,15 +222,16 @@ class Social(commands.Cog):
         await set_server_mode(ctx.guild.id, target_mode)
         
         mode_info = MODE_INFO[target_mode]
+        mode_icon = await self._get_mode_icon(target_mode)
         
         # Send personality-appropriate confirmation
         confirmations = {
-            "mode_femboy": f"{mode_info['emoji']} Mode switched! Ehehe~ I'll be your cute little sibling now, Nii-chan! ♡",
-            "mode_tsundere": f"{mode_info['emoji']} F-fine! I switched modes... It's not like I wanted to or anything! Hmph!",
-            "mode_oneesan": f"{mode_info['emoji']} Ara ara~ Mode changed, my dear. Let me take care of you now~ 💕"
+            "mode_femboy": f"{mode_icon} Mode switched! Ehehe~ I'll be your cute little sibling now, Nii-chan! ♡",
+            "mode_tsundere": f"{mode_icon} F-fine! I switched modes... It's not like I wanted to or anything! Hmph!",
+            "mode_oneesan": f"{mode_icon} Ara ara~ Mode changed, my dear. Let me take care of you now~ 💕"
         }
         
-        await ctx.send(confirmations.get(target_mode, f"{mode_info['emoji']} Mode switched!"))
+        await ctx.send(confirmations.get(target_mode, f"{mode_icon} Mode switched!"))
 
     @app_commands.command(name="mode", description="Switch the bot's personality mode.")
     @app_commands.checks.has_permissions(manage_guild=True)
@@ -242,20 +272,22 @@ class Social(commands.Cog):
         current_mode = await get_server_mode(interaction.guild.id)
         if current_mode == target_mode:
             mode_info = MODE_INFO[target_mode]
+            mode_icon = await self._get_mode_icon(target_mode)
             await interaction.response.send_message(
-                f"{mode_info['emoji']} Already in **{mode_info['name']}** mode!"
+                f"{mode_icon} Already in **{mode_info['name']}** mode!"
             )
             return
 
         await set_server_mode(interaction.guild.id, target_mode)
         mode_info = MODE_INFO[target_mode]
+        mode_icon = await self._get_mode_icon(target_mode)
         confirmations = {
-            "mode_femboy": f"{mode_info['emoji']} Mode switched! Ehehe~ I'll be your cute little sibling now, Nii-chan! ♡",
-            "mode_tsundere": f"{mode_info['emoji']} F-fine! I switched modes... It's not like I wanted to or anything! Hmph!",
-            "mode_oneesan": f"{mode_info['emoji']} Ara ara~ Mode changed, my dear. Let me take care of you now~ 💕",
+            "mode_femboy": f"{mode_icon} Mode switched! Ehehe~ I'll be your cute little sibling now, Nii-chan! ♡",
+            "mode_tsundere": f"{mode_icon} F-fine! I switched modes... It's not like I wanted to or anything! Hmph!",
+            "mode_oneesan": f"{mode_icon} Ara ara~ Mode changed, my dear. Let me take care of you now~ 💕",
         }
-        await interaction.response.send_message(confirmations.get(target_mode, f"{mode_info['emoji']} Mode switched!"))
-    
+        await interaction.response.send_message(confirmations.get(target_mode, f"{mode_icon} Mode switched!"))
+
     @commands.command(name="modes", aliases=["personalities", "personas"])
     async def show_modes(self, ctx: commands.Context):
         """
@@ -280,9 +312,10 @@ class Social(commands.Cog):
         for mode_key, info in MODE_INFO.items():
             is_current = mode_key == current_mode
             marker = " ← Current" if is_current else ""
+            mode_icon = await self._get_mode_icon(mode_key)
             
             embed.add_field(
-                name=f"{info['emoji']} {info['name']}{marker}",
+                name=f"{mode_icon} {info['name']}{marker}",
                 value=f"{info['description']}\n*Aliases: {', '.join(info['aliases'])}*",
                 inline=False
             )
@@ -312,9 +345,10 @@ class Social(commands.Cog):
         for mode_key, info in MODE_INFO.items():
             is_current = mode_key == current_mode
             marker = " ← Current" if is_current else ""
+            mode_icon = await self._get_mode_icon(mode_key)
 
             embed.add_field(
-                name=f"{info['emoji']} {info['name']}{marker}",
+                name=f"{mode_icon} {info['name']}{marker}",
                 value=f"{info['description']}\n*Aliases: {', '.join(info['aliases'])}*",
                 inline=False,
             )
@@ -328,11 +362,12 @@ class Social(commands.Cog):
         current_mode = await get_server_mode(ctx.guild.id)
         current_evil = await get_evil_mode(ctx.guild.id)
         info = MODE_INFO.get(current_mode, MODE_INFO["mode_femboy"])
+        mode_icon = await self._get_mode_icon(current_mode)
         
         evil_text = "\n😈 (Evil Mode Active)" if current_evil else ""
         
         await ctx.send(
-            f"{info['emoji']} Currently in **{info['name']}** mode!{evil_text}\n"
+            f"{mode_icon} Currently in **{info['name']}** mode!{evil_text}\n"
             f"*{info['description']}*"
         )
 
@@ -345,10 +380,11 @@ class Social(commands.Cog):
         current_mode = await get_server_mode(interaction.guild.id)
         current_evil = await get_evil_mode(interaction.guild.id)
         info = MODE_INFO.get(current_mode, MODE_INFO["mode_femboy"])
+        mode_icon = await self._get_mode_icon(current_mode)
         evil_text = "\n😈 (Evil Mode Active)" if current_evil else ""
 
         await interaction.response.send_message(
-            f"{info['emoji']} Currently in **{info['name']}** mode!{evil_text}\n"
+            f"{mode_icon} Currently in **{info['name']}** mode!{evil_text}\n"
             f"*{info['description']}*"
         )
     

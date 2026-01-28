@@ -649,7 +649,7 @@ class Memories(commands.Cog):
         except pytz.UnknownTimeZoneError:
             abbrev_examples = ", ".join(list(TIMEZONE_ALIASES.keys())[:8])
             await interaction.response.send_message(
-                f"âŒ Unknown timezone: `{timezone}`\n"
+                f"❌ Unknown timezone: `{timezone}`\n"
                 f"**Abbreviations:** `{abbrev_examples}`, ...\n"
                 f"**Full format:** `Asia/Dhaka`, `America/New_York`, `Europe/London`\n"
                 f"Find more: https://en.wikipedia.org/wiki/List_of_tz_database_time_zones",
@@ -663,7 +663,7 @@ class Memories(commands.Cog):
         current_time = datetime.now(tz).strftime("%H:%M")
 
         await interaction.response.send_message(
-            f"âœ… Timezone set to **{timezone}**!\n"
+            f"✅ Timezone set to **{timezone}**!\n"
             f"Your current time: `{current_time}`"
         )
 
@@ -717,9 +717,9 @@ class Memories(commands.Cog):
         count = await delete_facts(interaction.guild.id, interaction.user.id)
 
         if count == 0:
-            await interaction.response.send_message("ðŸ¤” I don't have any facts stored about you!")
+            await interaction.response.send_message("🤔 I don't have any facts stored about you!")
         else:
-            await interaction.response.send_message(f"ðŸ—‘ï¸ Cleared {count} fact(s) from memory!")
+            await interaction.response.send_message(f"🗑️ Cleared {count} fact(s) from memory!")
 
     @app_commands.command(name="myinfo", description="View your stored timezone and facts.")
     async def show_user_info_slash(self, interaction: discord.Interaction):
@@ -734,29 +734,29 @@ class Memories(commands.Cog):
         facts = await get_facts(interaction.guild.id, interaction.user.id)
 
         embed = discord.Embed(
-            title=f"ðŸ“‹ {interaction.user.display_name}'s Profile",
+            title=f"📋 {interaction.user.display_name}'s Profile",
             color=discord.Color.pink(),
         )
 
         timezone = user.get("timezone", "Not set") if user else "Not set"
         embed.add_field(
-            name="ðŸŒ Timezone",
+            name="🌍 Timezone",
             value=f"`{timezone}`",
             inline=True,
         )
 
         if facts:
-            facts_text = "\n".join(f"â€¢ {fact}" for fact in facts[:10])
+            facts_text = "\n".join(f"• {fact}" for fact in facts[:10])
             if len(facts) > 10:
                 facts_text += f"\n... and {len(facts) - 10} more"
             embed.add_field(
-                name=f"ðŸ“ Remembered Facts ({len(facts)})",
+                name=f"📝 Remembered Facts ({len(facts)})",
                 value=facts_text,
                 inline=False,
             )
         else:
             embed.add_field(
-                name="ðŸ“ Remembered Facts",
+                name="📝 Remembered Facts",
                 value="*No facts stored yet. Use `/remember <fact>` to add some!*",
                 inline=False,
             )
@@ -917,17 +917,17 @@ class Memories(commands.Cog):
                     "July", "August", "September", "October", "November", "December"
                 ][int(month)]
                 await interaction.response.send_message(
-                    f"ðŸŽ‚ {target.display_name}'s birthday is **{month_name} {int(day)}**!"
+                    f"🎂 {target.display_name}'s birthday is **{month_name} {int(day)}**!"
                 )
             else:
                 if target == interaction.user:
                     await interaction.response.send_message(
-                        "ðŸ“… You haven't set your birthday yet! Use `/birthday set MM-DD`",
+                        "📅 You haven't set your birthday yet! Use `/birthday set MM-DD`",
                         ephemeral=True,
                     )
                 else:
                     await interaction.response.send_message(
-                        f"ðŸ“… {target.display_name} hasn't set their birthday yet!",
+                        f"📅 {target.display_name} hasn't set their birthday yet!",
                         ephemeral=True,
                     )
             return
@@ -942,20 +942,20 @@ class Memories(commands.Cog):
 
             if not re.match(r"^\d{2}-\d{2}$", date):
                 await interaction.response.send_message(
-                    "âŒ Invalid format! Use `MM-DD` (e.g., `03-15` for March 15th)",
+                    "❌ Invalid format! Use `MM-DD` (e.g., `03-15` for March 15th)",
                     ephemeral=True,
                 )
                 return
 
             month, day = map(int, date.split("-"))
             if month < 1 or month > 12:
-                await interaction.response.send_message("âŒ Month must be between 01 and 12!", ephemeral=True)
+                await interaction.response.send_message("❌ Month must be between 01 and 12!", ephemeral=True)
                 return
 
             days_in_month = [0, 31, 29, 31, 30, 31, 30, 31, 31, 30, 31, 30, 31]
             if day < 1 or day > days_in_month[month]:
                 await interaction.response.send_message(
-                    f"âŒ Invalid day for month {month:02d}!",
+                    f"❌ Invalid day for month {month:02d}!",
                     ephemeral=True,
                 )
                 return
@@ -970,7 +970,7 @@ class Memories(commands.Cog):
 
             target_text = target.display_name if target.id != interaction.user.id else "you"
             await interaction.response.send_message(
-                f"ðŸŽ‚ Birthday set to **{month_name} {day}** for {target_text}! I'll remember~ â™¡"
+                f"🎂 Birthday set to **{month_name} {day}** for {target_text}! I'll remember~ ♡"
             )
             return
 
@@ -979,13 +979,13 @@ class Memories(commands.Cog):
 
             if not upcoming:
                 await interaction.response.send_message(
-                    "ðŸ“… No birthdays coming up in the next 3 months!",
+                    "📅 No birthdays coming up in the next 3 months!",
                     ephemeral=True,
                 )
                 return
 
             embed = discord.Embed(
-                title="ðŸŽ‚ Upcoming Birthdays (Next 3 Months)",
+                title="🎂 Upcoming Birthdays (Next 3 Months)",
                 color=discord.Color.pink(),
             )
 
@@ -995,7 +995,7 @@ class Memories(commands.Cog):
                 days = entry["days_until"]
 
                 if days == 0:
-                    when = "**Today!** ðŸŽ‰"
+                    when = "**Today!** 🎉"
                 elif days == 1:
                     when = "Tomorrow"
                 else:

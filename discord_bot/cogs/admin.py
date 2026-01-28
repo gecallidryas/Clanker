@@ -311,7 +311,7 @@ class Admin(commands.Cog):
         valid_types = ["all", "facts", "affection", "aliases"]
         if target not in valid_types:
             await interaction.response.send_message(
-                f"âŒ Invalid type. Use one of: {', '.join(valid_types)}",
+                f"❌ Invalid type. Use one of: {', '.join(valid_types)}",
                 ephemeral=True,
             )
             return
@@ -319,7 +319,7 @@ class Admin(commands.Cog):
         deleted = await reset_user_data(interaction.guild.id, member.id, target)
 
         embed = discord.Embed(
-            title=f"ðŸ—‘ï¸ Reset Data for {member.display_name}",
+            title=f"🗑️ Reset Data for {member.display_name}",
             color=discord.Color.red(),
         )
 
@@ -344,25 +344,25 @@ class Admin(commands.Cog):
         profile = await get_user_full_profile(interaction.guild.id, member.id)
 
         embed = discord.Embed(
-            title=f"ðŸ‘¤ Profile: {member.display_name}",
+            title=f"👤 Profile: {member.display_name}",
             color=discord.Color.blue(),
         )
 
         aff = profile.get("affection", {})
         embed.add_field(
-            name="ðŸ’• Affection",
+            name="💖 Affection",
             value=f"{aff.get('affection_points', 0)} pts ({aff.get('affection_level', 'stranger')})",
             inline=True,
         )
 
         embed.add_field(
-            name="ðŸŒ Timezone",
+            name="🌍 Timezone",
             value=profile.get("timezone", "Not set"),
             inline=True,
         )
 
         embed.add_field(
-            name="ðŸŽ‚ Birthday",
+            name="🎂 Birthday",
             value=profile.get("birthday") or "Not set",
             inline=True,
         )
@@ -370,7 +370,7 @@ class Admin(commands.Cog):
         aliases = profile.get("aliases", [])
         if aliases:
             embed.add_field(
-                name=f"ðŸ“› Aliases ({len(aliases)})",
+                name=f"📛 Aliases ({len(aliases)})",
                 value=", ".join(aliases[:10]) + ("..." if len(aliases) > 10 else ""),
                 inline=False,
             )
@@ -380,11 +380,11 @@ class Admin(commands.Cog):
             fact_list = []
             for f in facts[:5]:
                 source = f.get("source", "manual")
-                source_emoji = "ðŸ“" if source == "manual" else "ðŸ§ " if source == "learned" else "ðŸ”§"
+                source_emoji = "📝" if source == "manual" else "🧠" if source == "learned" else "🔧"
                 fact_list.append(f"{source_emoji} `{f['id']}` {f['fact'][:50]}...")
 
             embed.add_field(
-                name=f"ðŸ“‹ Facts ({len(facts)} total)",
+                name=f"📋 Facts ({len(facts)} total)",
                 value="\n".join(fact_list) if fact_list else "None",
                 inline=False,
             )
@@ -408,7 +408,7 @@ class Admin(commands.Cog):
         )
 
         await interaction.response.send_message(
-            f"âœ… Added fact #{fact_id} for {member.display_name}:\n> {fact}"
+            f"✅ Added fact #{fact_id} for {member.display_name}:\n> {fact}"
         )
         logger.info("Admin %s added fact for %s: %s", interaction.user, member, fact[:50])
 
@@ -425,7 +425,7 @@ class Admin(commands.Cog):
 
         if fact_id not in fact_ids:
             await interaction.response.send_message(
-                f"âŒ Fact #{fact_id} not found for {member.display_name}",
+                f"❌ Fact #{fact_id} not found for {member.display_name}",
                 ephemeral=True,
             )
             return
@@ -433,11 +433,11 @@ class Admin(commands.Cog):
         success = await delete_fact_by_id(interaction.guild.id, fact_id)
         if success:
             await interaction.response.send_message(
-                f"âœ… Deleted fact #{fact_id} for {member.display_name}"
+                f"✅ Deleted fact #{fact_id} for {member.display_name}"
             )
             logger.info("Admin %s deleted fact #%s for %s", interaction.user, fact_id, member)
         else:
-            await interaction.response.send_message("âŒ Failed to delete fact", ephemeral=True)
+            await interaction.response.send_message("❌ Failed to delete fact", ephemeral=True)
 
     @admin_app_group.command(name="affection", description="Set affection points for a user.")
     @app_commands.checks.has_permissions(manage_guild=True)
@@ -447,13 +447,13 @@ class Admin(commands.Cog):
             await interaction.response.send_message("Use this command in a server.", ephemeral=True)
             return
         if points < 0:
-            await interaction.response.send_message("âŒ Points cannot be negative", ephemeral=True)
+            await interaction.response.send_message("❌ Points cannot be negative", ephemeral=True)
             return
 
         result = await set_affection_value(interaction.guild.id, member.id, points)
 
         await interaction.response.send_message(
-            f"âœ… Set {member.display_name}'s affection to "
+            f"✅ Set {member.display_name}'s affection to "
             f"**{points}** points (Level: {result['affection_level']})"
         )
         logger.info("Admin %s set affection for %s to %s", interaction.user, member, points)

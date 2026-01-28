@@ -311,9 +311,9 @@ class Reminders(commands.Cog):
             await interaction.response.send_message(
                 "**Usage:** `!remind <time> <message>`\n"
                 "**Examples:**\n"
-                "â€¢ `!remind 30m drink water`\n"
-                "â€¢ `!remind 2h check the oven`\n"
-                "â€¢ `!remind 1d submit assignment`\n\n"
+                "• `!remind 30m drink water`\n"
+                "• `!remind 2h check the oven`\n"
+                "• `!remind 1d submit assignment`\n\n"
                 "**Time formats:** `Xm` (minutes), `Xh` (hours), `Xd` (days), `Xw` (weeks), `tomorrow`, `next week`",
                 ephemeral=True,
             )
@@ -321,7 +321,7 @@ class Reminders(commands.Cog):
 
         if not message:
             await interaction.response.send_message(
-                "âŒ Please provide a message for your reminder!",
+                "❌ Please provide a message for your reminder!",
                 ephemeral=True,
             )
             return
@@ -336,7 +336,7 @@ class Reminders(commands.Cog):
         existing = await get_user_reminders(interaction.user.id, interaction.guild.id)
         if len(existing) >= MAX_REMINDERS:
             await interaction.response.send_message(
-                f"âŒ You have too many reminders! Maximum is {MAX_REMINDERS}.",
+                f"❌ You have too many reminders! Maximum is {MAX_REMINDERS}.",
                 ephemeral=True,
             )
             return
@@ -344,7 +344,7 @@ class Reminders(commands.Cog):
         seconds = parse_time(time)
         if seconds is None:
             await interaction.response.send_message(
-                f"âŒ Couldn't parse time: `{time}`\n"
+                f"❌ Couldn't parse time: `{time}`\n"
                 "Use formats like: `30m`, `2h`, `1d`, `1w`, `tomorrow`, `next week`",
                 ephemeral=True,
             )
@@ -352,13 +352,13 @@ class Reminders(commands.Cog):
 
         if seconds < 60:
             await interaction.response.send_message(
-                "âŒ Minimum reminder time is 1 minute!",
+                "❌ Minimum reminder time is 1 minute!",
                 ephemeral=True,
             )
             return
         if seconds > 30 * 86400:
             await interaction.response.send_message(
-                "âŒ Maximum reminder time is 30 days!",
+                "❌ Maximum reminder time is 30 days!",
                 ephemeral=True,
             )
             return
@@ -376,7 +376,7 @@ class Reminders(commands.Cog):
 
         duration = format_duration(seconds)
         embed = discord.Embed(
-            title="â° Reminder Set!",
+            title="⏰ Reminder Set!",
             description=f"I'll remind you in **{duration}**",
             color=discord.Color.green(),
         )
@@ -399,13 +399,13 @@ class Reminders(commands.Cog):
 
         if not reminders:
             await interaction.response.send_message(
-                "ðŸ“­ You don't have any active reminders!",
+                "📭 You don't have any active reminders!",
                 ephemeral=True,
             )
             return
 
         embed = discord.Embed(
-            title="ðŸ“‹ Your Reminders",
+            title="📋 Your Reminders",
             color=discord.Color.blue(),
         )
 
@@ -446,11 +446,11 @@ class Reminders(commands.Cog):
 
         if success:
             await interaction.response.send_message(
-                f"âœ… Reminder #{reminder_id} cancelled!"
+                f"✅ Reminder #{reminder_id} cancelled!"
             )
         else:
             await interaction.response.send_message(
-                f"âŒ Couldn't find reminder #{reminder_id} (or it's not yours)",
+                f"❌ Couldn't find reminder #{reminder_id} (or it's not yours)",
                 ephemeral=True,
             )
 

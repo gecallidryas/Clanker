@@ -404,37 +404,6 @@ class Config(commands.Cog):
     ) -> list[app_commands.Choice[int]]:
         return [app_commands.Choice(name=str(i), value=i) for i in range(1, 6)]
 
-    @model_set.autocomplete("category")
-    async def model_set_category_autocomplete(
-        self,
-        interaction: discord.Interaction,
-        current: str,
-    ) -> list[app_commands.Choice[str]]:
-        options = ["general", "translate", "summarize", "uncensored"]
-        current_lower = current.lower().strip()
-        matches = [opt for opt in options if current_lower in opt]
-        return [app_commands.Choice(name=opt, value=opt) for opt in matches[:25]]
-
-    @model_set.autocomplete("model")
-    async def model_set_model_autocomplete(
-        self,
-        interaction: discord.Interaction,
-        current: str,
-    ) -> list[app_commands.Choice[str]]:
-        category = None
-        try:
-            category = str(interaction.namespace.category).lower()
-        except Exception:
-            category = ""
-        current_lower = (current or "").lower().strip()
-
-        if category in ("uncensored", "openrouter"):
-            options = list(dict.fromkeys(list(OPENROUTER_MODELS.keys()) + RECOMMENDED_OPENROUTER_MODELS))
-        else:
-            options = RECOMMENDED_GEMINI_MODELS
-        matches = [opt for opt in options if current_lower in opt.lower()]
-        return [app_commands.Choice(name=opt, value=opt) for opt in matches[:25]]
-
     # =========================
     # Models
     # =========================
@@ -551,6 +520,37 @@ class Config(commands.Cog):
         if warnings:
             message += "\n" + "\n".join(f"Warning: {w}" for w in warnings)
         await interaction.response.send_message(message, ephemeral=True)
+
+    @model_set.autocomplete("category")
+    async def model_set_category_autocomplete(
+        self,
+        interaction: discord.Interaction,
+        current: str,
+    ) -> list[app_commands.Choice[str]]:
+        options = ["general", "translate", "summarize", "uncensored"]
+        current_lower = current.lower().strip()
+        matches = [opt for opt in options if current_lower in opt]
+        return [app_commands.Choice(name=opt, value=opt) for opt in matches[:25]]
+
+    @model_set.autocomplete("model")
+    async def model_set_model_autocomplete(
+        self,
+        interaction: discord.Interaction,
+        current: str,
+    ) -> list[app_commands.Choice[str]]:
+        category = None
+        try:
+            category = str(interaction.namespace.category).lower()
+        except Exception:
+            category = ""
+        current_lower = (current or "").lower().strip()
+
+        if category in ("uncensored", "openrouter"):
+            options = list(dict.fromkeys(list(OPENROUTER_MODELS.keys()) + RECOMMENDED_OPENROUTER_MODELS))
+        else:
+            options = RECOMMENDED_GEMINI_MODELS
+        matches = [opt for opt in options if current_lower in opt.lower()]
+        return [app_commands.Choice(name=opt, value=opt) for opt in matches[:25]]
 
     # =========================
     # Env

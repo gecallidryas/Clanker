@@ -493,13 +493,13 @@ Provide a clear, bulleted summary:
             cmd = self.bot.get_command(command_name)
             if not cmd:
                 await interaction.response.send_message(
-                    f"âŒ Command `{command_name}` not found!",
+                    f"❌ Command `{command_name}` not found!",
                     ephemeral=True,
                 )
                 return
 
             embed = discord.Embed(
-                title=f"ðŸ“– Help: !{cmd.name}",
+                title=f"📖 Help: !{cmd.name}",
                 description=cmd.help or "No description available.",
                 color=discord.Color.blue(),
             )
@@ -522,7 +522,7 @@ Provide a clear, bulleted summary:
         intro = HELP_INTROS.get(mode, HELP_INTROS["mode_femboy"])
         bot_name = self._get_bot_name(mode)
         embed = discord.Embed(
-            title=f"ðŸ“š {bot_name}'s Commands",
+            title=f"📚 {bot_name}'s Commands",
             description=intro,
             color=discord.Color.pink(),
         )
@@ -567,26 +567,26 @@ Provide a clear, bulleted summary:
         total_users = sum(g.member_count or 0 for g in self.bot.guilds)
 
         embed = discord.Embed(
-            title="ðŸ“Š Bot Statistics",
+            title="📊 Bot Statistics",
             color=discord.Color.blue(),
         )
 
-        embed.add_field(name="â±ï¸ Uptime", value=uptime_str, inline=True)
-        embed.add_field(name="ðŸ  Servers", value=str(len(self.bot.guilds)), inline=True)
-        embed.add_field(name="ðŸ‘¥ Users", value=f"{total_users:,}", inline=True)
+        embed.add_field(name="⏱️ Uptime", value=uptime_str, inline=True)
+        embed.add_field(name="🏠 Servers", value=str(len(self.bot.guilds)), inline=True)
+        embed.add_field(name="👥 Users", value=f"{total_users:,}", inline=True)
 
         embed.add_field(
-            name="ðŸ’¬ Messages Processed",
+            name="💬 Messages Processed",
             value=f"{stats.get('messages_processed', 0):,}",
             inline=True,
         )
         embed.add_field(
-            name="ðŸ–¼ï¸ Images Analyzed",
+            name="🖼️ Images Analyzed",
             value=f"{stats.get('images_analyzed', 0):,}",
             inline=True,
         )
         embed.add_field(
-            name="ðŸ’¾ Memory",
+            name="💾 Memory",
             value=f"{memory_mb:.1f} MB",
             inline=True,
         )
@@ -594,17 +594,17 @@ Provide a clear, bulleted summary:
         if interaction.guild:
             mode = await get_server_mode(interaction.guild.id)
             mode_display = {
-                "mode_femboy": "ðŸŽ€ Femboy",
-                "mode_tsundere": "ðŸ˜¤ Tsundere",
-                "mode_oneesan": "ðŸ’• Onee-san",
+                "mode_femboy": "🎀 Femboy",
+                "mode_tsundere": "😤 Tsundere",
+                "mode_oneesan": "💖 Onee-san",
             }
             embed.add_field(
-                name="ðŸŽ­ Current Mode",
+                name="🎭 Current Mode",
                 value=mode_display.get(mode, mode),
                 inline=True,
             )
 
-        embed.set_footer(text="Powered by Gemini AI â™¡")
+        embed.set_footer(text="Powered by Gemini AI ♡")
         await interaction.response.send_message(embed=embed)
 
     @app_commands.command(name="reload", description="Reload a cog or all cogs (owner only).")
@@ -638,22 +638,22 @@ Provide a clear, bulleted summary:
                 except Exception as e:
                     failed.append(f"{cog}: {str(e)[:50]}")
 
-            result = f"âœ… Reloaded: {', '.join(success)}"
+            result = f"✅ Reloaded: {', '.join(success)}"
             if failed:
-                result += f"\nâŒ Failed: {', '.join(failed)}"
+                result += f"\n❌ Failed: {', '.join(failed)}"
             await interaction.followup.send(result)
             return
 
         cog_name = cog_name.lower()
         if cog_name not in available_cogs:
-            await interaction.followup.send(f"âŒ Cog `{cog_name}` not found!")
+            await interaction.followup.send(f"❌ Cog `{cog_name}` not found!")
             return
 
         try:
             await self.bot.reload_extension(f"cogs.{cog_name}")
-            await interaction.followup.send(f"âœ… Reloaded `{cog_name}`!")
+            await interaction.followup.send(f"✅ Reloaded `{cog_name}`!")
         except Exception as e:
-            await interaction.followup.send(f"âŒ Failed to reload `{cog_name}`: {e}")
+            await interaction.followup.send(f"❌ Failed to reload `{cog_name}`: {e}")
 
     @app_commands.command(name="translate", description="Translate text to another language.")
     @app_commands.describe(query="Text and target language, e.g. 'hello to japanese'")
@@ -806,7 +806,7 @@ Provide a clear, bulleted summary:
     @app_commands.command(name="ping", description="Check bot latency.")
     async def ping_slash(self, interaction: discord.Interaction):
         latency = round(self.bot.latency * 1000)
-        emoji = "ðŸŸ¢" if latency < 100 else "ðŸŸ¡" if latency < 200 else "ðŸ”´"
+        emoji = "🟢" if latency < 100 else "🟡" if latency < 200 else "🔴"
         await interaction.response.send_message(f"{emoji} Pong! Latency: **{latency}ms**")
 
     @app_commands.command(name="about", description="Display information about the bot.")
@@ -814,26 +814,26 @@ Provide a clear, bulleted summary:
         mode = await get_server_mode(interaction.guild.id) if interaction.guild else "mode_femboy"
         bot_name = self._get_bot_name(mode)
         embed = discord.Embed(
-            title=f"ðŸ¤– About {bot_name}",
+            title=f"🤖 About {bot_name}",
             description="An advanced AI Discord bot with multiple personalities!",
             color=discord.Color.pink(),
         )
 
         embed.add_field(
-            name="âœ¨ Features",
+            name="✨ Features",
             value=(
-                "â€¢ Three personality modes\n"
-                "â€¢ AI-powered conversations\n"
-                "â€¢ Image analysis\n"
-                "â€¢ Affection & Mood system\n"
-                "â€¢ Reminders & Translation"
+                "• Three personality modes\n"
+                "• AI-powered conversations\n"
+                "• Image analysis\n"
+                "• Affection & Mood system\n"
+                "• Reminders & Translation"
             ),
             inline=False,
         )
 
-        embed.add_field(name="ðŸ“Š Servers", value=str(len(self.bot.guilds)), inline=True)
-        embed.add_field(name="ðŸ”— Commands", value="Use `!help`", inline=True)
-        embed.set_footer(text="Powered by Gemini AI â™¡")
+        embed.add_field(name="📊 Servers", value=str(len(self.bot.guilds)), inline=True)
+        embed.add_field(name="🔗 Commands", value="Use `!help`", inline=True)
+        embed.set_footer(text="Powered by Gemini AI ♡")
 
         await interaction.response.send_message(embed=embed)
 

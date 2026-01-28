@@ -44,6 +44,14 @@ from utils.db_handler import (
     set_last_wellbeing_date,
 )
 from utils.api_manager import UserInputError
+from utils.app_emojis import (
+    clean_emoji_name,
+    filter_emojis_by_prefix,
+    format_custom_emoji,
+    get_application_emojis,
+    FEMMY_EMOJI_PREFIX,
+    YUMI_EMOJI_PREFIX,
+)
 from utils.guild_ai import (
     generate_guild_gemini_text,
     generate_guild_gemini_vision,
@@ -762,19 +770,29 @@ class AIBrain(commands.Cog):
             return "confused"
         return matched_genders.pop()
     
-    def _get_server_emojis(self, guild: Optional[discord.Guild], limit: int = 50) -> str:
-        """Get a formatted list of server custom emojis for AI use."""
-        if not guild or not guild.emojis:
+    async def _get_app_emojis(self, mode: str, limit: int = 50) -> str:
+        """Get a formatted list of application emojis for AI use."""
+        emojis = await get_application_emojis(self.bot)
+        if not emojis:
             return ""
-        
-        emoji_list = []
-        for emoji in guild.emojis[:limit]:
-            if emoji.animated:
-                emoji_list.append(f"<a:{emoji.name}:{emoji.id}> ({emoji.name})")
-            else:
-                emoji_list.append(f"<:{emoji.name}:{emoji.id}> ({emoji.name})")
-        
-        return "\n".join(emoji_list)
+
+        if mode == "mode_femboy":
+            emojis = filter_emojis_by_prefix(emojis, FEMMY_EMOJI_PREFIX)
+        elif mode == "mode_oneesan":
+            emojis = filter_emojis_by_prefix(emojis, YUMI_EMOJI_PREFIX)
+
+        if not emojis:
+            return ""
+
+        lines = []
+        for emoji in emojis[:limit]:
+            token = format_custom_emoji(emoji)
+            if not token:
+                continue
+            display_name = clean_emoji_name(getattr(emoji, "name", ""))
+            lines.append(f"{token} ({display_name})")
+
+        return "\n".join(lines)
     
     async def build_prompt(
         self, 
@@ -922,12 +940,16 @@ You can explain these commands to the user if asked:
 - !stats / !ping: Bot status
 """
 
-        # Get server emojis
+        # Get application emojis
         emoji_section = ""
-        if member and member.guild:
-            emojis = self._get_server_emojis(member.guild)
+        if member and guild_id:
+            emojis = await self._get_app_emojis(mode)
             if emojis:
-                emoji_section = f"\n\n=== SERVER EMOJIS ===\nYou can use these server emojis naturally in your responses:\n{emojis}\n"
+                emoji_section = (
+                    "\n\n=== APP EMOJIS ===\n"
+                    "You can use these application emojis naturally in your responses:\n"
+                    f"{emojis}\n"
+                )
 
         wellbeing_note = (
             f"[Wellbeing check: YES. {wellbeing_prompt}]"
