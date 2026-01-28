@@ -122,25 +122,6 @@ class Femmy(commands.Bot):
             except Exception as e:
                 logger.error("Failed to load cog %s: %s", cog, e, exc_info=True)
 
-        @self.tree.check
-        async def _guild_only_interactions(interaction: discord.Interaction) -> bool:
-            if interaction.guild is None:
-                try:
-                    if interaction.response.is_done():
-                        await interaction.followup.send(
-                            "Commands can only be used inside servers.",
-                            ephemeral=True,
-                        )
-                    else:
-                        await interaction.response.send_message(
-                            "Commands can only be used inside servers.",
-                            ephemeral=True,
-                        )
-                except Exception:
-                    pass
-                return False
-            return True
-
         try:
             await self.tree.sync()
             logger.info("Slash commands synced.")
@@ -169,6 +150,25 @@ class Femmy(commands.Bot):
             name="over you~ ♡"
         )
         await self.change_presence(activity=activity)
+
+    async def on_interaction(self, interaction: discord.Interaction):
+        """Block application commands in DMs (works even without tree.check support)."""
+        if interaction.type == discord.InteractionType.application_command and interaction.guild is None:
+            try:
+                if interaction.response.is_done():
+                    await interaction.followup.send(
+                        "Commands can only be used inside servers.",
+                        ephemeral=True,
+                    )
+                else:
+                    await interaction.response.send_message(
+                        "Commands can only be used inside servers.",
+                        ephemeral=True,
+                    )
+            except Exception:
+                pass
+            return
+        await super().on_interaction(interaction)
     
     async def on_command_error(self, ctx, error):
         """
