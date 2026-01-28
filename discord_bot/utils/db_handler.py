@@ -195,7 +195,78 @@ async def _init_guild_schema(db: aiosqlite.Connection) -> None:
             guild_id INTEGER PRIMARY KEY,
             persona_mode TEXT DEFAULT 'mode_femboy',
             bump_channel_id INTEGER,
+            evil_mode INTEGER DEFAULT 0,
             updated_at TIMESTAMP DEFAULT CURRENT_TIMESTAMP
+        )
+    """)
+
+    # Guild-specific API configuration
+    await db.execute("""
+        CREATE TABLE IF NOT EXISTS guild_config (
+            guild_id INTEGER PRIMARY KEY,
+            gemini_api_key TEXT,
+            gemini_api_key_2 TEXT,
+            gemini_api_key_3 TEXT,
+            gemini_api_key_4 TEXT,
+            gemini_api_key_5 TEXT,
+            gemini_translate_key TEXT,
+            gemini_translate_key_2 TEXT,
+            gemini_translate_key_3 TEXT,
+            gemini_translate_key_4 TEXT,
+            gemini_translate_key_5 TEXT,
+            gemini_summarize_key TEXT,
+            gemini_summarize_key_2 TEXT,
+            gemini_summarize_key_3 TEXT,
+            gemini_summarize_key_4 TEXT,
+            gemini_summarize_key_5 TEXT,
+            openrouter_api_key TEXT,
+            openrouter_api_key_2 TEXT,
+            openrouter_api_key_3 TEXT,
+            openrouter_api_key_4 TEXT,
+            openrouter_api_key_5 TEXT,
+            gemini_model TEXT DEFAULT 'gemini-2.5-flash-lite',
+            gemini_translate_model TEXT,
+            gemini_summarize_model TEXT,
+            openrouter_model TEXT DEFAULT 'cognitivecomputations/dolphin-mistral-24b-venice-edition:free',
+            openrouter_fallback_models TEXT,
+            evil_mode_enabled INTEGER DEFAULT 0,
+            updated_at TIMESTAMP DEFAULT CURRENT_TIMESTAMP
+        )
+    """)
+
+    await db.execute("""
+        CREATE TABLE IF NOT EXISTS guild_admin_auth (
+            guild_id INTEGER PRIMARY KEY,
+            password_hash TEXT NOT NULL,
+            created_by INTEGER NOT NULL,
+            created_at TIMESTAMP DEFAULT CURRENT_TIMESTAMP,
+            last_used_at TIMESTAMP,
+            password_version INTEGER DEFAULT 1
+        )
+    """)
+
+    await db.execute("""
+        CREATE TABLE IF NOT EXISTS guild_auth_sessions (
+            id INTEGER PRIMARY KEY AUTOINCREMENT,
+            guild_id INTEGER NOT NULL,
+            user_id INTEGER NOT NULL,
+            password_version INTEGER NOT NULL,
+            expires_at TIMESTAMP NOT NULL,
+            created_at TIMESTAMP DEFAULT CURRENT_TIMESTAMP,
+            UNIQUE(guild_id, user_id)
+        )
+    """)
+
+    await db.execute("""
+        CREATE TABLE IF NOT EXISTS guild_config_audit (
+            id INTEGER PRIMARY KEY AUTOINCREMENT,
+            guild_id INTEGER NOT NULL,
+            user_id INTEGER NOT NULL,
+            action TEXT NOT NULL,
+            field TEXT,
+            old_value TEXT,
+            new_value TEXT,
+            created_at TIMESTAMP DEFAULT CURRENT_TIMESTAMP
         )
     """)
     
@@ -255,6 +326,47 @@ async def _init_guild_schema(db: aiosqlite.Connection) -> None:
         await db.execute("ALTER TABLE users ADD COLUMN birthday TEXT")
     except Exception:
         pass  # Column already exists
+
+    # Add evil_mode column to server_config if missing (migration)
+    try:
+        await db.execute("ALTER TABLE server_config ADD COLUMN evil_mode INTEGER DEFAULT 0")
+    except Exception:
+        pass
+
+    # Ensure new guild_config columns exist (migration)
+    try:
+        async with db.execute("PRAGMA table_info(guild_config)") as cursor:
+            columns = {row[1] for row in await cursor.fetchall()}
+        for column_name, column_type, default_value in [
+            ("gemini_api_key_4", "TEXT", None),
+            ("gemini_api_key_5", "TEXT", None),
+            ("gemini_translate_key", "TEXT", None),
+            ("gemini_translate_key_2", "TEXT", None),
+            ("gemini_translate_key_3", "TEXT", None),
+            ("gemini_translate_key_4", "TEXT", None),
+            ("gemini_translate_key_5", "TEXT", None),
+            ("gemini_summarize_key", "TEXT", None),
+            ("gemini_summarize_key_2", "TEXT", None),
+            ("gemini_summarize_key_3", "TEXT", None),
+            ("gemini_summarize_key_4", "TEXT", None),
+            ("gemini_summarize_key_5", "TEXT", None),
+            ("gemini_translate_model", "TEXT", None),
+            ("gemini_summarize_model", "TEXT", None),
+            ("openrouter_api_key_2", "TEXT", None),
+            ("openrouter_api_key_3", "TEXT", None),
+            ("openrouter_api_key_4", "TEXT", None),
+            ("openrouter_api_key_5", "TEXT", None),
+        ]:
+            if column_name in columns:
+                continue
+            if default_value is None:
+                await db.execute(f"ALTER TABLE guild_config ADD COLUMN {column_name} {column_type}")
+            else:
+                await db.execute(
+                    f"ALTER TABLE guild_config ADD COLUMN {column_name} {column_type} DEFAULT {default_value}"
+                )
+    except Exception:
+        pass
 
     # Add guild_id column to user_facts if missing (migration)
     try:
@@ -1350,3 +1462,141 @@ async def get_user_full_profile(guild_id: int, user_id: int) -> Dict[str, Any]:
         "facts": facts,
         "aliases": aliases
     }
+
+
+# ============================================
+# Guild API Config Operations
+# ============================================
+
+GUILD_CONFIG_FIELDS: Set[str] = {
+    "gemini_api_key",
+    "gemini_api_key_2",
+    "gemini_api_key_3",
+    "gemini_api_key_4",
+    "gemini_api_key_5",
+    "gemini_translate_key",
+    "gemini_translate_key_2",
+    "gemini_translate_key_3",
+    "gemini_translate_key_4",
+    "gemini_translate_key_5",
+    "gemini_summarize_key",
+    "gemini_summarize_key_2",
+    "gemini_summarize_key_3",
+    "gemini_summarize_key_4",
+    "gemini_summarize_key_5",
+    "openrouter_api_key",
+    "openrouter_api_key_2",
+    "openrouter_api_key_3",
+    "openrouter_api_key_4",
+    "openrouter_api_key_5",
+    "gemini_model",
+    "gemini_translate_model",
+    "gemini_summarize_model",
+    "openrouter_model",
+    "openrouter_fallback_models",
+    "evil_mode_enabled",
+}
+
+
+async def get_guild_config(guild_id: int) -> Dict[str, Any]:
+    """Fetch guild API configuration (creates default row if missing)."""
+    async with guild_db(guild_id) as db:
+        await db.execute(
+            "INSERT OR IGNORE INTO guild_config (guild_id) VALUES (?)",
+            (guild_id,),
+        )
+        await db.commit()
+        db.row_factory = aiosqlite.Row
+        async with db.execute(
+            "SELECT * FROM guild_config WHERE guild_id = ?",
+            (guild_id,),
+        ) as cursor:
+            row = await cursor.fetchone()
+            return dict(row) if row else {}
+
+
+async def update_guild_config(guild_id: int, updates: Dict[str, Any]) -> None:
+    """Update guild configuration fields and touch updated_at."""
+    if not updates:
+        return
+    filtered = {k: v for k, v in updates.items() if k in GUILD_CONFIG_FIELDS}
+    if not filtered:
+        return
+
+    now = datetime.now()
+    columns = ["guild_id", *filtered.keys(), "updated_at"]
+    placeholders = ", ".join(["?"] * len(columns))
+    insert_values = [guild_id, *filtered.values(), now]
+
+    set_clause = ", ".join(
+        [f"{col} = excluded.{col}" for col in filtered.keys()] + ["updated_at = excluded.updated_at"]
+    )
+
+    async with guild_db(guild_id) as db:
+        await db.execute(
+            f"INSERT INTO guild_config ({', '.join(columns)}) VALUES ({placeholders}) "
+            f"ON CONFLICT(guild_id) DO UPDATE SET {set_clause}",
+            insert_values,
+        )
+        await db.commit()
+
+
+async def clear_guild_keys(guild_id: int) -> None:
+    """Clear all stored API keys for a guild."""
+    await update_guild_config(
+        guild_id,
+        {
+            "gemini_api_key": None,
+            "gemini_api_key_2": None,
+            "gemini_api_key_3": None,
+            "gemini_api_key_4": None,
+            "gemini_api_key_5": None,
+            "gemini_translate_key": None,
+            "gemini_translate_key_2": None,
+            "gemini_translate_key_3": None,
+            "gemini_translate_key_4": None,
+            "gemini_translate_key_5": None,
+            "gemini_summarize_key": None,
+            "gemini_summarize_key_2": None,
+            "gemini_summarize_key_3": None,
+            "gemini_summarize_key_4": None,
+            "gemini_summarize_key_5": None,
+            "openrouter_api_key": None,
+            "openrouter_api_key_2": None,
+            "openrouter_api_key_3": None,
+            "openrouter_api_key_4": None,
+            "openrouter_api_key_5": None,
+        },
+    )
+
+
+async def add_guild_config_audit(
+    guild_id: int,
+    user_id: int,
+    action: str,
+    field: Optional[str] = None,
+    old_value: Optional[str] = None,
+    new_value: Optional[str] = None,
+) -> None:
+    """Record a config change event for auditing."""
+    async with guild_db(guild_id) as db:
+        await db.execute(
+            """
+            INSERT INTO guild_config_audit
+                (guild_id, user_id, action, field, old_value, new_value)
+            VALUES (?, ?, ?, ?, ?, ?)
+            """,
+            (guild_id, user_id, action, field, old_value, new_value),
+        )
+        await db.commit()
+
+
+async def cleanup_guild_audit(guild_id: int, max_age_days: int = 90) -> int:
+    """Prune audit entries older than max_age_days."""
+    async with guild_db(guild_id) as db:
+        cursor = await db.execute(
+            "DELETE FROM guild_config_audit WHERE created_at < datetime('now', ?)",
+            (f"-{max_age_days} days",),
+        )
+        await db.commit()
+        return cursor.rowcount

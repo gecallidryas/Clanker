@@ -10,7 +10,8 @@ Uses Gemini API to analyze message tone and determine if it's:
 """
 
 from typing import Tuple, Optional
-from utils.api_manager import get_gemini_manager, UserInputError
+from utils.api_manager import UserInputError
+from utils.guild_ai import generate_guild_gemini_text, GuildConfigError
 from utils.logger import get_logger
 
 logger = get_logger(__name__)
@@ -26,11 +27,12 @@ SENTIMENT_IMPACTS = {
 }
 
 
-async def analyze_sentiment(message: str, bot_name: str = "Femmy") -> Tuple[str, int]:
+async def analyze_sentiment(guild_id: int, message: str, bot_name: str = "Femmy") -> Tuple[str, int]:
     """
     Analyze the sentiment of a message using Gemini.
     
     Args:
+        guild_id: Discord guild/server ID
         message: The message to analyze
         bot_name: The bot's name for context
         
@@ -39,8 +41,6 @@ async def analyze_sentiment(message: str, bot_name: str = "Femmy") -> Tuple[str,
     """
     if not message or len(message.strip()) < 3:
         return "neutral", SENTIMENT_IMPACTS["neutral"]
-    
-    gemini = get_gemini_manager()
     
     prompt = f"""
 Analyze the sentiment of this message directed at {bot_name} (a Discord bot with a cute personality).
@@ -59,7 +59,7 @@ Respond with ONLY the category name, nothing else.
 """
     
     try:
-        response, _ = await gemini.generate(prompt)
+        response, _ = await generate_guild_gemini_text(guild_id, prompt)
         sentiment = response.strip().lower().replace(" ", "_")
         
         # Validate response
@@ -75,19 +75,22 @@ Respond with ONLY the category name, nothing else.
         # Content was blocked, might be hostile
         logger.info("Message blocked by safety - treating as negative")
         return "negative", SENTIMENT_IMPACTS["negative"]
+    except GuildConfigError:
+        logger.warning("Sentiment analysis skipped: guild Gemini keys not configured.")
+        return "neutral", SENTIMENT_IMPACTS["neutral"]
     except Exception as e:
         logger.error(f"Sentiment analysis failed: {e}")
         return "neutral", SENTIMENT_IMPACTS["neutral"]
 
 
-async def is_negative_message(message: str) -> Tuple[bool, int]:
+async def is_negative_message(guild_id: int, message: str) -> Tuple[bool, int]:
     """
     Quick check if a message is negative.
     
     Returns:
         Tuple of (is_negative, affection_delta)
     """
-    sentiment, delta = await analyze_sentiment(message)
+    sentiment, delta = await analyze_sentiment(guild_id, message)
     is_negative = sentiment in ("negative", "very_negative", "hostile")
     return is_negative, delta
 

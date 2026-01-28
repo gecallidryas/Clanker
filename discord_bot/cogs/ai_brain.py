@@ -43,7 +43,15 @@ from utils.db_handler import (
     get_last_wellbeing_date,
     set_last_wellbeing_date,
 )
-from utils.api_manager import get_gemini_manager, get_openrouter_manager, UserInputError
+from utils.api_manager import UserInputError
+from utils.guild_ai import (
+    generate_guild_gemini_text,
+    generate_guild_gemini_vision,
+    generate_guild_openrouter_text,
+    get_guild_gemini_keys,
+    get_guild_gemini_model,
+    GuildConfigError,
+)
 from utils.rate_limiter import ai_limiter, get_rate_limit_message
 from utils.logger import get_logger
 
@@ -305,24 +313,11 @@ class AIBrain(commands.Cog):
     
     def __init__(self, bot: commands.Bot):
         self.bot = bot
-        self.gemini = get_gemini_manager()  # Multi-key manager
-        self.openrouter = get_openrouter_manager()  # Uncensored AI manager
         self.contexts: Dict[int, ConversationContext] = {}  # channel_id -> context
         self.chain_memory: Dict[int, int] = {}  # message_id -> user_id
         self.chain_order: deque[int] = deque()
         self.chain_limit = CHAIN_MEMORY_LIMIT
-        self.video_client = None
-        self.video_types = None
-        api_key = os.getenv("GEMINI_API_KEY")
-        if api_key:
-            try:
-                from google import genai as genai_client
-                from google.genai import types as genai_types
-            except Exception as exc:
-                logger.warning("Gemini video client unavailable: %s", exc)
-            else:
-                self.video_client = genai_client.Client(api_key=api_key)
-                self.video_types = genai_types
+        self._video_clients: Dict[str, tuple] = {}
         # Active conversations: (channel_id, user_id) -> {"remaining": int, "last_active": datetime}
         self.active_convos: Dict[tuple[int, int], dict] = {}
     
@@ -482,7 +477,26 @@ class AIBrain(commands.Cog):
         numbered = [f"Image {idx + 1}: {desc}" for idx, desc in enumerate(descriptions)]
         return f"[User attached image(s): {'; '.join(numbered)}]"
 
-    async def _describe_image(self, attachment: discord.Attachment) -> Optional[str]:
+    async def _get_video_client(self, guild_id: int):
+        """Get or create a Gemini video client for this guild."""
+        keys = await get_guild_gemini_keys(guild_id)
+        if not keys:
+            return None
+        api_key = keys[0]
+        cached = self._video_clients.get(api_key)
+        if cached:
+            return cached
+        try:
+            from google import genai as genai_client
+            from google.genai import types as genai_types
+        except Exception as exc:
+            logger.warning("Gemini video client unavailable: %s", exc)
+            return None
+        client = genai_client.Client(api_key=api_key)
+        self._video_clients[api_key] = (client, genai_types)
+        return self._video_clients[api_key]
+
+    async def _describe_image(self, guild_id: int, attachment: discord.Attachment) -> Optional[str]:
         """Describe a single image attachment using Gemini Vision."""
         try:
             image_bytes = await attachment.read()
@@ -497,11 +511,15 @@ class AIBrain(commands.Cog):
             return None
 
         try:
-            response_text, _ = await self.gemini.generate_with_vision(
+            response_text, _ = await generate_guild_gemini_vision(
+                guild_id,
                 "Describe this image briefly.",
                 image,
             )
         except UserInputError:
+            return None
+        except GuildConfigError as exc:
+            logger.warning("Gemini not configured for guild %s: %s", guild_id, exc)
             return None
         except RuntimeError as exc:
             logger.warning("Vision API exhausted while describing %s: %s", attachment.filename, exc)
@@ -529,7 +547,7 @@ class AIBrain(commands.Cog):
 
         descriptions = []
         for attachment in attachments:
-            description = await self._describe_image(attachment)
+            description = await self._describe_image(message.guild.id, attachment)
             if description:
                 descriptions.append(description)
         return descriptions
@@ -565,11 +583,13 @@ class AIBrain(commands.Cog):
         numbered = [f"Video {idx + 1}: {desc}" for idx, desc in enumerate(descriptions)]
         return f"[User attached video(s): {'; '.join(numbered)}]"
 
-    async def _describe_video(self, attachment: discord.Attachment) -> Optional[str]:
+    async def _describe_video(self, guild_id: int, attachment: discord.Attachment) -> Optional[str]:
         """Describe a video using the Gemini File API."""
-        if not self.video_client or not self.video_types:
-            logger.warning("Gemini video client not configured.")
+        client_info = await self._get_video_client(guild_id)
+        if not client_info:
+            logger.warning("Gemini video client not configured for guild %s.", guild_id)
             return None
+        video_client, video_types = client_info
 
         tmp_video_path = None
         uploaded_name = None
@@ -580,7 +600,7 @@ class AIBrain(commands.Cog):
             await attachment.save(tmp_video_path)
 
             video_file = await asyncio.to_thread(
-                self.video_client.files.upload,
+                video_client.files.upload,
                 file=tmp_video_path,
                 config={"display_name": attachment.filename or "video"},
             )
@@ -588,18 +608,18 @@ class AIBrain(commands.Cog):
 
             while getattr(video_file, "state", None) and getattr(video_file.state, "name", None) == "PROCESSING":
                 await asyncio.sleep(2)
-                video_file = await asyncio.to_thread(self.video_client.files.get, name=video_file.name)
+                video_file = await asyncio.to_thread(video_client.files.get, name=video_file.name)
 
             if getattr(video_file, "state", None) and getattr(video_file.state, "name", None) == "FAILED":
                 logger.warning("Gemini failed to process video %s", attachment.filename)
                 return None
 
-            model_id = os.getenv("GEMINI_VIDEO_MODEL", "gemini-2.5-flash-lite")
+            model_id = await get_guild_gemini_model(guild_id)
             response = await asyncio.to_thread(
-                self.video_client.models.generate_content,
+                video_client.models.generate_content,
                 model=model_id,
                 contents=[
-                    self.video_types.Part.from_uri(
+                    video_types.Part.from_uri(
                         file_uri=video_file.uri,
                         mime_type=video_file.mime_type,
                     ),
@@ -618,7 +638,7 @@ class AIBrain(commands.Cog):
                     logger.warning("Failed to remove temp file %s", tmp_video_path)
             if uploaded_name and os.getenv("GEMINI_DELETE_UPLOADED_FILES", "").lower() == "true":
                 try:
-                    await asyncio.to_thread(self.video_client.files.delete, name=uploaded_name)
+                    await asyncio.to_thread(video_client.files.delete, name=uploaded_name)
                 except Exception as exc:
                     logger.warning("Failed to delete Gemini file %s: %s", uploaded_name, exc)
 
@@ -643,7 +663,7 @@ class AIBrain(commands.Cog):
 
         descriptions = []
         for attachment in attachments:
-            description = await self._describe_video(attachment)
+            description = await self._describe_video(message.guild.id, attachment)
             if description:
                 descriptions.append(description)
         return descriptions
@@ -958,21 +978,31 @@ Respond naturally in character. Keep responses concise.
             evil_mode = allow_evil and await get_evil_mode(guild_id)
             
         try:
-            if evil_mode and self.openrouter.is_available():
+            if evil_mode:
                 try:
-                    response_text, model_used = await self.openrouter.generate(prompt)
+                    response_text, _ = await generate_guild_openrouter_text(guild_id, prompt)
                     return response_text
+                except GuildConfigError as exc:
+                    return (
+                        "Evil mode is enabled, but OpenRouter isn't configured for this server. "
+                        "Ask an admin to upload keys with /config env upload."
+                    )
                 except UserInputError:
                     raise
                 except Exception as e:
                     logger.warning("OpenRouter failed, falling back to Gemini: %s", e)
             
             # Default to Gemini (censored)
-            response_text, key_used = await self.gemini.generate(prompt)
+            response_text, _ = await generate_guild_gemini_text(guild_id, prompt)
             return response_text
             
         except UserInputError:
             return "Sorry, I can't help with that request."
+        except GuildConfigError:
+            return (
+                "This server hasn't configured Gemini keys yet. "
+                "Ask an admin to upload keys with /config env upload."
+            )
         except RuntimeError as e:
             logger.warning("AI Generation failed: %s", e)
             return "Ah, I'm a bit overwhelmed right now... Please try again in a few minutes! >.< "
@@ -1029,12 +1059,16 @@ Respond naturally in character. Keep responses concise.
         has_video_attachments = self._has_video_attachment(message)
         has_image_attachments = self._has_image_attachment(message)
 
-        if has_video_attachments and not self.video_client:
-            await message.reply(
-                "Video analysis is not configured. Install google-genai and set GEMINI_API_KEY.",
-                mention_author=False,
-            )
-            return
+        video_client_ready = None
+        if has_video_attachments:
+            video_client_ready = await self._get_video_client(message.guild.id)
+            if not video_client_ready:
+                await message.reply(
+                    "Video analysis is not configured for this server. "
+                    "Ask an admin to upload Gemini keys with /config env upload.",
+                    mention_author=False,
+                )
+                return
 
         video_descriptions = []
         image_descriptions = []

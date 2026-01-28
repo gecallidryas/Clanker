@@ -71,6 +71,17 @@ GEMINI_MODELS = {
 }
 
 
+def normalize_gemini_model(model_key: str) -> Optional[str]:
+    """Normalize Gemini model key or full ID."""
+    if model_key in GEMINI_MODELS:
+        return GEMINI_MODELS[model_key]
+    if model_key in GEMINI_MODELS.values():
+        return model_key
+    if model_key.startswith("gemini-"):
+        return model_key
+    return None
+
+
 class GeminiSingleKeyManager:
     """
     Gemini API manager for a single, dedicated API key.
@@ -207,6 +218,59 @@ def _generate_content_sync(api_key: str, model_name: str, prompt: str, image) ->
         if image is None:
             return model.generate_content(prompt, safety_settings=safety_settings)
         return model.generate_content([prompt, image], safety_settings=safety_settings)
+
+
+async def generate_gemini_with_key(
+    api_key: str,
+    model_name: str,
+    prompt: str,
+    request_timeout: float = 30.0,
+) -> tuple[str, str]:
+    """Generate content using a specific Gemini API key."""
+    try:
+        response = await asyncio.wait_for(
+            asyncio.to_thread(
+                _generate_content_sync,
+                api_key,
+                model_name,
+                prompt,
+                None,
+            ),
+            timeout=request_timeout,
+        )
+    except Exception as exc:
+        error_str = str(exc).lower()
+        if _is_user_input_error(error_str):
+            raise UserInputError(str(exc)) from exc
+        raise
+    return response.text, model_name
+
+
+async def generate_gemini_with_key_and_image(
+    api_key: str,
+    model_name: str,
+    prompt: str,
+    image,
+    request_timeout: float = 30.0,
+) -> tuple[str, str]:
+    """Generate content with image using a specific Gemini API key."""
+    try:
+        response = await asyncio.wait_for(
+            asyncio.to_thread(
+                _generate_content_sync,
+                api_key,
+                model_name,
+                prompt,
+                image,
+            ),
+            timeout=request_timeout,
+        )
+    except Exception as exc:
+        error_str = str(exc).lower()
+        if _is_user_input_error(error_str):
+            raise UserInputError(str(exc)) from exc
+        raise
+    return response.text, model_name
 
 
 @dataclass
@@ -554,6 +618,15 @@ OPENROUTER_MODELS = {
 }
 
 
+def normalize_openrouter_model(model_key_or_id: str) -> Optional[str]:
+    """Normalize OpenRouter model alias or full ID."""
+    if model_key_or_id in OPENROUTER_MODELS:
+        return OPENROUTER_MODELS[model_key_or_id]
+    if "/" in model_key_or_id:
+        return model_key_or_id
+    return None
+
+
 _OPENROUTER_MODEL_ERROR_HINTS = (
     "model",
     "not found",
@@ -594,9 +667,14 @@ class OpenRouterManager:
     Supports Venice Uncensored, Nous Hermes 3 405B, and DeepSeek.
     """
     
-    def __init__(self):
-        self.api_key = os.getenv("OPENROUTER_API_KEY")
-        raw_model = os.getenv("OPENROUTER_MODEL")
+    def __init__(
+        self,
+        api_key: Optional[str] = None,
+        model: Optional[str] = None,
+        fallback_models: Optional[List[str]] = None,
+    ):
+        self.api_key = api_key if api_key is not None else os.getenv("OPENROUTER_API_KEY")
+        raw_model = model if model is not None else os.getenv("OPENROUTER_MODEL")
         if raw_model and raw_model.strip():
             self.model = raw_model.strip()
         else:
@@ -647,9 +725,11 @@ class OpenRouterManager:
             min_value=0.0,
             max_value=2.0
         )
-        self.fallback_models = self._parse_model_list(
-            os.getenv("OPENROUTER_FALLBACK_MODELS")
-        )
+        if fallback_models is None:
+            fallback_models = self._parse_model_list(
+                os.getenv("OPENROUTER_FALLBACK_MODELS")
+            )
+        self.fallback_models = fallback_models
         self._model_states: dict[str, OpenRouterModelState] = {}
         self._model_index = 0
 

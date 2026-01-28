@@ -45,7 +45,7 @@ def _require_env(name: str) -> str:
 
 # Bot configuration
 DISCORD_TOKEN = _require_env("DISCORD_TOKEN")
-GEMINI_API_KEY = _require_env("GEMINI_API_KEY")
+_require_env("ENCRYPTION_KEY")
 
 # Optional: Lock bot to a specific personality mode
 # Set BOT_MODE=femboy, tsundere, or oneesan to lock the mode

@@ -9,7 +9,6 @@ Commands:
     !reload [cog]    - Reload cogs (owner only)
     !translate       - Translate text using Gemini
     !tldr [count]    - Summarize the last N messages
-    !portfolio       - Check portfolio website status
     !ping            - Check bot latency
     !about           - Display bot information
 """
@@ -20,13 +19,17 @@ import psutil
 from datetime import datetime
 from pathlib import Path
 
-import aiohttp
 import discord
 from discord import app_commands
 from discord.ext import commands
 
 from utils.db_handler import get_server_mode, get_stats, increment_stat
-from utils.api_manager import get_gemini_manager, get_gemini_translate_manager
+from utils.guild_ai import (
+    generate_guild_gemini_text,
+    generate_guild_gemini_translate_text,
+    generate_guild_gemini_summary_text,
+    GuildConfigError,
+)
 from utils.rate_limiter import ai_limiter, get_rate_limit_message
 from utils.logger import get_logger
 
@@ -54,7 +57,7 @@ COMMAND_CATEGORIES = {
     },
     "🛠️ Utility": {
         "description": "Helpful tools and features",
-        "commands": ["help", "ping", "stats", "about", "portfolio", "translate", "remind", "reminders"]
+        "commands": ["help", "ping", "stats", "about", "translate", "remind", "reminders"]
     },
     "🔧 Admin": {
         "description": "Server management (requires permissions)",
@@ -82,12 +85,6 @@ class Utilities(commands.Cog):
     
     def __init__(self, bot: commands.Bot):
         self.bot = bot
-        self.gemini = get_gemini_manager()
-        try:
-            self.translate_client = get_gemini_translate_manager()
-        except ValueError:
-            self.translate_client = None
-        self.portfolio_url = os.getenv("PORTFOLIO_URL", "")
         self.start_time = datetime.now()
 
     def _get_bot_name(self, mode: str) -> str:
@@ -349,14 +346,19 @@ Text to translate:
 """
             
             try:
-                client = self.translate_client or self.gemini
-                translation, _ = await client.generate(prompt)
+                translation, _ = await generate_guild_gemini_translate_text(ctx.guild.id, prompt)
                 translation = translation.strip()
             except RuntimeError:
-                await ctx.send("❌ Translation service busy, try again later!")
+                await ctx.send("? Translation service busy, try again later!")
+                return
+            except GuildConfigError:
+                await ctx.send(
+                    "? This server hasn't configured Gemini keys yet. "
+                    "Ask an admin to upload keys with /config env upload."
+                )
                 return
             except Exception as e:
-                await ctx.send(f"❌ Translation failed: {e}")
+                await ctx.send(f"? Translation failed: {e}")
                 return
         
         embed = discord.Embed(
@@ -374,7 +376,7 @@ Text to translate:
             logger.warning("Failed to increment messages_processed: %s", e)
     
     # ============================================
-    # Existing Commands (tldr, portfolio, ping, about)
+    # Existing Commands (tldr, ping, about)
     # ============================================
     
     @commands.command(name="tldr", aliases=["summarize", "summary"])
@@ -417,12 +419,18 @@ Provide a clear, bulleted summary:
 """
             
             try:
-                summary, _ = await self.gemini.generate(prompt)
+                summary, _ = await generate_guild_gemini_summary_text(ctx.guild.id, prompt)
             except RuntimeError:
-                await ctx.send("❌ Summary service busy, try again later!")
+                await ctx.send("? Summary service busy, try again later!")
+                return
+            except GuildConfigError:
+                await ctx.send(
+                    "? This server hasn't configured Gemini keys yet. "
+                    "Ask an admin to upload keys with /config env upload."
+                )
                 return
             except Exception as e:
-                await ctx.send(f"❌ Error generating summary: {e}")
+                await ctx.send(f"? Error generating summary: {e}")
                 return
         
         embed = discord.Embed(
@@ -439,48 +447,6 @@ Provide a clear, bulleted summary:
         except Exception as e:
             logger.warning("Failed to increment messages_processed: %s", e)
     
-    @commands.command(name="portfolio", aliases=["site", "website"])
-    async def check_portfolio(self, ctx: commands.Context, url: str = None):
-        """Check if a website is up and responding."""
-        target_url = url or self.portfolio_url
-        
-        if not target_url:
-            await ctx.send(
-                "❌ No URL configured!\n"
-                "Use `!portfolio <url>` or set `PORTFOLIO_URL` in `.env`"
-            )
-            return
-        
-        if not target_url.startswith(("http://", "https://")):
-            target_url = "https://" + target_url
-        
-        async with ctx.typing():
-            try:
-                async with aiohttp.ClientSession(timeout=aiohttp.ClientTimeout(total=10)) as session:
-                    async with session.get(target_url) as response:
-                        status = response.status
-                        
-                        if 200 <= status < 300:
-                            status_emoji, status_text, color = "✅", "Online", discord.Color.green()
-                        elif 300 <= status < 400:
-                            status_emoji, status_text, color = "↪️", "Redirect", discord.Color.yellow()
-                        elif status == 503:
-                            status_emoji, status_text, color = "🔧", "Maintenance", discord.Color.orange()
-                        else:
-                            status_emoji, status_text, color = "❌", "Error", discord.Color.red()
-                        
-            except aiohttp.ClientConnectorError:
-                status_emoji, status_text, status, color = "🔌", "Connection Failed", "N/A", discord.Color.red()
-            except asyncio.TimeoutError:
-                status_emoji, status_text, status, color = "⏰", "Timeout", "N/A", discord.Color.orange()
-            except Exception as e:
-                status_emoji, status_text, status, color = "❓", f"Error: {str(e)[:50]}", "N/A", discord.Color.red()
-        
-        embed = discord.Embed(title=f"{status_emoji} Portfolio Status", color=color)
-        embed.add_field(name="URL", value=target_url, inline=False)
-        embed.add_field(name="Status", value=f"{status_text} ({status})", inline=True)
-        
-        await ctx.send(embed=embed)
     
     @commands.command(name="ping")
     async def ping(self, ctx: commands.Context):
@@ -695,7 +661,7 @@ Provide a clear, bulleted summary:
         if " to " not in query.lower():
             await interaction.response.send_message(
                 "**Usage:** `!translate <text> to <language>`\n"
-                "**Example:** `!translate hello world to japanese`",
+                "**Example:** `!translate hello to japanese`",
                 ephemeral=True,
             )
             return
@@ -706,7 +672,7 @@ Provide a clear, bulleted summary:
 
         if not text or not target_lang:
             await interaction.response.send_message(
-                "âŒ Please provide both text and target language!",
+                "? Please provide both text and target language!",
                 ephemeral=True,
             )
             return
@@ -732,28 +698,34 @@ Text to translate:
 """
 
         try:
-            client = self.translate_client or self.gemini
-            translation, _ = await client.generate(prompt)
+            translation, _ = await generate_guild_gemini_translate_text(interaction.guild.id, prompt)
             translation = translation.strip()
         except RuntimeError:
             await interaction.followup.send(
-                "âŒ Translation service busy, try again later!",
+                "? Translation service busy, try again later!",
+                ephemeral=True,
+            )
+            return
+        except GuildConfigError:
+            await interaction.followup.send(
+                "? This server hasn't configured Gemini keys yet. "
+                "Ask an admin to upload keys with /config env upload.",
                 ephemeral=True,
             )
             return
         except Exception as e:
             await interaction.followup.send(
-                f"âŒ Translation failed: {e}",
+                f"? Translation failed: {e}",
                 ephemeral=True,
             )
             return
 
         embed = discord.Embed(
-            title="ðŸŒ Translation",
+            title="?? Translation",
             color=discord.Color.blue(),
         )
         embed.add_field(name="Original", value=text[:1024], inline=False)
-        embed.add_field(name=f"â†’ {target_lang.title()}", value=translation[:1024], inline=False)
+        embed.add_field(name=f"? {target_lang.title()}", value=translation[:1024], inline=False)
 
         await interaction.followup.send(embed=embed)
 
@@ -761,7 +733,6 @@ Text to translate:
             await increment_stat("messages_processed")
         except Exception as e:
             logger.warning("Failed to increment messages_processed: %s", e)
-
     @app_commands.command(name="tldr", description="Summarize the last N messages.")
     @app_commands.describe(count="Number of messages to summarize (5-100)")
     async def summarize_messages_slash(self, interaction: discord.Interaction, count: int = 50):
@@ -803,10 +774,18 @@ Conversation:
 
 Provide a clear, bulleted summary:
 """
+
         try:
-            summary, _ = await self.gemini.generate(prompt)
+            summary, _ = await generate_guild_gemini_summary_text(interaction.guild.id, prompt)
         except RuntimeError:
             await interaction.followup.send("Summary service busy, try again later!")
+            return
+        except GuildConfigError:
+            await interaction.followup.send(
+                "This server hasn't configured Gemini keys yet. "
+                "Ask an admin to upload keys with /config env upload.",
+                ephemeral=True,
+            )
             return
         except Exception as e:
             await interaction.followup.send(f"Error generating summary: {e}")
@@ -824,52 +803,6 @@ Provide a clear, bulleted summary:
             await increment_stat("messages_processed")
         except Exception as e:
             logger.warning("Failed to increment messages_processed: %s", e)
-
-    @app_commands.command(name="portfolio", description="Check if a website is up.")
-    @app_commands.describe(url="URL to check (optional)")
-    async def check_portfolio_slash(self, interaction: discord.Interaction, url: str = None):
-        target_url = url or self.portfolio_url
-
-        if not target_url:
-            await interaction.response.send_message(
-                "âŒ No URL configured!\n"
-                "Use `!portfolio <url>` or set `PORTFOLIO_URL` in `.env`",
-                ephemeral=True,
-            )
-            return
-
-        if not target_url.startswith(("http://", "https://")):
-            target_url = "https://" + target_url
-
-        await interaction.response.defer(thinking=True)
-
-        try:
-            async with aiohttp.ClientSession(timeout=aiohttp.ClientTimeout(total=10)) as session:
-                async with session.get(target_url) as response:
-                    status = response.status
-
-                    if 200 <= status < 300:
-                        status_emoji, status_text, color = "âœ…", "Online", discord.Color.green()
-                    elif 300 <= status < 400:
-                        status_emoji, status_text, color = "â†ªï¸", "Redirect", discord.Color.yellow()
-                    elif status == 503:
-                        status_emoji, status_text, color = "ðŸ”§", "Maintenance", discord.Color.orange()
-                    else:
-                        status_emoji, status_text, color = "âŒ", "Error", discord.Color.red()
-
-        except aiohttp.ClientConnectorError:
-            status_emoji, status_text, status, color = "ðŸ”Œ", "Connection Failed", "N/A", discord.Color.red()
-        except asyncio.TimeoutError:
-            status_emoji, status_text, status, color = "â°", "Timeout", "N/A", discord.Color.orange()
-        except Exception as e:
-            status_emoji, status_text, status, color = "â“", f"Error: {str(e)[:50]}", "N/A", discord.Color.red()
-
-        embed = discord.Embed(title=f"{status_emoji} Portfolio Status", color=color)
-        embed.add_field(name="URL", value=target_url, inline=False)
-        embed.add_field(name="Status", value=f"{status_text} ({status})", inline=True)
-
-        await interaction.followup.send(embed=embed)
-
     @app_commands.command(name="ping", description="Check bot latency.")
     async def ping_slash(self, interaction: discord.Interaction):
         latency = round(self.bot.latency * 1000)

@@ -23,7 +23,8 @@ from discord.ext import commands
 from PIL import Image
 
 from utils.db_handler import get_server_mode, increment_stat
-from utils.api_manager import get_gemini_manager, UserInputError
+from utils.api_manager import UserInputError
+from utils.guild_ai import generate_guild_gemini_vision, GuildConfigError
 from utils.rate_limiter import ai_limiter, get_rate_limit_message
 from utils.logger import get_logger
 
@@ -56,19 +57,20 @@ class Vision(commands.Cog):
     
     def __init__(self, bot: commands.Bot):
         self.bot = bot
-        self.gemini = get_gemini_manager()
     
     async def analyze_image(
-        self, 
-        image_bytes: bytes, 
+        self,
+        guild_id: int,
+        image_bytes: bytes,
         user_message: str,
         persona_mode: str,
-        username: str = "User"
+        username: str = "User",
     ) -> str:
         """
         Analyze an image using Gemini Vision with full message context.
         
         Args:
+            guild_id: Discord guild/server ID
             image_bytes: Raw image data
             user_message: The FULL message text from the user (for context)
             persona_mode: Current bot personality mode
@@ -112,7 +114,7 @@ Analyze the image and respond in character. Be helpful and engaging.
             
             # Generate response with multi-key failover
             try:
-                response_text, key_used = await self.gemini.generate_with_vision(full_prompt, image)
+                response_text, _ = await generate_guild_gemini_vision(guild_id, full_prompt, image)
                 try:
                     await increment_stat("images_analyzed")
                 except Exception as e:
@@ -120,6 +122,11 @@ Analyze the image and respond in character. Be helpful and engaging.
                 return response_text
             except UserInputError:
                 return "Sorry, I can't help with that image request."
+            except GuildConfigError:
+                return (
+                    "This server hasn't configured Gemini keys yet. "
+                    "Ask an admin to upload keys with /config env upload."
+                )
             except RuntimeError as e:
                 logger.warning("All vision API keys exhausted: %s", e)
                 return "I'm a bit overwhelmed right now... Please try again later! >.< "
@@ -198,10 +205,11 @@ Analyze the image and respond in character. Be helpful and engaging.
             
             # Analyze image with full message context
             response = await self.analyze_image(
-                image_bytes, 
-                user_message, 
+                message.guild.id,
+                image_bytes,
+                user_message,
                 mode,
-                message.author.display_name
+                message.author.display_name,
             )
         
         await message.reply(response, mention_author=False)
@@ -260,10 +268,11 @@ Analyze the image and respond in character. Be helpful and engaging.
         async with ctx.typing():
             image_bytes = await attachment.read()
             response = await self.analyze_image(
-                image_bytes, 
-                prompt or "", 
+                ctx.guild.id,
+                image_bytes,
+                prompt or "",
                 mode,
-                ctx.author.display_name
+                ctx.author.display_name,
             )
         
         # Build embed
@@ -300,6 +309,7 @@ Analyze the image and respond in character. Be helpful and engaging.
         await interaction.response.defer()
         image_bytes = await image.read()
         response = await self.analyze_image(
+            interaction.guild.id,
             image_bytes,
             prompt or "",
             mode,

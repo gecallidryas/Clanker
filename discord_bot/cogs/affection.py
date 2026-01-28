@@ -453,7 +453,7 @@ class Affection(commands.Cog):
                     sentiment, delta = quick_result
                 else:
                     # Use AI for more nuanced analysis
-                    sentiment, delta = await analyze_sentiment(content)
+                    sentiment, delta = await analyze_sentiment(message.guild.id, content)
                 
                 # Apply affection change (don't reply here - ai_brain handles responses)
                 await add_affection(message.guild.id, message.author.id, delta)

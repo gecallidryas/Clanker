@@ -12,7 +12,6 @@ Commands (Admin Only):
 """
 
 import discord
-import os
 from discord import app_commands
 from discord.ext import commands
 
@@ -33,58 +32,6 @@ logger = get_logger(__name__)
 
 async def _is_owner_check(interaction: discord.Interaction) -> bool:
     return await interaction.client.is_owner(interaction.user)
-
-
-class ModelChangeModal(discord.ui.Modal):
-    """Modal to collect model name and admin password without exposing the password."""
-
-    def __init__(self, admin_password: str, default_model: str | None = None):
-        super().__init__(title="Change AI Model")
-        self.admin_password = admin_password
-        self.model_name = discord.ui.TextInput(
-            label="Model key",
-            placeholder="venice / hermes / deephermes / mistral / flash-lite / full-id",
-            default=default_model or "",
-            max_length=100,
-        )
-        self.password = discord.ui.TextInput(
-            label="Admin password",
-            placeholder="Enter the admin password",
-            style=discord.TextStyle.short,
-            max_length=128,
-        )
-        self.add_item(self.model_name)
-        self.add_item(self.password)
-
-    async def on_submit(self, interaction: discord.Interaction):
-        if not self.admin_password or self.password.value != self.admin_password:
-            await interaction.response.send_message("Invalid admin password.", ephemeral=True)
-            return
-
-        from utils.api_manager import set_openrouter_model, set_gemini_model
-
-        model_key = self.model_name.value.strip()
-        try:
-            if set_openrouter_model(model_key):
-                await interaction.response.send_message(
-                    f"OpenRouter model set to `{model_key}`.",
-                    ephemeral=True,
-                )
-                return
-            if set_gemini_model(model_key):
-                await interaction.response.send_message(
-                    f"Gemini model set to `{model_key}`.",
-                    ephemeral=True,
-                )
-                return
-        except ValueError as exc:
-            await interaction.response.send_message(str(exc), ephemeral=True)
-            return
-
-        await interaction.response.send_message(
-            "Unknown model key. Check the configured model list.",
-            ephemeral=True,
-        )
 
 
 class Admin(commands.Cog):
@@ -515,15 +462,10 @@ class Admin(commands.Cog):
     @app_commands.checks.has_permissions(manage_guild=True)
     @app_commands.describe(name="Model key (optional)")
     async def set_model_slash(self, interaction: discord.Interaction, name: str = None):
-        admin_password = os.getenv("ADMIN_PASSWORD", "")
-        if not admin_password:
-            await interaction.response.send_message(
-                "ADMIN_PASSWORD is not configured.",
-                ephemeral=True,
-            )
-            return
-
-        await interaction.response.send_modal(ModelChangeModal(admin_password, default_model=name))
+        await interaction.response.send_message(
+            "Model settings are now guild-specific. Use `/config model set` or `/config env upload`.",
+            ephemeral=True,
+        )
 
     @admin_app_group.command(name="clearglobal", description="Clear all global slash commands (owner only).")
     @app_commands.check(_is_owner_check)
