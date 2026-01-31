@@ -293,19 +293,6 @@ async def _init_guild_schema(db: aiosqlite.Connection) -> None:
     # Phase 6: New Tables
     # ============================================
     
-    # User affection tracking (guild scoped)
-    await db.execute("""
-        CREATE TABLE IF NOT EXISTS user_affection_v2 (
-            guild_id INTEGER NOT NULL,
-            user_id INTEGER NOT NULL,
-            affection_points INTEGER DEFAULT 0,
-            total_interactions INTEGER DEFAULT 0,
-            last_interaction TIMESTAMP,
-            affection_level TEXT DEFAULT 'stranger',
-            PRIMARY KEY (guild_id, user_id)
-        )
-    """)
-
     # User affection tracking by mode (exclude mode_default)
     await db.execute("""
         CREATE TABLE IF NOT EXISTS user_affection_by_mode (
@@ -1823,15 +1810,10 @@ async def reset_user_data(
                 deleted["affection"] = cursor.rowcount
             else:
                 cursor = await db.execute(
-                    "DELETE FROM user_affection_v2 WHERE guild_id = ? AND user_id = ?",
-                    (guild_id, user_id),
-                )
-                deleted["affection"] = cursor.rowcount
-                cursor = await db.execute(
                     "DELETE FROM user_affection_by_mode WHERE guild_id = ? AND user_id = ?",
                     (guild_id, user_id),
                 )
-                deleted["affection"] += cursor.rowcount
+                deleted["affection"] = cursor.rowcount
         
         if reset_type in ("all", "aliases"):
             cursor = await db.execute(
@@ -1843,30 +1825,6 @@ async def reset_user_data(
         await db.commit()
     
     return deleted
-
-
-async def set_affection_value(guild_id: int, user_id: int, points: int) -> Dict[str, Any]:
-    """Set a user's affection points to a specific value."""
-    new_level = _calculate_level(points)
-    
-    async with guild_db(guild_id) as db:
-        await db.execute("""
-            INSERT INTO user_affection_v2 (guild_id, user_id, affection_points, affection_level, last_interaction)
-            VALUES (?, ?, ?, ?, ?)
-            ON CONFLICT(guild_id, user_id) DO UPDATE SET
-                affection_points = ?,
-                affection_level = ?,
-                last_interaction = ?
-        """, (guild_id, user_id, points, new_level, datetime.now(),
-              points, new_level, datetime.now()))
-        await db.commit()
-    
-    return {
-        "guild_id": guild_id,
-        "user_id": user_id,
-        "affection_points": points,
-        "affection_level": new_level
-    }
 
 
 async def get_user_full_profile(guild_id: int, user_id: int) -> Dict[str, Any]:

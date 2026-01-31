@@ -110,11 +110,18 @@ _NAME_PATTERN = re.compile(r"(?<!<a)(?<!<):([a-zA-Z0-9_]+):")
 _NAME_ID_PATTERN = re.compile(r"(?<!<a:)(?<!<:)(?<!<)([a-zA-Z0-9_]+):([0-9]{5,})")
 
 
-def replace_custom_emojis(text: str, emojis: Iterable) -> str:
+def replace_custom_emojis(
+    text: str,
+    emojis: Iterable,
+    extra_emojis: Optional[Iterable] = None,
+) -> str:
     """Replace :name: or name:123 patterns with proper emoji tokens."""
     if not text:
         return text
-    lookup = build_emoji_lookup(emojis)
+    combined = list(emojis or [])
+    if extra_emojis:
+        combined.extend(list(extra_emojis))
+    lookup = build_emoji_lookup(combined)
     if not lookup:
         return text
 

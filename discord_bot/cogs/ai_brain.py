@@ -1309,18 +1309,32 @@ Respond naturally in character. Keep responses concise.
                 allow_evil=allow_evil
             )
 
-        if message.guild:
-            try:
-                guild_emojis = await get_guild_emojis(self.bot, message.guild)
-                response = replace_custom_emojis(response, guild_emojis)
-            except Exception as exc:
-                logger.warning("Failed to normalize guild emojis: %s", exc)
-            
-        sent = await handle_agentic_actions(message, response)
+        raw_response = response
+        sent = await handle_agentic_actions(message, raw_response)
         if sent is None:
+            response = raw_response
+            evil_mode_enabled = allow_evil and await get_evil_mode(message.guild.id)
+
+            emoji_manager = getattr(self.bot, "emoji_manager", None)
+            if emoji_manager:
+                response = emoji_manager.apply_trigger_emojis(
+                    response_text=response,
+                    user_text=message.content,
+                    mode=mode,
+                    affection=affection_points,
+                    evil_mode=evil_mode_enabled,
+                )
+
+            if message.guild:
+                try:
+                    guild_emojis = await get_guild_emojis(self.bot, message.guild)
+                    app_emojis = await get_application_emojis(self.bot)
+                    response = replace_custom_emojis(response, guild_emojis, app_emojis)
+                except Exception as exc:
+                    logger.warning("Failed to normalize emojis: %s", exc)
+
             persona_manager = getattr(self.bot, "persona_manager", None)
             if persona_manager:
-                evil_mode_enabled = allow_evil and await get_evil_mode(message.guild.id)
                 sent = await persona_manager.send_as_mode(
                     channel=message.channel,
                     content=response,
