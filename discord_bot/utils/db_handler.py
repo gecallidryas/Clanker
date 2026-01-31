@@ -49,9 +49,6 @@ def _resolve_data_dir(value: Optional[str]) -> Path:
 DATA_DIR = _resolve_data_dir(os.getenv("DATABASE_DIR"))
 DATA_DIR.mkdir(parents=True, exist_ok=True)
 
-# Legacy single-db path (used for migrations only)
-LEGACY_DATABASE_PATH = _resolve_db_path(os.getenv("LEGACY_DATABASE_PATH") or os.getenv("DATABASE_PATH"))
-
 # Global database (bot stats + registry)
 GLOBAL_DATABASE_PATH = _resolve_db_path(os.getenv("GLOBAL_DATABASE_PATH") or str(DATA_DIR / "global.db"))
 
@@ -230,6 +227,18 @@ async def _init_guild_schema(db: aiosqlite.Connection) -> None:
             openrouter_model TEXT DEFAULT 'cognitivecomputations/dolphin-mistral-24b-venice-edition:free',
             openrouter_fallback_models TEXT,
             evil_mode_enabled INTEGER DEFAULT 0,
+            autorole_id INTEGER,
+            autorole_enabled INTEGER DEFAULT 1,
+            welcome_channel_id INTEGER,
+            welcome_enabled INTEGER DEFAULT 1,
+            welcome_message_template TEXT,
+            dm_welcome_message TEXT,
+            dm_welcome_enabled INTEGER DEFAULT 0,
+            spam_timeout_enabled INTEGER DEFAULT 0,
+            spam_max_messages INTEGER DEFAULT 8,
+            spam_window_seconds INTEGER DEFAULT 10,
+            spam_timeout_minutes INTEGER DEFAULT 5,
+            mod_log_channel_id INTEGER,
             updated_at TIMESTAMP DEFAULT CURRENT_TIMESTAMP
         )
     """)
@@ -269,6 +278,16 @@ async def _init_guild_schema(db: aiosqlite.Connection) -> None:
             created_at TIMESTAMP DEFAULT CURRENT_TIMESTAMP
         )
     """)
+
+    # Staff roles (agentic permissions)
+    await db.execute("""
+        CREATE TABLE IF NOT EXISTS staff_roles (
+            guild_id INTEGER NOT NULL,
+            role_id INTEGER NOT NULL,
+            permission_level INTEGER NOT NULL,
+            PRIMARY KEY (guild_id, role_id)
+        )
+    """)
     
     # ============================================
     # Phase 6: New Tables
@@ -284,6 +303,20 @@ async def _init_guild_schema(db: aiosqlite.Connection) -> None:
             last_interaction TIMESTAMP,
             affection_level TEXT DEFAULT 'stranger',
             PRIMARY KEY (guild_id, user_id)
+        )
+    """)
+
+    # User affection tracking by mode (exclude mode_default)
+    await db.execute("""
+        CREATE TABLE IF NOT EXISTS user_affection_by_mode (
+            guild_id INTEGER NOT NULL,
+            user_id INTEGER NOT NULL,
+            mode TEXT NOT NULL,
+            affection_points INTEGER DEFAULT 0,
+            total_interactions INTEGER DEFAULT 0,
+            last_interaction TIMESTAMP,
+            affection_level TEXT DEFAULT 'stranger',
+            PRIMARY KEY (guild_id, user_id, mode)
         )
     """)
     
@@ -356,6 +389,18 @@ async def _init_guild_schema(db: aiosqlite.Connection) -> None:
             ("openrouter_api_key_3", "TEXT", None),
             ("openrouter_api_key_4", "TEXT", None),
             ("openrouter_api_key_5", "TEXT", None),
+            ("autorole_id", "INTEGER", None),
+            ("autorole_enabled", "INTEGER", 1),
+            ("welcome_channel_id", "INTEGER", None),
+            ("welcome_enabled", "INTEGER", 1),
+            ("welcome_message_template", "TEXT", None),
+            ("dm_welcome_message", "TEXT", None),
+            ("dm_welcome_enabled", "INTEGER", 0),
+            ("spam_timeout_enabled", "INTEGER", 0),
+            ("spam_max_messages", "INTEGER", 8),
+            ("spam_window_seconds", "INTEGER", 10),
+            ("spam_timeout_minutes", "INTEGER", 5),
+            ("mod_log_channel_id", "INTEGER", None),
         ]:
             if column_name in columns:
                 continue
@@ -440,6 +485,52 @@ async def _init_guild_schema(db: aiosqlite.Connection) -> None:
             role_id INTEGER NOT NULL,
             gender TEXT NOT NULL,
             PRIMARY KEY (guild_id, role_id)
+        )
+    """)
+
+    # Automod rules
+    await db.execute("""
+        CREATE TABLE IF NOT EXISTS automod_rules (
+            id INTEGER PRIMARY KEY AUTOINCREMENT,
+            guild_id INTEGER NOT NULL,
+            keyword TEXT NOT NULL,
+            punishment_type TEXT NOT NULL,
+            duration_minutes INTEGER DEFAULT 0,
+            UNIQUE(guild_id, keyword)
+        )
+    """)
+
+    # Starboard settings
+    await db.execute("""
+        CREATE TABLE IF NOT EXISTS starboard_settings (
+            guild_id INTEGER PRIMARY KEY,
+            channel_id INTEGER,
+            emoji_trigger TEXT DEFAULT '⭐',
+            threshold INTEGER DEFAULT 3,
+            allow_self_star INTEGER DEFAULT 0,
+            enabled INTEGER DEFAULT 1
+        )
+    """)
+
+    # Starboard entries
+    await db.execute("""
+        CREATE TABLE IF NOT EXISTS starboard_entries (
+            original_message_id INTEGER PRIMARY KEY,
+            guild_id INTEGER NOT NULL,
+            starboard_message_id INTEGER NOT NULL,
+            channel_id INTEGER NOT NULL,
+            emoji_used TEXT,
+            is_deleted INTEGER DEFAULT 0,
+            deleted_at TIMESTAMP
+        )
+    """)
+
+    # Starboard ignored channels
+    await db.execute("""
+        CREATE TABLE IF NOT EXISTS starboard_ignored_channels (
+            guild_id INTEGER NOT NULL,
+            channel_id INTEGER NOT NULL,
+            PRIMARY KEY (guild_id, channel_id)
         )
     """)
 
@@ -828,6 +919,12 @@ AFFECTION_LEVELS = [
     (1000, "beloved"),
 ]
 
+AFFECTION_TRACKED_MODES = (
+    "mode_femboy",
+    "mode_tsundere",
+    "mode_oneesan",
+)
+
 
 def _calculate_level(points: int) -> str:
     """Calculate affection level from points."""
@@ -838,13 +935,19 @@ def _calculate_level(points: int) -> str:
     return level
 
 
-async def get_affection(guild_id: int, user_id: int) -> Dict[str, Any]:
-    """Get user's affection data."""
+def _validate_affection_mode(mode: str) -> None:
+    if mode not in AFFECTION_TRACKED_MODES:
+        raise ValueError(f"Invalid affection mode: {mode}")
+
+
+async def get_affection_by_mode(guild_id: int, user_id: int, mode: str) -> Dict[str, Any]:
+    """Get user's affection data for a specific mode."""
+    _validate_affection_mode(mode)
     async with guild_db(guild_id) as db:
         db.row_factory = aiosqlite.Row
         async with db.execute(
-            "SELECT * FROM user_affection_v2 WHERE guild_id = ? AND user_id = ?",
-            (guild_id, user_id)
+            "SELECT * FROM user_affection_by_mode WHERE guild_id = ? AND user_id = ? AND mode = ?",
+            (guild_id, user_id, mode),
         ) as cursor:
             row = await cursor.fetchone()
             if row:
@@ -852,50 +955,152 @@ async def get_affection(guild_id: int, user_id: int) -> Dict[str, Any]:
             return {
                 "guild_id": guild_id,
                 "user_id": user_id,
+                "mode": mode,
                 "affection_points": 0,
                 "total_interactions": 0,
-                "affection_level": "stranger"
+                "affection_level": "stranger",
             }
 
 
-async def add_affection(guild_id: int, user_id: int, points: int = 1) -> Dict[str, Any]:
-    """Add affection points and return updated data."""
+async def get_all_mode_affection(guild_id: int, user_id: int) -> Dict[str, Dict[str, Any]]:
+    """Get user's affection data for all tracked modes."""
+    result: Dict[str, Dict[str, Any]] = {}
     async with guild_db(guild_id) as db:
-        # Get current data
+        db.row_factory = aiosqlite.Row
         async with db.execute(
-            "SELECT affection_points, total_interactions FROM user_affection_v2 WHERE guild_id = ? AND user_id = ?",
-            (guild_id, user_id)
+            "SELECT * FROM user_affection_by_mode WHERE guild_id = ? AND user_id = ?",
+            (guild_id, user_id),
+        ) as cursor:
+            rows = await cursor.fetchall()
+            for row in rows:
+                result[row["mode"]] = dict(row)
+
+    for mode in AFFECTION_TRACKED_MODES:
+        if mode not in result:
+            result[mode] = {
+                "guild_id": guild_id,
+                "user_id": user_id,
+                "mode": mode,
+                "affection_points": 0,
+                "total_interactions": 0,
+                "affection_level": "stranger",
+            }
+    return result
+
+
+async def add_affection_to_mode(
+    guild_id: int,
+    user_id: int,
+    mode: str,
+    points: int = 1,
+) -> Dict[str, Any]:
+    """Add affection points for a specific mode."""
+    _validate_affection_mode(mode)
+    async with guild_db(guild_id) as db:
+        async with db.execute(
+            "SELECT affection_points, total_interactions FROM user_affection_by_mode WHERE guild_id = ? AND user_id = ? AND mode = ?",
+            (guild_id, user_id, mode),
         ) as cursor:
             row = await cursor.fetchone()
-        
+
         if row:
             new_points = row[0] + points
             new_interactions = row[1] + 1
         else:
             new_points = points
             new_interactions = 1
-        
+
         new_level = _calculate_level(new_points)
-        
-        await db.execute("""
-            INSERT INTO user_affection_v2 (guild_id, user_id, affection_points, total_interactions, last_interaction, affection_level)
-            VALUES (?, ?, ?, ?, ?, ?)
-            ON CONFLICT(guild_id, user_id) DO UPDATE SET
+
+        await db.execute(
+            """
+            INSERT INTO user_affection_by_mode (guild_id, user_id, mode, affection_points, total_interactions, last_interaction, affection_level)
+            VALUES (?, ?, ?, ?, ?, ?, ?)
+            ON CONFLICT(guild_id, user_id, mode) DO UPDATE SET
                 affection_points = ?,
                 total_interactions = ?,
                 last_interaction = ?,
                 affection_level = ?
-        """, (guild_id, user_id, new_points, new_interactions, datetime.now(), new_level,
-              new_points, new_interactions, datetime.now(), new_level))
+            """,
+            (
+                guild_id,
+                user_id,
+                mode,
+                new_points,
+                new_interactions,
+                datetime.now(),
+                new_level,
+                new_points,
+                new_interactions,
+                datetime.now(),
+                new_level,
+            ),
+        )
         await db.commit()
-        
+
         return {
             "guild_id": guild_id,
             "user_id": user_id,
+            "mode": mode,
             "affection_points": new_points,
             "total_interactions": new_interactions,
-            "affection_level": new_level
+            "affection_level": new_level,
         }
+
+
+async def set_affection_value_by_mode(
+    guild_id: int,
+    user_id: int,
+    mode: str,
+    points: int,
+) -> Dict[str, Any]:
+    """Set affection for a specific mode (admin use)."""
+    _validate_affection_mode(mode)
+    new_level = _calculate_level(points)
+    async with guild_db(guild_id) as db:
+        await db.execute(
+            """
+            INSERT INTO user_affection_by_mode (guild_id, user_id, mode, affection_points, total_interactions, last_interaction, affection_level)
+            VALUES (?, ?, ?, ?, ?, ?, ?)
+            ON CONFLICT(guild_id, user_id, mode) DO UPDATE SET
+                affection_points = ?,
+                affection_level = ?,
+                last_interaction = ?
+            """,
+            (
+                guild_id,
+                user_id,
+                mode,
+                points,
+                0,
+                datetime.now(),
+                new_level,
+                points,
+                new_level,
+                datetime.now(),
+            ),
+        )
+        await db.commit()
+
+    return {
+        "guild_id": guild_id,
+        "user_id": user_id,
+        "mode": mode,
+        "affection_points": points,
+        "affection_level": new_level,
+    }
+
+
+async def reset_affection_by_mode(guild_id: int, user_id: int, mode: str) -> int:
+    """Reset affection for a specific mode (admin use)."""
+    _validate_affection_mode(mode)
+    async with guild_db(guild_id) as db:
+        cursor = await db.execute(
+            "DELETE FROM user_affection_by_mode WHERE guild_id = ? AND user_id = ? AND mode = ?",
+            (guild_id, user_id, mode),
+        )
+        await db.commit()
+        return cursor.rowcount
 
 
 # ============================================
@@ -1262,6 +1467,201 @@ async def get_gender_roles(guild_id: int) -> Dict[int, str]:
 
 
 # ============================================
+# Automod Rules
+# ============================================
+
+async def add_automod_rule(
+    guild_id: int,
+    keyword: str,
+    punishment_type: str,
+    duration_minutes: int = 0
+) -> None:
+    """Add or update an automod rule for a guild."""
+    keyword = keyword.strip().lower()
+    punishment_type = punishment_type.strip().lower()
+    async with guild_db(guild_id) as db:
+        await db.execute(
+            """INSERT INTO automod_rules (guild_id, keyword, punishment_type, duration_minutes)
+               VALUES (?, ?, ?, ?)
+               ON CONFLICT(guild_id, keyword) DO UPDATE SET
+                   punishment_type = excluded.punishment_type,
+                   duration_minutes = excluded.duration_minutes""",
+            (guild_id, keyword, punishment_type, duration_minutes),
+        )
+        await db.commit()
+
+
+async def remove_automod_rule(guild_id: int, keyword: str) -> bool:
+    """Remove an automod rule by keyword."""
+    keyword = keyword.strip().lower()
+    async with guild_db(guild_id) as db:
+        cursor = await db.execute(
+            "DELETE FROM automod_rules WHERE guild_id = ? AND keyword = ?",
+            (guild_id, keyword),
+        )
+        await db.commit()
+        return cursor.rowcount > 0
+
+
+async def get_automod_rules(guild_id: int) -> List[Dict[str, Any]]:
+    """Fetch all automod rules for a guild."""
+    async with guild_db(guild_id) as db:
+        db.row_factory = aiosqlite.Row
+        async with db.execute(
+            "SELECT id, keyword, punishment_type, duration_minutes FROM automod_rules WHERE guild_id = ?",
+            (guild_id,),
+        ) as cursor:
+            rows = await cursor.fetchall()
+            return [dict(row) for row in rows]
+
+
+# ============================================
+# Starboard Settings + Entries
+# ============================================
+
+async def get_starboard_settings(guild_id: int) -> Optional[Dict[str, Any]]:
+    """Get starboard settings for a guild, if configured."""
+    async with guild_db(guild_id) as db:
+        db.row_factory = aiosqlite.Row
+        async with db.execute(
+            "SELECT * FROM starboard_settings WHERE guild_id = ?",
+            (guild_id,),
+        ) as cursor:
+            row = await cursor.fetchone()
+            return dict(row) if row else None
+
+
+async def upsert_starboard_settings(
+    guild_id: int,
+    channel_id: Optional[int],
+    emoji_trigger: str,
+    threshold: int,
+    allow_self_star: bool,
+    enabled: bool = True,
+) -> None:
+    """Create or update starboard settings."""
+    emoji_trigger = (emoji_trigger or "⭐").strip()
+    threshold = max(1, int(threshold))
+    async with guild_db(guild_id) as db:
+        await db.execute(
+            """INSERT INTO starboard_settings
+               (guild_id, channel_id, emoji_trigger, threshold, allow_self_star, enabled)
+               VALUES (?, ?, ?, ?, ?, ?)
+               ON CONFLICT(guild_id) DO UPDATE SET
+                   channel_id = excluded.channel_id,
+                   emoji_trigger = excluded.emoji_trigger,
+                   threshold = excluded.threshold,
+                   allow_self_star = excluded.allow_self_star,
+                   enabled = excluded.enabled""",
+            (guild_id, channel_id, emoji_trigger, threshold, int(allow_self_star), int(enabled)),
+        )
+        await db.commit()
+
+
+async def set_starboard_enabled(guild_id: int, enabled: bool) -> None:
+    """Enable or disable starboard for a guild."""
+    async with guild_db(guild_id) as db:
+        await db.execute(
+            """INSERT INTO starboard_settings (guild_id, enabled)
+               VALUES (?, ?)
+               ON CONFLICT(guild_id) DO UPDATE SET enabled = excluded.enabled""",
+            (guild_id, int(enabled)),
+        )
+        await db.commit()
+
+
+async def add_starboard_ignored_channel(guild_id: int, channel_id: int) -> None:
+    """Ignore a channel for starboard."""
+    async with guild_db(guild_id) as db:
+        await db.execute(
+            "INSERT OR IGNORE INTO starboard_ignored_channels (guild_id, channel_id) VALUES (?, ?)",
+            (guild_id, channel_id),
+        )
+        await db.commit()
+
+
+async def remove_starboard_ignored_channel(guild_id: int, channel_id: int) -> bool:
+    """Remove a channel from the starboard ignore list."""
+    async with guild_db(guild_id) as db:
+        cursor = await db.execute(
+            "DELETE FROM starboard_ignored_channels WHERE guild_id = ? AND channel_id = ?",
+            (guild_id, channel_id),
+        )
+        await db.commit()
+        return cursor.rowcount > 0
+
+
+async def get_starboard_ignored_channels(guild_id: int) -> Set[int]:
+    """Get ignored channel IDs for starboard."""
+    async with guild_db(guild_id) as db:
+        async with db.execute(
+            "SELECT channel_id FROM starboard_ignored_channels WHERE guild_id = ?",
+            (guild_id,),
+        ) as cursor:
+            rows = await cursor.fetchall()
+            return {row[0] for row in rows}
+
+
+async def get_starboard_entry(guild_id: int, original_message_id: int) -> Optional[Dict[str, Any]]:
+    """Get a starboard entry by original message ID."""
+    async with guild_db(guild_id) as db:
+        db.row_factory = aiosqlite.Row
+        async with db.execute(
+            """SELECT original_message_id, starboard_message_id, channel_id, emoji_used, is_deleted, deleted_at
+               FROM starboard_entries WHERE guild_id = ? AND original_message_id = ?""",
+            (guild_id, original_message_id),
+        ) as cursor:
+            row = await cursor.fetchone()
+            return dict(row) if row else None
+
+
+async def upsert_starboard_entry(
+    guild_id: int,
+    original_message_id: int,
+    starboard_message_id: int,
+    channel_id: int,
+    emoji_used: Optional[str] = None,
+) -> None:
+    """Create or update a starboard entry."""
+    async with guild_db(guild_id) as db:
+        await db.execute(
+            """INSERT INTO starboard_entries
+               (original_message_id, guild_id, starboard_message_id, channel_id, emoji_used)
+               VALUES (?, ?, ?, ?, ?)
+               ON CONFLICT(original_message_id) DO UPDATE SET
+                   starboard_message_id = excluded.starboard_message_id,
+                   channel_id = excluded.channel_id,
+                   emoji_used = COALESCE(excluded.emoji_used, starboard_entries.emoji_used)""",
+            (original_message_id, guild_id, starboard_message_id, channel_id, emoji_used),
+        )
+        await db.commit()
+
+
+async def mark_starboard_entry_deleted(guild_id: int, original_message_id: int) -> bool:
+    """Mark a starboard entry as deleted (original message removed)."""
+    async with guild_db(guild_id) as db:
+        cursor = await db.execute(
+            """UPDATE starboard_entries
+               SET is_deleted = 1, deleted_at = ?
+               WHERE guild_id = ? AND original_message_id = ?""",
+            (datetime.now(), guild_id, original_message_id),
+        )
+        await db.commit()
+        return cursor.rowcount > 0
+
+
+async def clear_starboard_entry(guild_id: int, original_message_id: int) -> bool:
+    """Delete a starboard entry record."""
+    async with guild_db(guild_id) as db:
+        cursor = await db.execute(
+            "DELETE FROM starboard_entries WHERE guild_id = ? AND original_message_id = ?",
+            (guild_id, original_message_id),
+        )
+        await db.commit()
+        return cursor.rowcount > 0
+
+
+# ============================================
 # Enhanced Fact Operations (with source tracking)
 # ============================================
 
@@ -1394,7 +1794,12 @@ async def cleanup_expired_pending_facts(guild_id: int) -> int:
 # Admin Operations
 # ============================================
 
-async def reset_user_data(guild_id: int, user_id: int, reset_type: str = "all") -> Dict[str, int]:
+async def reset_user_data(
+    guild_id: int,
+    user_id: int,
+    reset_type: str = "all",
+    mode: str = None,
+) -> Dict[str, int]:
     """Reset user data. reset_type: 'all', 'facts', 'affection', 'aliases'"""
     deleted = {"facts": 0, "affection": 0, "aliases": 0}
     
@@ -1407,11 +1812,26 @@ async def reset_user_data(guild_id: int, user_id: int, reset_type: str = "all") 
             deleted["facts"] = cursor.rowcount
         
         if reset_type in ("all", "affection"):
-            cursor = await db.execute(
-                "DELETE FROM user_affection_v2 WHERE guild_id = ? AND user_id = ?",
-                (guild_id, user_id)
-            )
-            deleted["affection"] = cursor.rowcount
+            if reset_type == "affection":
+                if not mode:
+                    raise ValueError("mode is required when reset_type=affection")
+                _validate_affection_mode(mode)
+                cursor = await db.execute(
+                    "DELETE FROM user_affection_by_mode WHERE guild_id = ? AND user_id = ? AND mode = ?",
+                    (guild_id, user_id, mode),
+                )
+                deleted["affection"] = cursor.rowcount
+            else:
+                cursor = await db.execute(
+                    "DELETE FROM user_affection_v2 WHERE guild_id = ? AND user_id = ?",
+                    (guild_id, user_id),
+                )
+                deleted["affection"] = cursor.rowcount
+                cursor = await db.execute(
+                    "DELETE FROM user_affection_by_mode WHERE guild_id = ? AND user_id = ?",
+                    (guild_id, user_id),
+                )
+                deleted["affection"] += cursor.rowcount
         
         if reset_type in ("all", "aliases"):
             cursor = await db.execute(
@@ -1452,16 +1872,156 @@ async def set_affection_value(guild_id: int, user_id: int, points: int) -> Dict[
 async def get_user_full_profile(guild_id: int, user_id: int) -> Dict[str, Any]:
     """Get complete user profile for admin viewing."""
     user = await get_user(guild_id, user_id) or {"user_id": user_id}
-    affection = await get_affection(guild_id, user_id)
+    affection_by_mode = await get_all_mode_affection(guild_id, user_id)
     facts = await get_facts_detailed(guild_id, user_id)
     aliases = await get_aliases(guild_id, user_id)
     
     return {
         **user,
-        "affection": affection,
+        "affection_by_mode": affection_by_mode,
         "facts": facts,
         "aliases": aliases
     }
+
+
+# ============================================
+# Agentic Staff Role Operations
+# ============================================
+
+async def add_staff_role(guild_id: int, role_id: int, permission_level: int) -> None:
+    """Add or update a staff role with a permission level."""
+    async with guild_db(guild_id) as db:
+        await db.execute(
+            """
+            INSERT INTO staff_roles (guild_id, role_id, permission_level)
+            VALUES (?, ?, ?)
+            ON CONFLICT(guild_id, role_id) DO UPDATE SET
+                permission_level = ?
+            """,
+            (guild_id, role_id, permission_level, permission_level),
+        )
+        await db.commit()
+
+
+async def remove_staff_role(guild_id: int, role_id: int) -> bool:
+    """Remove a staff role. Returns True if deleted."""
+    async with guild_db(guild_id) as db:
+        cursor = await db.execute(
+            "DELETE FROM staff_roles WHERE guild_id = ? AND role_id = ?",
+            (guild_id, role_id),
+        )
+        await db.commit()
+        return cursor.rowcount > 0
+
+
+async def get_staff_roles(guild_id: int) -> List[tuple[int, int]]:
+    """Get all staff roles and permission levels."""
+    async with guild_db(guild_id) as db:
+        async with db.execute(
+            "SELECT role_id, permission_level FROM staff_roles WHERE guild_id = ?",
+            (guild_id,),
+        ) as cursor:
+            rows = await cursor.fetchall()
+            return [(row[0], row[1]) for row in rows]
+
+
+async def get_mod_log_channel_id(guild_id: int) -> Optional[int]:
+    """Get the mod-log channel ID for a guild."""
+    config = await get_guild_config(guild_id)
+    channel_id = config.get("mod_log_channel_id")
+    return channel_id if channel_id else None
+
+
+async def set_mod_log_channel_id(guild_id: int, channel_id: Optional[int]) -> None:
+    """Set or clear the mod-log channel ID for a guild."""
+    await update_guild_config(guild_id, {"mod_log_channel_id": channel_id})
+
+
+async def get_autorole_config(guild_id: int) -> Dict[str, Any]:
+    """Get autorole configuration for a guild."""
+    config = await get_guild_config(guild_id)
+    enabled = config.get("autorole_enabled")
+    return {
+        "autorole_id": config.get("autorole_id"),
+        "autorole_enabled": True if enabled is None else bool(enabled),
+    }
+
+
+async def set_autorole_id(guild_id: int, role_id: Optional[int]) -> None:
+    """Set or clear autorole ID."""
+    await update_guild_config(guild_id, {"autorole_id": role_id})
+
+
+async def set_autorole_enabled(guild_id: int, enabled: bool) -> None:
+    """Enable or disable autorole."""
+    await update_guild_config(guild_id, {"autorole_enabled": int(enabled)})
+
+
+async def get_welcome_config(guild_id: int) -> Dict[str, Any]:
+    """Get welcome configuration for a guild."""
+    config = await get_guild_config(guild_id)
+    enabled = config.get("welcome_enabled")
+    return {
+        "welcome_channel_id": config.get("welcome_channel_id"),
+        "welcome_enabled": True if enabled is None else bool(enabled),
+        "welcome_message_template": config.get("welcome_message_template"),
+    }
+
+
+async def set_welcome_channel_id(guild_id: int, channel_id: Optional[int]) -> None:
+    """Set or clear the welcome channel ID."""
+    await update_guild_config(guild_id, {"welcome_channel_id": channel_id})
+
+
+async def set_welcome_enabled(guild_id: int, enabled: bool) -> None:
+    """Enable or disable welcome messages."""
+    await update_guild_config(guild_id, {"welcome_enabled": int(enabled)})
+
+
+async def set_welcome_message_template(guild_id: int, template: Optional[str]) -> None:
+    """Set or clear the welcome message template for a guild."""
+    await update_guild_config(guild_id, {"welcome_message_template": template})
+
+
+async def get_dm_welcome_message(guild_id: int) -> Optional[str]:
+    """Get the DM welcome message for a guild."""
+    config = await get_guild_config(guild_id)
+    return config.get("dm_welcome_message")
+
+
+async def set_dm_welcome_message(guild_id: int, message: Optional[str]) -> None:
+    """Set or clear the DM welcome message for a guild."""
+    await update_guild_config(guild_id, {"dm_welcome_message": message})
+
+
+async def get_dm_welcome_enabled(guild_id: int) -> bool:
+    """Return whether DM welcomes are enabled for a guild."""
+    config = await get_guild_config(guild_id)
+    enabled = config.get("dm_welcome_enabled")
+    return bool(enabled) if enabled is not None else False
+
+
+async def set_dm_welcome_enabled(guild_id: int, enabled: bool) -> None:
+    """Enable or disable DM welcome messages for a guild."""
+    await update_guild_config(guild_id, {"dm_welcome_enabled": int(enabled)})
+
+
+async def get_spam_config(guild_id: int) -> Dict[str, Any]:
+    """Get automod spam/timeout configuration for a guild."""
+    config = await get_guild_config(guild_id)
+    return {
+        "spam_timeout_enabled": bool(config.get("spam_timeout_enabled") or 0),
+        "spam_max_messages": int(config.get("spam_max_messages") or 0),
+        "spam_window_seconds": int(config.get("spam_window_seconds") or 0),
+        "spam_timeout_minutes": int(config.get("spam_timeout_minutes") or 0),
+    }
+
+
+async def set_spam_config(guild_id: int, updates: Dict[str, Any]) -> None:
+    """Update spam automod configuration fields."""
+    if not updates:
+        return
+    await update_guild_config(guild_id, updates)
 
 
 # ============================================
@@ -1495,6 +2055,18 @@ GUILD_CONFIG_FIELDS: Set[str] = {
     "openrouter_model",
     "openrouter_fallback_models",
     "evil_mode_enabled",
+    "autorole_id",
+    "autorole_enabled",
+    "welcome_channel_id",
+    "welcome_enabled",
+    "welcome_message_template",
+    "dm_welcome_message",
+    "dm_welcome_enabled",
+    "spam_timeout_enabled",
+    "spam_max_messages",
+    "spam_window_seconds",
+    "spam_timeout_minutes",
+    "mod_log_channel_id",
 }
 
 

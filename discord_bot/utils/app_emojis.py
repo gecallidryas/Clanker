@@ -1,7 +1,7 @@
 from __future__ import annotations
 
 import re
-from typing import Iterable, List, Optional
+from typing import Dict, Iterable, List, Optional
 
 from utils.logger import get_logger
 
@@ -63,3 +63,68 @@ async def get_application_emojis(bot) -> List:
 
     setattr(bot, "_app_emojis_cache", list(emojis))
     return list(emojis)
+
+
+async def get_guild_emojis(bot, guild) -> List:
+    if not guild:
+        return []
+    cache = getattr(bot, "_guild_emojis_cache", None)
+    if cache is None:
+        cache = {}
+        setattr(bot, "_guild_emojis_cache", cache)
+    if guild.id in cache:
+        return list(cache[guild.id])
+
+    emojis: List = []
+    try:
+        emojis = list(getattr(guild, "emojis", []) or [])
+    except Exception:
+        emojis = []
+
+    if not emojis:
+        fetcher = getattr(guild, "fetch_emojis", None)
+        if fetcher:
+            try:
+                emojis = await fetcher()
+            except Exception as exc:
+                logger.warning("Failed to fetch guild emojis: %s", exc)
+                emojis = []
+
+    cache[guild.id] = list(emojis)
+    return list(emojis)
+
+
+def build_emoji_lookup(emojis: Iterable) -> Dict[str, str]:
+    lookup: Dict[str, str] = {}
+    for emoji in emojis:
+        name = getattr(emoji, "name", None)
+        if not name:
+            continue
+        token = format_custom_emoji(emoji)
+        if token:
+            lookup[name.lower()] = token
+    return lookup
+
+
+_NAME_PATTERN = re.compile(r"(?<!<a)(?<!<):([a-zA-Z0-9_]+):")
+_NAME_ID_PATTERN = re.compile(r"(?<!<a:)(?<!<:)(?<!<)([a-zA-Z0-9_]+):([0-9]{5,})")
+
+
+def replace_custom_emojis(text: str, emojis: Iterable) -> str:
+    """Replace :name: or name:123 patterns with proper emoji tokens."""
+    if not text:
+        return text
+    lookup = build_emoji_lookup(emojis)
+    if not lookup:
+        return text
+
+    def replace_name(match):
+        name = match.group(1).lower()
+        return lookup.get(name, match.group(0))
+
+    def replace_name_id(match):
+        name = match.group(1).lower()
+        return lookup.get(name, match.group(0))
+
+    text = _NAME_ID_PATTERN.sub(replace_name_id, text)
+    return _NAME_PATTERN.sub(replace_name, text)

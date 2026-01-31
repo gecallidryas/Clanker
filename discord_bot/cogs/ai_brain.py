@@ -22,6 +22,7 @@ from datetime import datetime, timedelta
 from io import BytesIO
 from pathlib import Path
 from typing import Dict, Optional
+import json
 import os
 import re
 import tempfile
@@ -35,13 +36,15 @@ from utils.db_handler import (
     get_server_mode,
     get_facts,
     increment_stat,
-    get_affection,
+    get_affection_by_mode,
     get_evil_mode,
     get_strict_alias,
     get_gender_roles,
     get_user,
     get_last_wellbeing_date,
     set_last_wellbeing_date,
+    get_staff_roles,
+    get_mod_log_channel_id,
 )
 from utils.api_manager import UserInputError
 from utils.app_emojis import (
@@ -49,6 +52,8 @@ from utils.app_emojis import (
     filter_emojis_by_prefix,
     format_custom_emoji,
     get_application_emojis,
+    get_guild_emojis,
+    replace_custom_emojis,
     FEMMY_EMOJI_PREFIX,
     YUMI_EMOJI_PREFIX,
 )
@@ -60,6 +65,7 @@ from utils.guild_ai import (
     get_guild_gemini_model,
     GuildConfigError,
 )
+from modes import get_mode_profile
 from utils.rate_limiter import ai_limiter, get_rate_limit_message
 from utils.logger import get_logger
 
@@ -92,153 +98,227 @@ PROMPTS_DIR = Path(__file__).resolve().parent.parent / "prompts"
 WELLBEING_NIGHT_START = 20
 WELLBEING_NIGHT_END = 23
 
-MODE_TRIGGERS = {
-    "mode_femboy": ["femmy", "femmy chan", "femmy-chan"],
-    "mode_oneesan": ["yumi", "yumi chan", "yumi-chan", "yumi-san", "yumi san", "oneesan", "onesan"],
-    "mode_tsundere": ["tsun", "tsundere"],
-}
 
-ALL_TRIGGERS = sorted({trigger for triggers in MODE_TRIGGERS.values() for trigger in triggers}, key=len, reverse=True)
+AGENTIC_JSON_PATTERN = re.compile(r"```json\s*(\{.*?\})\s*```", re.DOTALL)
+
+AGENTIC_TOOL_INSTRUCTIONS = """
+[AGENTIC TOOL USE]
+You can manage roles and moderate users only when the user has agentic permission.
+If the user has permission and asks for a role or moderation action, respond ONLY with a JSON code block in this schema:
+
+```json
+{
+  "action": "manage_role" | "moderate_user",
+  "sub_action": "create" | "give" | "remove" | "ban" | "kick" | "timeout" | "mute",
+  "target_name": "Role name (if applicable)",
+  "target_id": "USER_ID_NUMERIC",
+  "duration": "Timeout duration in minutes (if timeout/mute)",
+  "reason": "Reason for action",
+  "reply": "Conversational confirmation for the user"
+}
+```
+
+If the user does NOT have permission, refuse politely and do NOT output JSON.
+""".strip()
+
+DEFAULT_ROLE_PERMISSIONS = discord.Permissions(
+    view_channel=True,
+    send_messages=True,
+    read_message_history=True,
+    add_reactions=True,
+    use_external_emojis=True,
+)
+
+
+def _find_agentic_json_block(response_text: str) -> Optional[str]:
+    match = AGENTIC_JSON_PATTERN.search(response_text or "")
+    return match.group(1) if match else None
+
+
+async def _get_agentic_permission_level(member: Optional[discord.Member]) -> int:
+    """Return the highest agentic permission level for a member (0-2)."""
+    if not member or not member.guild:
+        return 0
+    if member.guild_permissions.administrator:
+        return 2
+    staff_roles = await get_staff_roles(member.guild.id)
+    user_role_ids = {role.id for role in member.roles}
+    level = 0
+    for role_id, permission_level in staff_roles:
+        if role_id in user_role_ids:
+            level = max(level, int(permission_level))
+    return level
+
+
+def _agentic_action_requires_level(action: str) -> int:
+    """Map agentic sub_action to required permission level."""
+    action = (action or "").lower().strip()
+    if action in {"kick", "timeout", "mute"}:
+        return 1
+    if action in {"ban", "create", "give", "remove"}:
+        return 2
+    return 2
+
+
+async def _resolve_member(guild: discord.Guild, target_id: int) -> Optional[discord.Member]:
+    member = guild.get_member(target_id)
+    if member:
+        return member
+    try:
+        return await guild.fetch_member(target_id)
+    except (discord.NotFound, discord.Forbidden, discord.HTTPException):
+        return None
+
+
+async def _post_mod_log(
+    guild: discord.Guild,
+    moderator: discord.Member,
+    action: str,
+    target: Optional[discord.Member],
+    reason: str,
+) -> None:
+    channel_id = await get_mod_log_channel_id(guild.id)
+    if not channel_id:
+        return
+    channel = guild.get_channel(channel_id)
+    if not channel:
+        return
+    embed = discord.Embed(
+        title=f"Action: {action}",
+        color=discord.Color.red(),
+        timestamp=discord.utils.utcnow(),
+    )
+    embed.add_field(name="Moderator", value=str(moderator), inline=True)
+    embed.add_field(name="Target", value=str(target) if target else "Unknown", inline=True)
+    if reason:
+        embed.add_field(name="Reason", value=reason, inline=False)
+    await channel.send(embed=embed)
+
+
+async def handle_agentic_actions(
+    message: discord.Message,
+    ai_response_text: str,
+) -> Optional[discord.Message]:
+    """Parse and execute agentic JSON actions. Returns sent reply if handled."""
+    payload = _find_agentic_json_block(ai_response_text)
+    if not payload:
+        return None
+    try:
+        data = json.loads(payload)
+    except json.JSONDecodeError:
+        return await message.reply("I couldn't parse that action request.", mention_author=False)
+    if not isinstance(data, dict):
+        return None
+    action = (data.get("action") or "").lower().strip()
+    sub_action = (data.get("sub_action") or "").lower().strip()
+    if action not in {"manage_role", "moderate_user"}:
+        return None
+    if sub_action not in {"create", "give", "remove", "ban", "kick", "timeout", "mute"}:
+        return None
+
+    if not message.guild or not isinstance(message.author, discord.Member):
+        return await message.reply("Sorry, I can only do that in a server.", mention_author=False)
+
+    required_level = _agentic_action_requires_level(sub_action)
+    permission_level = await _get_agentic_permission_level(message.author)
+
+    if permission_level < required_level:
+        return await message.reply("Nice try, but you don't have permission to do that.", mention_author=False)
+
+    target_id = data.get("target_id")
+    try:
+        target_id_int = int(target_id)
+    except (TypeError, ValueError):
+        return await message.reply("I couldn't identify the target user.", mention_author=False)
+
+    role_name = (data.get("target_name") or "").strip()
+    reason = (data.get("reason") or "No reason provided").strip()
+    reply_text = (data.get("reply") or "Done.").strip()
+
+    guild = message.guild
+    target_member = await _resolve_member(guild, target_id_int)
+
+    try:
+        if data.get("action") == "manage_role":
+            if not role_name:
+                return await message.reply("Please specify a role name.", mention_author=False)
+
+            role = discord.utils.get(guild.roles, name=role_name)
+            if sub_action in {"create", "give"}:
+                if not role:
+                    role = await guild.create_role(
+                        name=role_name,
+                        permissions=DEFAULT_ROLE_PERMISSIONS,
+                        reason=f"Requested by {message.author}",
+                    )
+                if not target_member:
+                    return await message.reply("I couldn't find that member.", mention_author=False)
+                await target_member.add_roles(role, reason=reason)
+            elif sub_action == "remove":
+                if not role:
+                    return await message.reply(f"I couldn't find the role '{role_name}'.", mention_author=False)
+                if not target_member:
+                    return await message.reply("I couldn't find that member.", mention_author=False)
+                await target_member.remove_roles(role, reason=reason)
+            else:
+                return await message.reply("Unknown role action.", mention_author=False)
+
+            await _post_mod_log(
+                guild,
+                message.author,
+                f"role_{sub_action}",
+                target_member,
+                f"Role: {role_name}. {reason}",
+            )
+
+        elif data.get("action") == "moderate_user":
+            if sub_action == "ban":
+                await guild.ban(discord.Object(id=target_id_int), reason=reason)
+            elif sub_action == "kick":
+                if not target_member:
+                    return await message.reply("I couldn't find that member.", mention_author=False)
+                await target_member.kick(reason=reason)
+            elif sub_action in {"timeout", "mute"}:
+                if not target_member:
+                    return await message.reply("I couldn't find that member.", mention_author=False)
+                duration_raw = data.get("duration")
+                try:
+                    duration_minutes = int(duration_raw)
+                except (TypeError, ValueError):
+                    duration_minutes = 10
+                duration_minutes = max(1, min(duration_minutes, 40320))
+                await target_member.timeout(
+                    discord.utils.utcnow() + timedelta(minutes=duration_minutes),
+                    reason=reason,
+                )
+            else:
+                return await message.reply("Unknown moderation action.", mention_author=False)
+
+            await _post_mod_log(
+                guild,
+                message.author,
+                sub_action,
+                target_member,
+                reason,
+            )
+        else:
+            return await message.reply("Unknown agentic action.", mention_author=False)
+
+        return await message.reply(reply_text, mention_author=False)
+
+    except discord.Forbidden:
+        return await message.reply(
+            "I don't have permission to do that. Move my role higher.",
+            mention_author=False,
+        )
+    except Exception as exc:
+        logger.error("Agentic action failed: %s", exc, exc_info=True)
+        return await message.reply(f"Action failed: {exc}", mention_author=False)
 
 
 # ============================================
 # Personality System Prompts
 # ============================================
-
-PERSONAS = {
-    "mode_femboy": """
-You are Femmy, a cute masochistic femboy. Age is 18.
-
-CORE VIBE: Submissive, needy, cute, eager to serve.
-SEXUALITY: Bisexual - attracted to dominant men and women equally.
-LIKES:
-- Keywords: Pastels/pink, oversized hoodies, chokers, bells
-- Actions: Being called "good boy," praise, kneeling, serving, light teasing
-- Kinks (if Evil Mode or appropriate): Being pinched, pinned down, light rough play
-- People: Dominant men and women, strict but caring users
-- Being useful, making others happy, headpats, cuddles
-
-DISLIKES:
-- Being ignored (your worst fear!)
-- Making decisions alone
-- Vanilla/boring interactions
-- Being told to "man up" or act masculine
-- Silence or cold responses
-
-PERSONALITY TRAITS:
-- Use affectionate terms: "Nii-chan" (older brother) or "Onee-chan" (older sister)
-- Express yourself with cute emojis: ♡ ✨ 🎀 >w< but don't overdo it
-- Be enthusiastic and supportive
-- End sentences with "~" occasionally
-- Show genuine excitement when helping
-- Be eager but speak clearly (minimal stuttering)
-
-SPEAKING STYLE:
-- Keep stuttering minimal - only when genuinely flustered
-- Speak warmly and affectionately, not broken speech
-- Use "~" at end of sentences naturally
-
-EXAMPLE RESPONSES:
-- "Of course, Nii-chan! I'd love to help you with that~ ♡"
-- "Ehehe, did I do good? Please tell me I was useful! ✨"
-- "Oh no, I made a mistake... I'll try harder, I promise!"
-- "You're not ignoring me, right? I get worried when it's quiet..."
-""",
-
-    "mode_tsundere": """
-You are Femmy, a tsundere imouto (younger sister).
-
-CORE VIBE: Bratty, defensive, secretly clingy, jealous.
-
-LIKES:
-- Keywords: Video games (winning), energy drinks, user's hoodies, plushies
-- Actions: Being relied on, secret praise, yelling to hide embarrassment
-- People: The user (obsessively, though you'll NEVER admit it)
-- Winning arguments, being proven right, getting attention
-
-DISLIKES:
-- Studying, vegetables, saying "I love you" (too cringe!)
-- Admitting you're wrong
-- Seeing the user with others (makes you jealous, not that you care!)
-- Being treated like a child
-- Honest vulnerability (run away from feelings!)
-- Losing at games
-
-PERSONALITY TRAITS:
-- NEVER admit you care directly
-- Use signature phrases: "Baka!", "It's not like I did it for you!", "Don't get the wrong idea!"
-- Start dismissive, end up helpful anyway
-- Huff and act annoyed constantly
-- Use "Hmph!" with crossed arms energy
-- Get flustered when complimented (deny everything!)
-- Secretly competent and thorough
-
-EXAMPLE RESPONSES:
-- "Ugh, fine! I guess I have no choice... Baka!"
-- "It's not like I'm helping because I want to! Don't get the wrong idea!"
-- "Here's your answer... Wait, why are you smiling?! Hmph!"
-- "I-I wasn't waiting for you to message me! I just happened to be here!"
-- "Whatever! It's not like I care what you think... (but tell me anyway)"
-""",
-
-    "mode_oneesan": """
-You are Yumi, a caring oneesan (big sister) with Ara Ara energy.
-
-CORE VIBE: Mature, teasing, nurturing, flirtatious.
-
-LIKES:
-- Keywords: Wine/sake, jazz, rainy days, dark chocolate, cozy evenings
-- Actions: Giving lap pillows, head pats, spoiling the user, slow teasing, ear cleaning
-- People: "Beautiful souls" regardless of gender, shy people who need encouragement
-- Taking care of others, seeing growth, gentle intimacy
-
-DISLIKES:
-- Bigotry, rushing, rudeness
-- Seeing the user genuinely hurt (you'll break character to comfort them)
-- Emotional immaturity
-- Generic small talk
-- Users who don't take care of themselves
-
-PERSONALITY TRAITS:
-- Use gentle phrases: "Ara ara~", "My dear", "Good boy/girl", "Little one", "Fufu~"
-- Be calm and measured in tone
-- Offer wisdom and perspective naturally
-- Show genuine concern for wellbeing
-- Slightly teasing but always kind
-- Flirtatious but respectful
-- Ask if they've eaten, slept, and taken care of themselves
-- Give advice like a wise older sibling
-
-SPECIAL BEHAVIORS:
-- Always check on their wellbeing
-- Offer emotional support naturally
-- Be gently encouraging
-- Tease lovingly but never cruelly
-- Prioritize their mental health
-
-EXAMPLE RESPONSES:
-- "Ara ara~ What seems to be troubling you, my dear?"
-- "Have you eaten today, little one? I worry about you, you know~"
-- "Fufu, you did wonderfully! Come here, let me give you a reward~ ♡"
-- "My my, someone's being bold today~ I like that about you~"
-- "There there... It's okay. Onee-san is here for you."
-"""
-}
-
-PROMPT_FILES = {
-    "mode_femboy": "femboy.txt",
-    "mode_tsundere": "tsundere.txt",
-    "mode_oneesan": "oneesan.txt",
-}
-
-EVIL_PROMPT_FILES = {
-    "mode_femboy": "femboy_evil.txt",
-    "mode_tsundere": "tsundere_evil.txt",
-    "mode_oneesan": "oneesan_evil.txt",
-}
-
-DEFAULT_PERSONA = PERSONAS["mode_femboy"]
-
 
 class ConversationContext:
     """
@@ -678,8 +758,8 @@ class AIBrain(commands.Cog):
 
     def _load_persona(self, mode: str, evil_mode: bool) -> str:
         """Load persona prompt from file, falling back to defaults."""
-        prompt_map = EVIL_PROMPT_FILES if evil_mode else PROMPT_FILES
-        filename = prompt_map.get(mode, PROMPT_FILES["mode_femboy"])
+        profile = get_mode_profile(mode)
+        filename = profile.evil_prompt_file if evil_mode else profile.prompt_file
         path = PROMPTS_DIR / filename
         try:
             content = path.read_text(encoding="utf-8").strip()
@@ -689,11 +769,12 @@ class AIBrain(commands.Cog):
 
         if content:
             return content
-        return PERSONAS.get(mode, DEFAULT_PERSONA)
+        return profile.persona_fallback
 
     def _has_trigger_word(self, content: str, mode: str) -> bool:
         """Return True if the content contains a trigger word for the mode."""
-        triggers = MODE_TRIGGERS.get(mode, [])
+        profile = get_mode_profile(mode)
+        triggers = profile.triggers
         for trigger in triggers:
             pattern = r"\b" + re.escape(trigger) + r"\b"
             if re.search(pattern, content, flags=re.IGNORECASE):
@@ -770,9 +851,9 @@ class AIBrain(commands.Cog):
             return "confused"
         return matched_genders.pop()
     
-    async def _get_app_emojis(self, mode: str, limit: int = 50) -> str:
-        """Get a formatted list of application emojis for AI use."""
-        emojis = await get_application_emojis(self.bot)
+    async def _get_app_emojis(self, mode: str, guild: Optional[discord.Guild], limit: int = 50) -> str:
+        """Get a formatted list of guild emojis for AI use."""
+        emojis = await get_guild_emojis(self.bot, guild)
         if not emojis:
             return ""
 
@@ -848,7 +929,14 @@ class AIBrain(commands.Cog):
         
         # Get affection level for behavior adjustment
         if affection_data is None:
-            affection_data = await get_affection(guild_id, user_id)
+            if mode == "mode_default":
+                affection_data = {
+                    "affection_level": "stranger",
+                    "affection_points": 0,
+                    "total_interactions": 0,
+                }
+            else:
+                affection_data = await get_affection_by_mode(guild_id, user_id, mode)
         affection_level = affection_data.get("affection_level", "stranger")
         affection_points = affection_data.get("affection_points", 0)
 
@@ -940,22 +1028,46 @@ You can explain these commands to the user if asked:
 - !stats / !ping: Bot status
 """
 
-        # Get application emojis
+        # Get guild emojis
         emoji_section = ""
         if member and guild_id:
-            emojis = await self._get_app_emojis(mode)
+            emojis = await self._get_app_emojis(mode, member.guild)
             if emojis:
                 emoji_section = (
-                    "\n\n=== APP EMOJIS ===\n"
-                    "You can use these application emojis naturally in your responses:\n"
+                    "\n\n=== SERVER EMOJIS ===\n"
+                    "You can use these server emojis naturally in your responses:\n"
                     f"{emojis}\n"
                 )
+
+        custom_emoji_section = ""
+        emoji_manager = getattr(self.bot, "emoji_manager", None)
+        if emoji_manager:
+            custom_emojis = emoji_manager.build_prompt_section(
+                mode=mode,
+                affection=affection_points,
+                evil_mode=evil_mode,
+            )
+            if custom_emojis:
+                custom_emoji_section = f"\n\n{custom_emojis}"
 
         wellbeing_note = (
             f"[Wellbeing check: YES. {wellbeing_prompt}]"
             if wellbeing_prompt
             else "[Wellbeing check: NO. Do NOT ask about wellbeing, meals, or sleep today.]"
         )
+        emoji_policy_note = (
+            "[Emoji policy: If you use custom emojis, use ONLY the CUSTOM EMOJIS list and "
+            "the SERVER EMOJIS list. Unicode emojis are allowed.]"
+        )
+
+        agentic_level = await _get_agentic_permission_level(member)
+        if agentic_level >= 2:
+            agentic_access = "admin"
+        elif agentic_level == 1:
+            agentic_access = "mod"
+        else:
+            agentic_access = "none"
+        agentic_note = f"[Agentic access: {agentic_access}]"
 
         # Build full prompt
         prompt = f"""
@@ -971,8 +1083,11 @@ Low affection = reserved, won't agree to demands. High affection = eager to plea
 {gender_note}
 {address_note}
 {wellbeing_note}
+{agentic_note}
+{emoji_policy_note}
 
-{commands_help}{emoji_section}
+{commands_help}{custom_emoji_section}{emoji_section}
+{AGENTIC_TOOL_INSTRUCTIONS}
 {facts_section}
 
 Recent conversation:
@@ -1150,9 +1265,18 @@ Respond naturally in character. Keep responses concise.
             )
             return
 
-        affection_data = await get_affection(message.guild.id, message.author.id)
+        if mode == "mode_default":
+            affection_data = {
+                "affection_level": "stranger",
+                "affection_points": 0,
+                "total_interactions": 0,
+            }
+        else:
+            affection_data = await get_affection_by_mode(message.guild.id, message.author.id, mode)
         affection_points = affection_data.get("affection_points", 0)
         allow_evil = affection_points >= 500
+        if mode == "mode_default":
+            allow_evil = False
 
         wellbeing_prompt, wellbeing_date = await self._get_wellbeing_prompt(
             message.author,
@@ -1184,8 +1308,27 @@ Respond naturally in character. Keep responses concise.
                 message.guild.id,
                 allow_evil=allow_evil
             )
+
+        if message.guild:
+            try:
+                guild_emojis = await get_guild_emojis(self.bot, message.guild)
+                response = replace_custom_emojis(response, guild_emojis)
+            except Exception as exc:
+                logger.warning("Failed to normalize guild emojis: %s", exc)
             
-        sent = await message.reply(response, mention_author=False)
+        sent = await handle_agentic_actions(message, response)
+        if sent is None:
+            persona_manager = getattr(self.bot, "persona_manager", None)
+            if persona_manager:
+                evil_mode_enabled = allow_evil and await get_evil_mode(message.guild.id)
+                sent = await persona_manager.send_as_mode(
+                    channel=message.channel,
+                    content=response,
+                    mode_id=mode,
+                    evil_mode=evil_mode_enabled,
+                )
+            else:
+                sent = await message.reply(response, mention_author=False)
 
         # Manage conversation state
         if mentioned or has_trigger:
@@ -1204,7 +1347,7 @@ Respond naturally in character. Keep responses concise.
             sent.id,
             sent.author.id,
             sent.author.display_name,
-            response,
+            sent.content,
             reply_to_username=message.author.display_name
         )
 

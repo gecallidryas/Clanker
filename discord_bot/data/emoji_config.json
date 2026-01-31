@@ -1,0 +1,119 @@
+{
+  "emojis": {
+    "tada": {
+      "id": "1466380598535782410",
+      "animated": true,
+      "usage": "when user calls femmy or yumi by name",
+      "modes": ["all"],
+      "conditions": {}
+    },
+    "mikucinema": {
+      "id": "1466380594312249385",
+      "animated": false,
+      "usage": "when user is being dramatic, sarcastic, or dumb",
+      "modes": ["all"],
+      "conditions": {}
+    },
+    "ban": {
+      "id": "1466380556613980265",
+      "animated": true,
+      "usage": "when banning someone",
+      "modes": ["all"],
+      "conditions": {}
+    },
+    "thisisfinefrog": {
+      "id": "1466380478734008341",
+      "animated": false,
+      "usage": "when user bullies or is rude to bot",
+      "modes": ["all"],
+      "conditions": {}
+    },
+    "pout": {
+      "id": "1466380471134064817",
+      "animated": false,
+      "usage": "when user makes bot annoyed or angry",
+      "modes": ["all"],
+      "conditions": {}
+    },
+    "what": {
+      "id": "1467187836045496591",
+      "animated": false,
+      "usage": "when user says something shocking or surprising",
+      "modes": ["all"],
+      "conditions": {}
+    },
+    "inlovehearts": {
+      "id": "1466380463080865966",
+      "animated": false,
+      "usage": "affectionate response to beloved user",
+      "modes": ["mode_femboy"],
+      "conditions": {"min_affection": 800}
+    },
+    "twin_spin": {
+      "id": "1467187207491031243",
+      "animated": true,
+      "usage": "excited or happy response",
+      "modes": ["mode_femboy"],
+      "conditions": {"min_affection": 500}
+    },
+    "sneakpeekcat": {
+      "id": "1467187672450728017",
+      "animated": true,
+      "usage": "when user mentions femmy's name",
+      "modes": ["mode_femboy"],
+      "conditions": {}
+    },
+    "horny": {
+      "id": "1466380460723798028",
+      "animated": false,
+      "usage": "flirty or suggestive response",
+      "modes": ["mode_femboy"],
+      "conditions": {"evil_mode": true}
+    },
+    "aah_openingmouth_horny": {
+      "id": "1466380414309367921",
+      "animated": false,
+      "usage": "flirty or suggestive response",
+      "modes": ["mode_femboy"],
+      "conditions": {"evil_mode": true}
+    }
+  },
+  "general_emojis": [
+    "<:smh:1466380596266799199>",
+    "<:meowsadpats:1466380592332406834>",
+    "<:meowpatshappy:1466380589912428554>",
+    "<:inloove:1466380588129980426>",
+    "<:holdingheartemoji:1466380585978040421>",
+    "<a:happyemoji:1466380582924714182>",
+    "<:handsyellowheartredyt:1466380579816865905>",
+    "<:happy_normalblush:1466380577560334474>",
+    "<:facewithbagsundereyes:1466380575358324882>",
+    "<a:eyebrowflashsmirk:1466380572011004108>",
+    "<:erm:1466380569637294093>",
+    "<a:doropatfast:1466380567560982548>",
+    "<:cutesybite:1466380565442728202>",
+    "<:cutepet:1466380563412811797>",
+    "<:browhat:1466380561412264111>",
+    "<:Annoyed:1466380554793652244>",
+    "<:Youmesittingalone:1466380484899639330>",
+    "<:uhmmmm_sweating:1466380482437578753>",
+    "<:slay_christmas_hat:1466380476200648847>",
+    "<:sendlove:1466380472933285942>",
+    "<:ohmygosh:1466380468500041784>",
+    "<:kiss:1466380465756967023>",
+    "<a:girlblowkiss:1466380457938780231>",
+    "<:ermactually_nerd:1466380453136306310>",
+    "<:devilhandshake:1466380450271330494>",
+    "<:cutecrying:1466380447671124007>",
+    "<:cuteblushinghearts:1466380445355868233>",
+    "<:crying:1466380442486968330>",
+    "<:catblush:1466380439928180788>",
+    "<:browhat_facepalm:1466380437352878111>",
+    "<a:babyhm:1466380434567856210>",
+    "<:awwwwsocuteblush:1466380430017036308>",
+    "<:adoring:1466380420395434117>",
+    "<:actingcute:1466380416910102661>",
+    "<:a_bit_shy:1466380410815643749>",
+    "<:whoknows:1467187481052057601>"
+  ]
+}

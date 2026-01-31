@@ -15,7 +15,9 @@ Commands:
 
 import os
 import asyncio
+import json
 import psutil
+import re
 from datetime import datetime
 from pathlib import Path
 
@@ -72,6 +74,70 @@ HELP_INTROS = {
 }
 
 logger = get_logger(__name__)
+
+EMBED_JSON_PATTERN = re.compile(r"```json\s*(\{.*?\})\s*```", re.DOTALL)
+EMBED_COLOR_MAP = {
+    "red": "ff4d4d",
+    "dark red": "8b0000",
+    "maroon": "800000",
+    "pink": "ff69b4",
+    "hot pink": "ff1493",
+    "purple": "9b59b6",
+    "blue": "3498db",
+    "cyan": "00bcd4",
+    "teal": "1abc9c",
+    "green": "2ecc71",
+    "lime": "7fff00",
+    "yellow": "f1c40f",
+    "orange": "e67e22",
+    "gold": "f4d03f",
+    "black": "000000",
+    "white": "ffffff",
+    "gray": "7f8c8d",
+    "grey": "7f8c8d",
+}
+
+
+def _extract_embed_json(text: str) -> dict | None:
+    if not text:
+        return None
+    match = EMBED_JSON_PATTERN.search(text)
+    payload = match.group(1) if match else None
+    if payload:
+        try:
+            return json.loads(payload)
+        except json.JSONDecodeError:
+            return None
+    stripped = text.strip()
+    if stripped.startswith("{") and stripped.endswith("}"):
+        try:
+            return json.loads(stripped)
+        except json.JSONDecodeError:
+            return None
+    return None
+
+
+def _parse_embed_color(value) -> discord.Color:
+    if value is None:
+        return discord.Color.default()
+    if isinstance(value, int):
+        return discord.Color(value)
+    if not isinstance(value, str):
+        return discord.Color.default()
+    raw = value.strip().lower()
+    if not raw:
+        return discord.Color.default()
+    if raw in EMBED_COLOR_MAP:
+        raw = EMBED_COLOR_MAP[raw]
+    if raw.startswith("#"):
+        raw = raw[1:]
+    if raw.startswith("0x"):
+        raw = raw[2:]
+    if len(raw) == 3 and all(c in "0123456789abcdef" for c in raw):
+        raw = "".join(c * 2 for c in raw)
+    if len(raw) == 6 and all(c in "0123456789abcdef" for c in raw):
+        return discord.Color(int(raw, 16))
+    return discord.Color.default()
 
 
 async def _is_owner_check(interaction: discord.Interaction) -> bool:
@@ -726,6 +792,107 @@ Text to translate:
         )
         embed.add_field(name="Original", value=text[:1024], inline=False)
         embed.add_field(name=f"? {target_lang.title()}", value=translation[:1024], inline=False)
+
+        await interaction.followup.send(embed=embed)
+
+        try:
+            await increment_stat("messages_processed")
+        except Exception as e:
+            logger.warning("Failed to increment messages_processed: %s", e)
+
+    @app_commands.command(name="generate_embed", description="Describe an embed and I'll build it.")
+    @app_commands.describe(prompt="Describe the embed (title, color, fields, footer, etc.)")
+    async def generate_embed_slash(self, interaction: discord.Interaction, prompt: str):
+        if not interaction.guild:
+            await interaction.response.send_message("Use this command in a server.", ephemeral=True)
+            return
+        if not interaction.user.guild_permissions.manage_messages:
+            await interaction.response.send_message(
+                "Missing permissions: Manage Messages.",
+                ephemeral=True,
+            )
+            return
+
+        mode = await get_server_mode(interaction.guild.id)
+        if not await ai_limiter.acquire(interaction.user.id):
+            retry_after = ai_limiter.get_retry_after(interaction.user.id)
+            await interaction.response.send_message(
+                get_rate_limit_message(mode, retry_after),
+                ephemeral=True,
+            )
+            return
+
+        await interaction.response.defer(thinking=True)
+
+        ai_prompt = f"""
+You are a JSON generator for Discord embeds.
+Return a single JSON object with this schema:
+{{
+  "title": "string",
+  "description": "string",
+  "color": "hex string like #FF00FF or 0xFF00FF (convert color names to hex)",
+  "fields": [{{"name": "string", "value": "string", "inline": false}}],
+  "footer": "string"
+}}
+
+Rules:
+- Output ONLY valid JSON. No markdown, no commentary.
+- Omit fields that are not requested (use empty strings or empty list).
+- Max 25 fields.
+- Keep field values concise.
+
+User request:
+{prompt}
+"""
+
+        try:
+            response_text, _ = await generate_guild_gemini_text(interaction.guild.id, ai_prompt)
+        except RuntimeError:
+            await interaction.followup.send(
+                "Embed generator busy, try again later.",
+                ephemeral=True,
+            )
+            return
+        except GuildConfigError:
+            await interaction.followup.send(
+                "This server hasn't configured Gemini keys yet. "
+                "Ask an admin to upload keys with /config env upload.",
+                ephemeral=True,
+            )
+            return
+        except Exception as e:
+            await interaction.followup.send(f"Embed generation failed: {e}", ephemeral=True)
+            return
+
+        data = _extract_embed_json(response_text)
+        if not data:
+            await interaction.followup.send(
+                "AI didn't return valid embed JSON. Try rephrasing.",
+                ephemeral=True,
+            )
+            return
+
+        embed = discord.Embed(
+            title=(data.get("title") or None),
+            description=(data.get("description") or None),
+            color=_parse_embed_color(data.get("color")),
+        )
+
+        fields = data.get("fields") or []
+        if isinstance(fields, list):
+            for field in fields[:25]:
+                if not isinstance(field, dict):
+                    continue
+                name = str(field.get("name") or "").strip()
+                value = str(field.get("value") or "").strip()
+                if not name or not value:
+                    continue
+                inline = bool(field.get("inline")) if "inline" in field else False
+                embed.add_field(name=name[:256], value=value[:1024], inline=inline)
+
+        footer = data.get("footer")
+        if footer:
+            embed.set_footer(text=str(footer)[:2048])
 
         await interaction.followup.send(embed=embed)
 

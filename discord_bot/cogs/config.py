@@ -28,6 +28,21 @@ from utils.db_handler import (
     cleanup_guild_audit,
     get_evil_mode,
     set_evil_mode,
+    add_staff_role,
+    remove_staff_role,
+    get_staff_roles,
+    get_mod_log_channel_id,
+    set_mod_log_channel_id,
+    get_autorole_config,
+    set_autorole_id,
+    set_autorole_enabled,
+    get_welcome_config,
+    set_welcome_channel_id,
+    set_welcome_enabled,
+    set_welcome_message_template,
+    set_dm_welcome_message,
+    set_dm_welcome_enabled,
+    get_dm_welcome_enabled,
 )
 from utils.encryption import get_encryption
 from utils.guild_ai import (
@@ -106,6 +121,10 @@ CATEGORY_FIELDS = {
 
 class Config(commands.Cog):
     config = app_commands.Group(name="config", description="Guild configuration")
+    staff_group = app_commands.Group(name="staff", description="Manage bot staff roles")
+    modlog_group = app_commands.Group(name="modlog", description="Moderation log channel")
+    autorole_group = app_commands.Group(name="autorole", description="Auto-role settings")
+    welcome_group = app_commands.Group(name="welcome", description="Welcome message settings")
 
     def __init__(self, bot: commands.Bot) -> None:
         self.bot = bot
@@ -704,7 +723,7 @@ class Config(commands.Cog):
         if not await self._require_guild(interaction):
             return
         await interaction.response.send_message(
-            "Use a subcommand: evil.",
+            "Use a subcommand: evil, autorole, welcome.",
             ephemeral=True,
         )
 
@@ -736,6 +755,62 @@ class Config(commands.Cog):
         else:
             await interaction.response.send_message("Usage: `/config toggle evil on|off`", ephemeral=True)
 
+    @toggle_group.command(name="autorole", description="Enable or disable auto-role.")
+    @app_commands.checks.has_permissions(administrator=True)
+    @app_commands.describe(state="on/off (leave empty to view)")
+    async def toggle_autorole(self, interaction: discord.Interaction, state: Optional[str] = None):
+        if not await self._require_guild(interaction):
+            return
+        if not state:
+            config = await get_autorole_config(interaction.guild.id)
+            status = "ENABLED" if config.get("autorole_enabled") else "DISABLED"
+            await interaction.response.send_message(
+                f"Auto-role is currently **{status}**.",
+                ephemeral=True,
+            )
+            return
+        if not await self._require_auth(interaction):
+            return
+        state_value = state.lower().strip()
+        if state_value in {"on", "enable", "true", "yes"}:
+            await set_autorole_enabled(interaction.guild.id, True)
+            await add_guild_config_audit(interaction.guild.id, interaction.user.id, "autorole_on")
+            await interaction.response.send_message("Auto-role enabled.", ephemeral=True)
+        elif state_value in {"off", "disable", "false", "no"}:
+            await set_autorole_enabled(interaction.guild.id, False)
+            await add_guild_config_audit(interaction.guild.id, interaction.user.id, "autorole_off")
+            await interaction.response.send_message("Auto-role disabled.", ephemeral=True)
+        else:
+            await interaction.response.send_message("Usage: `/config toggle autorole on|off`", ephemeral=True)
+
+    @toggle_group.command(name="welcome", description="Enable or disable welcome messages.")
+    @app_commands.checks.has_permissions(administrator=True)
+    @app_commands.describe(state="on/off (leave empty to view)")
+    async def toggle_welcome(self, interaction: discord.Interaction, state: Optional[str] = None):
+        if not await self._require_guild(interaction):
+            return
+        if not state:
+            config = await get_welcome_config(interaction.guild.id)
+            status = "ENABLED" if config.get("welcome_enabled") else "DISABLED"
+            await interaction.response.send_message(
+                f"Welcome messages are currently **{status}**.",
+                ephemeral=True,
+            )
+            return
+        if not await self._require_auth(interaction):
+            return
+        state_value = state.lower().strip()
+        if state_value in {"on", "enable", "true", "yes"}:
+            await set_welcome_enabled(interaction.guild.id, True)
+            await add_guild_config_audit(interaction.guild.id, interaction.user.id, "welcome_on")
+            await interaction.response.send_message("Welcome messages enabled.", ephemeral=True)
+        elif state_value in {"off", "disable", "false", "no"}:
+            await set_welcome_enabled(interaction.guild.id, False)
+            await add_guild_config_audit(interaction.guild.id, interaction.user.id, "welcome_off")
+            await interaction.response.send_message("Welcome messages disabled.", ephemeral=True)
+        else:
+            await interaction.response.send_message("Usage: `/config toggle welcome on|off`", ephemeral=True)
+
     def _parse_env(self, content: str) -> Tuple[Dict[str, str], List[str], List[str], List[str]]:
         parsed: Dict[str, str] = {}
         duplicates: List[str] = []
@@ -761,6 +836,349 @@ class Config(commands.Cog):
             parsed[key] = value.strip()
 
         return parsed, duplicates, unknown, errors
+
+    # =========================
+    # Auto-role
+    # =========================
+
+    @autorole_group.command(name="set", description="Set the auto-role for new members.")
+    @app_commands.checks.has_permissions(administrator=True)
+    @app_commands.describe(role="Role to assign on join")
+    async def autorole_set(self, interaction: discord.Interaction, role: discord.Role):
+        if not await self._require_guild(interaction):
+            return
+        if not await self._require_auth(interaction):
+            return
+        await set_autorole_id(interaction.guild.id, role.id)
+        await set_autorole_enabled(interaction.guild.id, True)
+        await interaction.response.send_message(
+            f"Auto-role set to {role.mention}.",
+            ephemeral=True,
+        )
+
+    @autorole_group.command(name="clear", description="Clear the auto-role.")
+    @app_commands.checks.has_permissions(administrator=True)
+    async def autorole_clear(self, interaction: discord.Interaction):
+        if not await self._require_guild(interaction):
+            return
+        if not await self._require_auth(interaction):
+            return
+        await set_autorole_id(interaction.guild.id, None)
+        await set_autorole_enabled(interaction.guild.id, False)
+        await interaction.response.send_message("Auto-role disabled.", ephemeral=True)
+
+    @autorole_group.command(name="view", description="View the current auto-role.")
+    @app_commands.checks.has_permissions(administrator=True)
+    async def autorole_view(self, interaction: discord.Interaction):
+        if not await self._require_guild(interaction):
+            return
+        config = await get_autorole_config(interaction.guild.id)
+        role_id = config.get("autorole_id")
+        enabled = config.get("autorole_enabled")
+        if not role_id:
+            await interaction.response.send_message(
+                f"Auto-role is {'enabled' if enabled else 'disabled'}, but no role is set.",
+                ephemeral=True,
+            )
+            return
+        role = interaction.guild.get_role(role_id)
+        role_display = role.mention if role else f"(deleted role {role_id})"
+        await interaction.response.send_message(
+            f"Auto-role: {role_display} (enabled: {enabled}).",
+            ephemeral=True,
+        )
+
+    # =========================
+    # Welcome
+    # =========================
+
+    @welcome_group.command(name="channel", description="Set the welcome channel.")
+    @app_commands.checks.has_permissions(administrator=True)
+    @app_commands.describe(channel="Channel for welcome messages")
+    async def welcome_channel(self, interaction: discord.Interaction, channel: discord.TextChannel):
+        if not await self._require_guild(interaction):
+            return
+        if not await self._require_auth(interaction):
+            return
+        await set_welcome_channel_id(interaction.guild.id, channel.id)
+        await set_welcome_enabled(interaction.guild.id, True)
+        await interaction.response.send_message(
+            f"Welcome messages will be sent to {channel.mention}.",
+            ephemeral=True,
+        )
+
+    @welcome_group.command(name="clear", description="Disable welcome messages and clear the channel.")
+    @app_commands.checks.has_permissions(administrator=True)
+    async def welcome_clear(self, interaction: discord.Interaction):
+        if not await self._require_guild(interaction):
+            return
+        if not await self._require_auth(interaction):
+            return
+        await set_welcome_channel_id(interaction.guild.id, None)
+        await set_welcome_enabled(interaction.guild.id, False)
+        await interaction.response.send_message("Welcome messages disabled.", ephemeral=True)
+
+    @welcome_group.command(name="test", description="Send a test welcome message.")
+    @app_commands.checks.has_permissions(administrator=True)
+    async def welcome_test(self, interaction: discord.Interaction):
+        if not await self._require_guild(interaction):
+            return
+        config = await get_welcome_config(interaction.guild.id)
+        channel_id = config.get("welcome_channel_id")
+        if not channel_id:
+            await interaction.response.send_message("No welcome channel set.", ephemeral=True)
+            return
+        channel = interaction.guild.get_channel(channel_id)
+        if not channel:
+            await interaction.response.send_message("Welcome channel not found.", ephemeral=True)
+            return
+        await channel.send(f"Test welcome message for {interaction.user.mention}!")
+        await interaction.response.send_message("Sent a test welcome message.", ephemeral=True)
+
+    @welcome_group.command(name="set_message", description="Set a custom welcome message template.")
+    @app_commands.checks.has_permissions(administrator=True)
+    @app_commands.describe(
+        template="Use {member}, {member_name}, {member_count}, {member_ordinal}, {guild}."
+    )
+    async def welcome_set_message(self, interaction: discord.Interaction, template: str):
+        if not await self._require_guild(interaction):
+            return
+        if not await self._require_auth(interaction):
+            return
+        cleaned = (template or "").strip()
+        cleaned = cleaned.replace("\\n", "\n")
+        if not cleaned:
+            await interaction.response.send_message("Template cannot be empty.", ephemeral=True)
+            return
+        if len(cleaned) > 3500:
+            await interaction.response.send_message(
+                "Template is too long. Please keep it under 3500 characters.",
+                ephemeral=True,
+            )
+            return
+        await set_welcome_message_template(interaction.guild.id, cleaned)
+        await add_guild_config_audit(
+            interaction.guild.id,
+            interaction.user.id,
+            "welcome_template_set",
+        )
+        await interaction.response.send_message("Welcome template updated.", ephemeral=True)
+
+    @welcome_group.command(name="view_message", description="View the welcome message template.")
+    @app_commands.checks.has_permissions(administrator=True)
+    async def welcome_view_message(self, interaction: discord.Interaction):
+        if not await self._require_guild(interaction):
+            return
+        config = await get_welcome_config(interaction.guild.id)
+        template = config.get("welcome_message_template")
+        if not template:
+            await interaction.response.send_message("No custom welcome template set.", ephemeral=True)
+            return
+        await interaction.response.send_message(f"Current template:\n{template}", ephemeral=True)
+
+    @welcome_group.command(name="clear_message", description="Clear the welcome message template.")
+    @app_commands.checks.has_permissions(administrator=True)
+    async def welcome_clear_message(self, interaction: discord.Interaction):
+        if not await self._require_guild(interaction):
+            return
+        if not await self._require_auth(interaction):
+            return
+        await set_welcome_message_template(interaction.guild.id, None)
+        await add_guild_config_audit(
+            interaction.guild.id,
+            interaction.user.id,
+            "welcome_template_clear",
+        )
+        await interaction.response.send_message("Welcome template cleared.", ephemeral=True)
+
+    @welcome_group.command(name="set_dm_message", description="Set the DM welcome message.")
+    @app_commands.checks.has_permissions(administrator=True)
+    @app_commands.describe(message="Message sent to new members via DM (use \\n for line breaks)")
+    async def welcome_set_dm_message(self, interaction: discord.Interaction, message: str):
+        if not await self._require_guild(interaction):
+            return
+        if not await self._require_auth(interaction):
+            return
+        cleaned = (message or "").strip()
+        cleaned = cleaned.replace("\\n", "\n")
+        if not cleaned:
+            await interaction.response.send_message("Message cannot be empty.", ephemeral=True)
+            return
+        if len(cleaned) > 3500:
+            await interaction.response.send_message(
+                "Message is too long. Please keep it under 3500 characters.",
+                ephemeral=True,
+            )
+            return
+        await set_dm_welcome_message(interaction.guild.id, cleaned)
+        await add_guild_config_audit(
+            interaction.guild.id,
+            interaction.user.id,
+            "dm_welcome_set",
+        )
+        await interaction.response.send_message("DM welcome message updated.", ephemeral=True)
+
+    @welcome_group.command(name="clear_dm_message", description="Clear the DM welcome message.")
+    @app_commands.checks.has_permissions(administrator=True)
+    async def welcome_clear_dm_message(self, interaction: discord.Interaction):
+        if not await self._require_guild(interaction):
+            return
+        if not await self._require_auth(interaction):
+            return
+        await set_dm_welcome_message(interaction.guild.id, None)
+        await add_guild_config_audit(
+            interaction.guild.id,
+            interaction.user.id,
+            "dm_welcome_clear",
+        )
+        await interaction.response.send_message("DM welcome message cleared.", ephemeral=True)
+
+    @welcome_group.command(name="toggle_dm", description="Enable or disable DM welcome messages.")
+    @app_commands.checks.has_permissions(administrator=True)
+    @app_commands.describe(state="on/off (leave empty to view)")
+    async def welcome_toggle_dm(self, interaction: discord.Interaction, state: Optional[str] = None):
+        if not await self._require_guild(interaction):
+            return
+        if not state:
+            enabled = await get_dm_welcome_enabled(interaction.guild.id)
+            await interaction.response.send_message(
+                f"DM welcome messages are currently **{'ENABLED' if enabled else 'DISABLED'}**.",
+                ephemeral=True,
+            )
+            return
+        if not await self._require_auth(interaction):
+            return
+        state_value = state.lower().strip()
+        if state_value in {"on", "enable", "true", "yes"}:
+            await set_dm_welcome_enabled(interaction.guild.id, True)
+            await add_guild_config_audit(
+                interaction.guild.id,
+                interaction.user.id,
+                "dm_welcome_on",
+            )
+            await interaction.response.send_message("DM welcome messages enabled.", ephemeral=True)
+        elif state_value in {"off", "disable", "false", "no"}:
+            await set_dm_welcome_enabled(interaction.guild.id, False)
+            await add_guild_config_audit(
+                interaction.guild.id,
+                interaction.user.id,
+                "dm_welcome_off",
+            )
+            await interaction.response.send_message("DM welcome messages disabled.", ephemeral=True)
+        else:
+            await interaction.response.send_message("Usage: `/welcome toggle_dm on|off`", ephemeral=True)
+
+    # =========================
+    # Staff Roles
+    # =========================
+
+    @staff_group.command(name="add", description="Add a role as bot staff.")
+    @app_commands.checks.has_permissions(administrator=True)
+    @app_commands.describe(role="Role to grant staff access", level="1=Mod, 2=Admin")
+    @app_commands.choices(level=[
+        app_commands.Choice(name="1 (Mod)", value=1),
+        app_commands.Choice(name="2 (Admin)", value=2),
+    ])
+    async def staff_add(
+        self,
+        interaction: discord.Interaction,
+        role: discord.Role,
+        level: app_commands.Choice[int],
+    ):
+        if not await self._require_guild(interaction):
+            return
+        await add_staff_role(interaction.guild.id, role.id, level.value)
+        await interaction.response.send_message(
+            f"Added {role.mention} as bot staff (level {level.value}).",
+            ephemeral=True,
+        )
+
+    @staff_group.command(name="remove", description="Remove a role from bot staff.")
+    @app_commands.checks.has_permissions(administrator=True)
+    @app_commands.describe(role="Role to remove from staff")
+    async def staff_remove(
+        self,
+        interaction: discord.Interaction,
+        role: discord.Role,
+    ):
+        if not await self._require_guild(interaction):
+            return
+        removed = await remove_staff_role(interaction.guild.id, role.id)
+        if removed:
+            await interaction.response.send_message(
+                f"Removed {role.mention} from bot staff.",
+                ephemeral=True,
+            )
+        else:
+            await interaction.response.send_message(
+                f"{role.mention} was not configured as bot staff.",
+                ephemeral=True,
+            )
+
+    @staff_group.command(name="list", description="List configured bot staff roles.")
+    @app_commands.checks.has_permissions(administrator=True)
+    async def staff_list(self, interaction: discord.Interaction):
+        if not await self._require_guild(interaction):
+            return
+        entries = await get_staff_roles(interaction.guild.id)
+        if not entries:
+            await interaction.response.send_message("No staff roles configured.", ephemeral=True)
+            return
+        lines = []
+        for role_id, level in sorted(entries, key=lambda item: item[1], reverse=True):
+            role = interaction.guild.get_role(role_id)
+            role_name = role.mention if role else f"(deleted role {role_id})"
+            lines.append(f"Level {level}: {role_name}")
+        await interaction.response.send_message("\n".join(lines), ephemeral=True)
+
+    # =========================
+    # Mod Log
+    # =========================
+
+    @modlog_group.command(name="set", description="Set the moderation log channel.")
+    @app_commands.checks.has_permissions(administrator=True)
+    @app_commands.describe(channel="Channel to receive mod logs")
+    async def modlog_set(
+        self,
+        interaction: discord.Interaction,
+        channel: discord.TextChannel,
+    ):
+        if not await self._require_guild(interaction):
+            return
+        await set_mod_log_channel_id(interaction.guild.id, channel.id)
+        await interaction.response.send_message(
+            f"Moderation logs will be sent to {channel.mention}.",
+            ephemeral=True,
+        )
+
+    @modlog_group.command(name="clear", description="Disable moderation logs.")
+    @app_commands.checks.has_permissions(administrator=True)
+    async def modlog_clear(self, interaction: discord.Interaction):
+        if not await self._require_guild(interaction):
+            return
+        await set_mod_log_channel_id(interaction.guild.id, None)
+        await interaction.response.send_message("Moderation logs disabled.", ephemeral=True)
+
+    @modlog_group.command(name="view", description="View the current mod log channel.")
+    @app_commands.checks.has_permissions(administrator=True)
+    async def modlog_view(self, interaction: discord.Interaction):
+        if not await self._require_guild(interaction):
+            return
+        channel_id = await get_mod_log_channel_id(interaction.guild.id)
+        if not channel_id:
+            await interaction.response.send_message("No mod log channel set.", ephemeral=True)
+            return
+        channel = interaction.guild.get_channel(channel_id)
+        if channel:
+            await interaction.response.send_message(
+                f"Mod logs are posted in {channel.mention}.",
+                ephemeral=True,
+            )
+        else:
+            await interaction.response.send_message(
+                f"Mod log channel set to ID {channel_id}, but I can't access it.",
+                ephemeral=True,
+            )
 
 
 async def setup(bot: commands.Bot):

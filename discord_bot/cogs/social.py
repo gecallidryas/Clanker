@@ -23,53 +23,25 @@ from utils.app_emojis import (
     filter_emojis_by_prefix,
     format_custom_emoji,
     get_application_emojis,
-    FEMMY_EMOJI_PREFIX,
-    YUMI_EMOJI_PREFIX,
 )
-from utils.db_handler import get_server_mode, set_server_mode, get_evil_mode, set_evil_mode
+from utils.db_handler import (
+    get_server_mode,
+    set_server_mode,
+    get_evil_mode,
+    set_evil_mode,
+    get_autorole_config,
+    get_welcome_config,
+    get_dm_welcome_message,
+    get_dm_welcome_enabled,
+)
+from utils.guild_ai import generate_guild_gemini_text, GuildConfigError
+from utils.logger import get_logger
+from modes import get_mode_profile, get_all_modes, resolve_mode_key
+
+logger = get_logger(__name__)
 
 
-# Mode display information
-MODE_INFO = {
-    "mode_femboy": {
-        "name": "Obedient Femboy Brother",
-        "emoji": "🎀",
-        "description": "Submissive, cute, energetic, and helpful. Calls you Nii-chan/Onee-chan~",
-        "aliases": ["femboy", "bro", "brother"]
-    },
-    "mode_tsundere": {
-        "name": "Tsundere Younger Sister",
-        "emoji": "😤",
-        "description": "It's not like I want to help you or anything! Baka!",
-        "aliases": ["tsundere", "tsun", "sis"]
-    },
-    "mode_oneesan": {
-        "name": "Caring Older Sister",
-        "emoji": "💕",
-        "description": "Ara ara~ Mature, soothing, and motherly. Makes sure you're eating well~",
-        "aliases": ["oneesan", "onesan", "big sis", "ara"]
-    }
-}
-
-# Mention reactions per mode (used when the bot is mentioned without a message)
-MENTION_REACTIONS = {
-    "mode_femboy": [
-        "Hi hi! Need me, Nii-chan? I'm right here~",
-        "Ehehe, you called? I'm ready to help!",
-        "I'm here! Tell me what you need and I'll do my best~"
-    ],
-    "mode_tsundere": [
-        "Hmph. What is it? It's not like I wanted to respond or anything.",
-        "Baka... you called me for that? Fine, what do you want?",
-        "Don't just ping me for no reason... say what you need."
-    ],
-    "mode_oneesan": [
-        "Ara ara~ Yes, my dear? How can I help you?",
-        "I'm here, little one. What do you need?",
-        "Did you call for me? I'm listening, dear."
-    ]
-}
-
+# Mode profiles are defined in discord_bot/modes
 
 class Social(commands.Cog):
     """
@@ -94,12 +66,8 @@ class Social(commands.Cog):
         return filter_emojis_by_prefix(emojis, prefix)
 
     async def _get_mode_icon(self, mode_key: str) -> str:
-        if mode_key == "mode_femboy":
-            prefix = FEMMY_EMOJI_PREFIX
-        elif mode_key == "mode_oneesan":
-            prefix = YUMI_EMOJI_PREFIX
-        else:
-            prefix = ""
+        profile = get_mode_profile(mode_key)
+        prefix = profile.emoji_prefix or ""
 
         if prefix:
             emojis = await self._get_app_emojis_by_prefix(prefix)
@@ -108,7 +76,16 @@ class Social(commands.Cog):
                 if token:
                     return token
 
-        return MODE_INFO.get(mode_key, MODE_INFO["mode_femboy"])["emoji"]
+        return ""
+
+    async def _set_presence_for_mode(self, mode_key: str) -> None:
+        profile = get_mode_profile(mode_key)
+        activity_name = profile.activity_watching or "over you"
+        activity = discord.Activity(
+            type=discord.ActivityType.watching,
+            name=activity_name,
+        )
+        await self.bot.change_presence(activity=activity)
 
     def _is_mention_only(self, message: discord.Message) -> bool:
         """Return True when the message only mentions the bot."""
@@ -116,6 +93,43 @@ class Social(commands.Cog):
         content = content.replace(f"<@{self.bot.user.id}>", "")
         content = content.replace(f"<@!{self.bot.user.id}>", "")
         return content.strip() == ""
+
+    def _format_ordinal(self, number: int) -> str:
+        if number <= 0:
+            return str(number)
+        if 10 <= (number % 100) <= 20:
+            suffix = "th"
+        else:
+            suffix = {1: "st", 2: "nd", 3: "rd"}.get(number % 10, "th")
+        return f"{number}{suffix}"
+
+    def _apply_welcome_template(
+        self,
+        template: str,
+        member: discord.Member,
+        member_count: int,
+    ) -> str:
+        ordinal = self._format_ordinal(member_count)
+        replacements = {
+            "{member}": member.mention,
+            "{member_name}": member.display_name,
+            "{member_count}": str(member_count),
+            "{member_ordinal}": ordinal,
+            "{guild}": member.guild.name,
+        }
+        rendered = template
+        for key, value in replacements.items():
+            rendered = rendered.replace(key, value)
+        return rendered
+
+    def _ensure_join_count_sentence(self, text: str, member_count: int) -> str:
+        ordinal = self._format_ordinal(member_count)
+        if str(member_count) in text or ordinal in text:
+            return text
+        sentence = f"You are the {ordinal} member to join~"
+        if text.endswith((".", "!", "?", "~")):
+            return f"{text} {sentence}"
+        return f"{text}. {sentence}"
     
     @commands.command(name="evil", aliases=["uncensored"])
     @commands.has_permissions(manage_guild=True)
@@ -134,10 +148,10 @@ class Social(commands.Cog):
         state = state.lower()
         if state in ["on", "enable", "true", "yes"]:
             await set_evil_mode(ctx.guild.id, True)
-            await ctx.send("😈 **Evil Mode ENABLED**. Responses will now use uncensored models (Venice/Hermes).")
+            await ctx.send("😈 Evil Mode ENABLED. Responses will now use uncensored models (Venice/Hermes).")
         elif state in ["off", "disable", "false", "no"]:
             await set_evil_mode(ctx.guild.id, False)
-            await ctx.send("😇 **Evil Mode DISABLED**. Returning to standard safety protocols.")
+            await ctx.send("😇 Evil Mode DISABLED. Returning to standard safety protocols.")
         else:
             await ctx.send("Usage: `!evil on` or `!evil off`")
 
@@ -159,12 +173,12 @@ class Social(commands.Cog):
         if state in ["on", "enable", "true", "yes"]:
             await set_evil_mode(interaction.guild.id, True)
             await interaction.response.send_message(
-                "😈 **Evil Mode ENABLED**. Responses will now use uncensored models (Venice/Hermes)."
+                "😈 Evil Mode ENABLED. Responses will now use uncensored models (Venice/Hermes)."
             )
         elif state in ["off", "disable", "false", "no"]:
             await set_evil_mode(interaction.guild.id, False)
             await interaction.response.send_message(
-                "😇 **Evil Mode DISABLED**. Returning to standard safety protocols."
+                "😇 Evil Mode DISABLED. Returning to standard safety protocols."
             )
         else:
             await interaction.response.send_message("Usage: `/evil on` or `/evil off`", ephemeral=True)
@@ -174,7 +188,7 @@ class Social(commands.Cog):
     async def switch_mode(self, ctx: commands.Context, mode_name: str = None):
         """
         Switch the bot's personality mode.
-        
+
         Args:
             mode_name: Personality mode (femboy, tsundere, oneesan)
         """
@@ -182,61 +196,52 @@ class Social(commands.Cog):
         locked_mode = os.getenv("BOT_MODE", "").lower()
         if locked_mode in ("femboy", "tsundere", "oneesan"):
             await ctx.send(
-                "🔒 Mode switching is disabled for this bot instance.\n"
+                "Mode switching is disabled for this bot instance.\n"
                 f"This bot is locked to **{locked_mode}** mode."
             )
             return
-        
+
         if not mode_name:
             await self.show_modes(ctx)
             return
-        
+
         # Normalize mode name
         mode_name = mode_name.lower().strip()
-        
-        # Find matching mode
-        target_mode = None
-        for mode_key, info in MODE_INFO.items():
-            if mode_name in info["aliases"] or mode_name == mode_key:
-                target_mode = mode_key
-                break
-        
+        target_mode = resolve_mode_key(mode_name)
+
         if not target_mode:
             await ctx.send(
-                f"❌ Unknown mode: `{mode_name}`\n"
-                f"Use `!modes` to see available options!"
+                f"Unknown mode: `{mode_name}`\n"
+                "Use `!modes` to see available options!"
             )
             return
-        
+
         # Check if already in this mode
         current_mode = await get_server_mode(ctx.guild.id)
         if current_mode == target_mode:
-            mode_info = MODE_INFO[target_mode]
+            profile = get_mode_profile(target_mode)
             mode_icon = await self._get_mode_icon(target_mode)
-            await ctx.send(
-                f"{mode_icon} Already in **{mode_info['name']}** mode!"
-            )
+            prefix = f"{mode_icon} " if mode_icon else ""
+            await ctx.send(f"{prefix}Already in **{profile.display_name}** mode!")
             return
-        
+
         # Switch mode
         await set_server_mode(ctx.guild.id, target_mode)
-        
-        mode_info = MODE_INFO[target_mode]
+
+        profile = get_mode_profile(target_mode)
         mode_icon = await self._get_mode_icon(target_mode)
-        
-        # Send personality-appropriate confirmation
-        confirmations = {
-            "mode_femboy": f"{mode_icon} Mode switched! Ehehe~ I'll be your cute little sibling now, Nii-chan! ♡",
-            "mode_tsundere": f"{mode_icon} F-fine! I switched modes... It's not like I wanted to or anything! Hmph!",
-            "mode_oneesan": f"{mode_icon} Ara ara~ Mode changed, my dear. Let me take care of you now~ 💕"
-        }
-        
-        await ctx.send(confirmations.get(target_mode, f"{mode_icon} Mode switched!"))
+        prefix = f"{mode_icon} " if mode_icon else ""
+        await ctx.send(f"{prefix}{profile.switch_message}")
+        try:
+            await self._set_presence_for_mode(target_mode)
+        except Exception as exc:
+            logger.warning("Failed to update presence for %s: %s", target_mode, exc)
 
     @app_commands.command(name="mode", description="Switch the bot's personality mode.")
     @app_commands.checks.has_permissions(manage_guild=True)
     @app_commands.describe(mode="Personality mode")
     @app_commands.choices(mode=[
+        app_commands.Choice(name="default", value="default"),
         app_commands.Choice(name="femboy", value="femboy"),
         app_commands.Choice(name="tsundere", value="tsundere"),
         app_commands.Choice(name="oneesan", value="oneesan"),
@@ -249,79 +254,74 @@ class Social(commands.Cog):
         locked_mode = os.getenv("BOT_MODE", "").lower()
         if locked_mode in ("femboy", "tsundere", "oneesan"):
             await interaction.response.send_message(
-                "🔒 Mode switching is disabled for this bot instance.\n"
+                "Mode switching is disabled for this bot instance.\n"
                 f"This bot is locked to **{locked_mode}** mode.",
                 ephemeral=True,
             )
             return
 
         mode_name = mode.value
-        target_mode = None
-        for mode_key, info in MODE_INFO.items():
-            if mode_name in info["aliases"] or mode_name == mode_key:
-                target_mode = mode_key
-                break
+        target_mode = resolve_mode_key(mode_name)
 
         if not target_mode:
             await interaction.response.send_message(
-                f"❌ Unknown mode: `{mode_name}`\nUse `/modes` to see available options!",
+                f"Unknown mode: `{mode_name}`\n"
+                "Use `/modes` to see available options!",
                 ephemeral=True,
             )
             return
 
         current_mode = await get_server_mode(interaction.guild.id)
         if current_mode == target_mode:
-            mode_info = MODE_INFO[target_mode]
+            profile = get_mode_profile(target_mode)
             mode_icon = await self._get_mode_icon(target_mode)
+            prefix = f"{mode_icon} " if mode_icon else ""
             await interaction.response.send_message(
-                f"{mode_icon} Already in **{mode_info['name']}** mode!"
+                f"{prefix}Already in **{profile.display_name}** mode!"
             )
             return
 
         await set_server_mode(interaction.guild.id, target_mode)
-        mode_info = MODE_INFO[target_mode]
+        profile = get_mode_profile(target_mode)
         mode_icon = await self._get_mode_icon(target_mode)
-        confirmations = {
-            "mode_femboy": f"{mode_icon} Mode switched! Ehehe~ I'll be your cute little sibling now, Nii-chan! ♡",
-            "mode_tsundere": f"{mode_icon} F-fine! I switched modes... It's not like I wanted to or anything! Hmph!",
-            "mode_oneesan": f"{mode_icon} Ara ara~ Mode changed, my dear. Let me take care of you now~ 💕",
-        }
-        await interaction.response.send_message(confirmations.get(target_mode, f"{mode_icon} Mode switched!"))
+        prefix = f"{mode_icon} " if mode_icon else ""
+        await interaction.response.send_message(f"{prefix}{profile.switch_message}")
+        try:
+            await self._set_presence_for_mode(target_mode)
+        except Exception as exc:
+            logger.warning("Failed to update presence for %s: %s", target_mode, exc)
 
     @commands.command(name="modes", aliases=["personalities", "personas"])
     async def show_modes(self, ctx: commands.Context):
         """
         Display all available personality modes.
-        
-        TODO:
-            - [ ] Add mode preview
-            - [ ] Show current mode
         """
         current_mode = await get_server_mode(ctx.guild.id)
         current_evil = await get_evil_mode(ctx.guild.id)
-        
+
         embed = discord.Embed(
-            title="🎭 Available Personality Modes",
+            title="Available Personality Modes",
             description="Switch Femmy's personality with `!mode <name>`",
-            color=discord.Color.from_rgb(255, 182, 193)
+            color=discord.Color.from_rgb(255, 182, 193),
         )
-        
-        evil_status = "😈 **Evil Mode**: ON" if current_evil else "😇 **Evil Mode**: OFF"
+
+        evil_status = "😈 Evil Mode: ON" if current_evil else "😇 Evil Mode: OFF"
         embed.add_field(name="System Status", value=evil_status, inline=False)
-        
-        for mode_key, info in MODE_INFO.items():
+
+        for profile in get_all_modes():
+            mode_key = profile.key
             is_current = mode_key == current_mode
-            marker = " ← Current" if is_current else ""
+            marker = " <- Current" if is_current else ""
             mode_icon = await self._get_mode_icon(mode_key)
-            
+            prefix = f"{mode_icon} " if mode_icon else ""
+
             embed.add_field(
-                name=f"{mode_icon} {info['name']}{marker}",
-                value=f"{info['description']}\n*Aliases: {', '.join(info['aliases'])}*",
-                inline=False
+                name=f"{prefix}{profile.display_name}{marker}",
+                value=f"{profile.description}\nAliases: {', '.join(profile.aliases)}",
+                inline=False,
             )
-        
+
         embed.set_footer(text="Manage Guild permission required to change modes")
-        
         await ctx.send(embed=embed)
 
     @app_commands.command(name="modes", description="List all available personality modes.")
@@ -334,41 +334,43 @@ class Social(commands.Cog):
         current_evil = await get_evil_mode(interaction.guild.id)
 
         embed = discord.Embed(
-            title="🎭 Available Personality Modes",
+            title="Available Personality Modes",
             description="Switch Femmy's personality with `/mode`",
             color=discord.Color.from_rgb(255, 182, 193),
         )
 
-        evil_status = "😈 **Evil Mode**: ON" if current_evil else "😇 **Evil Mode**: OFF"
+        evil_status = "😈 Evil Mode: ON" if current_evil else "😇 Evil Mode: OFF"
         embed.add_field(name="System Status", value=evil_status, inline=False)
 
-        for mode_key, info in MODE_INFO.items():
+        for profile in get_all_modes():
+            mode_key = profile.key
             is_current = mode_key == current_mode
-            marker = " ← Current" if is_current else ""
+            marker = " <- Current" if is_current else ""
             mode_icon = await self._get_mode_icon(mode_key)
+            prefix = f"{mode_icon} " if mode_icon else ""
 
             embed.add_field(
-                name=f"{mode_icon} {info['name']}{marker}",
-                value=f"{info['description']}\n*Aliases: {', '.join(info['aliases'])}*",
+                name=f"{prefix}{profile.display_name}{marker}",
+                value=f"{profile.description}\nAliases: {', '.join(profile.aliases)}",
                 inline=False,
             )
 
         embed.set_footer(text="Manage Guild permission required to change modes")
         await interaction.response.send_message(embed=embed)
-    
+
     @commands.command(name="currentmode", aliases=["whatmode"])
     async def show_current_mode(self, ctx: commands.Context):
         """Display the current personality mode."""
         current_mode = await get_server_mode(ctx.guild.id)
         current_evil = await get_evil_mode(ctx.guild.id)
-        info = MODE_INFO.get(current_mode, MODE_INFO["mode_femboy"])
+        profile = get_mode_profile(current_mode)
         mode_icon = await self._get_mode_icon(current_mode)
-        
-        evil_text = "\n😈 (Evil Mode Active)" if current_evil else ""
-        
+        prefix = f"{mode_icon} " if mode_icon else ""
+        evil_text = " 😈 (Evil Mode Active)" if current_evil else ""
+
         await ctx.send(
-            f"{mode_icon} Currently in **{info['name']}** mode!{evil_text}\n"
-            f"*{info['description']}*"
+            f"{prefix}Currently in **{profile.display_name}** mode!{evil_text}\n"
+            f"*{profile.description}*"
         )
 
     @app_commands.command(name="currentmode", description="Show the current personality mode.")
@@ -379,42 +381,111 @@ class Social(commands.Cog):
 
         current_mode = await get_server_mode(interaction.guild.id)
         current_evil = await get_evil_mode(interaction.guild.id)
-        info = MODE_INFO.get(current_mode, MODE_INFO["mode_femboy"])
+        profile = get_mode_profile(current_mode)
         mode_icon = await self._get_mode_icon(current_mode)
-        evil_text = "\n😈 (Evil Mode Active)" if current_evil else ""
+        prefix = f"{mode_icon} " if mode_icon else ""
+        evil_text = " 😈 (Evil Mode Active)" if current_evil else ""
 
         await interaction.response.send_message(
-            f"{mode_icon} Currently in **{info['name']}** mode!{evil_text}\n"
-            f"*{info['description']}*"
+            f"{prefix}Currently in **{profile.display_name}** mode!{evil_text}\n"
+            f"*{profile.description}*"
         )
-    
+
     @commands.Cog.listener()
+
     async def on_member_join(self, member: discord.Member):
         """
-        Send a welcome message when a new member joins.
-        Message style based on current persona.
-        
-        TODO:
-            - [ ] Make this configurable per server
-            - [ ] Add welcome channel configuration
-            - [ ] Implement welcome DMs
+        Handle auto-role assignment and optional AI welcome message.
         """
-        # Get current mode for this server
-        mode = await get_server_mode(member.guild.id)
-        
-        # Personality-based welcome messages
-        welcomes = {
-            "mode_femboy": f"Welcome to the server, {member.mention}! I hope we can be great friends~ ♡ Let me know if you need any help, I'd love to assist you! ✨",
-            "mode_tsundere": f"Oh, {member.mention} joined... I guess you can stay. It's not like we wanted more members or anything! ...Welcome.",
-            "mode_oneesan": f"Ara ara~ Welcome, {member.mention}! Make yourself at home, my dear. If you need anything at all, don't hesitate to ask~ 💕"
-        }
-        
-        # Find system channel
-        if member.guild.system_channel:
+        guild_id = member.guild.id
+        mode = await get_server_mode(guild_id)
+        evil_mode_enabled = await get_evil_mode(guild_id)
+
+        # Auto-role
+        try:
+            autorole_config = await get_autorole_config(guild_id)
+            if autorole_config.get("autorole_enabled") and autorole_config.get("autorole_id"):
+                role = member.guild.get_role(autorole_config["autorole_id"])
+                if role:
+                    await member.add_roles(role, reason="Auto-role assignment")
+        except discord.Forbidden:
+            logger.warning("Missing permissions to assign autorole in %s", member.guild.name)
+        except Exception as exc:
+            logger.error("Auto-role assignment failed in %s: %s", member.guild.name, exc, exc_info=True)
+
+        # AI Welcome
+        welcome_config = await get_welcome_config(guild_id)
+        welcome_enabled = welcome_config.get("welcome_enabled")
+        channel_id = welcome_config.get("welcome_channel_id") if welcome_enabled else None
+        channel = member.guild.get_channel(channel_id) if channel_id else None
+        template = welcome_config.get("welcome_message_template") if welcome_enabled else None
+        member_count = int(getattr(member.guild, "member_count", 0) or 0)
+
+        if channel:
+            if template:
+                welcome_text = self._apply_welcome_template(template, member, member_count)
+            else:
+                prompt = (
+                    "Write one short, cute, friendly welcome sentence for a new Discord member. "
+                    f"Server: {member.guild.name}. User: {member.display_name}. "
+                    f"Persona mode: {mode}. Keep it playful, SFW, and unique."
+                )
+
+                fallback_messages = {
+                    "mode_femboy": f"Welcome to the server, {member.mention}! I hope we can be great friends~",
+                    "mode_tsundere": f"Oh, {member.mention} joined... I guess you can stay. ...Welcome.",
+                    "mode_oneesan": f"Ara ara~ Welcome, {member.mention}! Make yourself at home, my dear~",
+                }
+
+                try:
+                    welcome_text, _ = await generate_guild_gemini_text(guild_id, prompt)
+                    welcome_text = welcome_text.strip()
+                except GuildConfigError:
+                    welcome_text = ""
+                except Exception as exc:
+                    logger.warning("AI welcome failed for %s: %s", member.guild.name, exc)
+                    welcome_text = ""
+
+                if not welcome_text:
+                    welcome_text = fallback_messages.get(mode, fallback_messages["mode_femboy"])
+                else:
+                    if member.mention not in welcome_text:
+                        welcome_text = f"{welcome_text} {member.mention}"
+
+            if member_count > 0:
+                welcome_text = self._ensure_join_count_sentence(welcome_text, member_count)
+
             try:
-                await member.guild.system_channel.send(welcomes.get(mode, welcomes["mode_femboy"]))
+                persona_manager = getattr(self.bot, "persona_manager", None)
+                if persona_manager:
+                    await persona_manager.send_as_mode(
+                        channel=channel,
+                        content=welcome_text,
+                        mode_id=mode,
+                        evil_mode=evil_mode_enabled,
+                        allowed_mentions=discord.AllowedMentions(users=True, roles=False, everyone=False),
+                    )
+                else:
+                    await channel.send(welcome_text)
             except discord.Forbidden:
-                pass
+                logger.warning("Missing permissions to send welcome in %s", member.guild.name)
+
+        # DM Welcome (Preset message from server staff)
+        dm_enabled = await get_dm_welcome_enabled(guild_id)
+        dm_text = await get_dm_welcome_message(guild_id)
+        if dm_enabled and dm_text:
+            try:
+                embed = discord.Embed(
+                    title=f"Welcome to {member.guild.name}!",
+                    description=dm_text,
+                    color=discord.Color.blue(),
+                )
+                embed.set_footer(text="This is an automated message from the server staff.")
+                await member.send(embed=embed)
+            except discord.Forbidden:
+                logger.warning("Could not DM %s (DMs closed).", member)
+            except Exception as exc:
+                logger.warning("Failed to DM welcome message to %s: %s", member, exc)
 
     @commands.Cog.listener()
     async def on_message(self, message: discord.Message):
@@ -433,8 +504,22 @@ class Social(commands.Cog):
             return
 
         mode = await get_server_mode(message.guild.id)
-        responses = MENTION_REACTIONS.get(mode, MENTION_REACTIONS["mode_femboy"])
-        await message.reply(random.choice(responses), mention_author=False)
+        evil_mode_enabled = await get_evil_mode(message.guild.id)
+        profile = get_mode_profile(mode)
+        responses = profile.mention_reactions or ()
+        if not responses:
+            return
+        response_text = random.choice(responses)
+        persona_manager = getattr(self.bot, "persona_manager", None)
+        if persona_manager:
+            await persona_manager.send_as_mode(
+                channel=message.channel,
+                content=response_text,
+                mode_id=mode,
+                evil_mode=evil_mode_enabled,
+            )
+        else:
+            await message.reply(response_text, mention_author=False)
 
 
 async def setup(bot: commands.Bot):

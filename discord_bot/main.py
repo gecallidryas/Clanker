@@ -17,6 +17,8 @@ from dotenv import load_dotenv
 
 from utils.logger import get_logger, log_startup, log_error, log_command
 from utils.db_handler import increment_stat
+from modes import validate_mode_registry, resolve_mode_key, get_mode_profile
+from utils.emoji_manager import EmojiManager
 
 BASE_DIR = Path(__file__).resolve().parent
 ENV_PATH = BASE_DIR / ".env"
@@ -50,8 +52,7 @@ _require_env("ENCRYPTION_KEY")
 # Optional: Lock bot to a specific personality mode
 # Set BOT_MODE=femboy, tsundere, or oneesan to lock the mode
 BOT_MODE = os.getenv("BOT_MODE", "").lower()
-VALID_MODES = {"femboy": "mode_femboy", "tsundere": "mode_tsundere", "oneesan": "mode_oneesan"}
-LOCKED_MODE = VALID_MODES.get(BOT_MODE)
+LOCKED_MODE = resolve_mode_key(BOT_MODE) if BOT_MODE else None
 
 # Intents configuration
 intents = discord.Intents.default()
@@ -91,6 +92,9 @@ class Femmy(commands.Bot):
             help_command=None  # Use custom help in utilities.py
         )
         self.add_check(self._guild_only_check)
+        from utils.persona_manager import PersonaManager
+        self.persona_manager = PersonaManager(self)
+        self.emoji_manager = EmojiManager(self)
 
     async def _guild_only_check(self, ctx: commands.Context) -> bool:
         if ctx.guild is None:
@@ -111,6 +115,11 @@ class Femmy(commands.Bot):
         # Initialize database
         from utils.db_handler import init_db
         await init_db()
+
+        # Validate mode registry once on startup
+        issues = validate_mode_registry()
+        if issues:
+            logger.warning("Mode registry issues detected: %s", "; ".join(issues))
         
         # Load cogs dynamically
         cog_list = discover_cogs()
@@ -143,11 +152,33 @@ class Femmy(commands.Bot):
                 await init_guild_db(guild.id)
             except Exception as e:
                 logger.warning("Failed to init DB for guild %s: %s", guild.id, e)
+
+        try:
+            await self.emoji_manager.validate_emojis()
+            logger.info(
+                "Validated %s emoji rules and %s general emojis",
+                len(self.emoji_manager._validated_emojis),
+                len(self.emoji_manager._validated_general),
+            )
+        except Exception as exc:
+            logger.warning("Failed to validate emojis: %s", exc)
         
-        # Set custom status
+        # Set custom status based on the first guild's mode (global presence)
+        try:
+            from utils.db_handler import get_server_mode
+            if self.guilds:
+                mode = await get_server_mode(self.guilds[0].id)
+            else:
+                mode = "mode_femboy"
+            profile = get_mode_profile(mode)
+            activity_name = profile.activity_watching or "over you~ ♡"
+        except Exception as exc:
+            logger.warning("Failed to resolve activity mode: %s", exc)
+            activity_name = "over you~ ♡"
+
         activity = discord.Activity(
             type=discord.ActivityType.watching,
-            name="over you~ ♡"
+            name=activity_name
         )
         await self.change_presence(activity=activity)
 

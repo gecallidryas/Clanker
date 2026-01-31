@@ -29,11 +29,12 @@ from discord import app_commands
 from discord.ext import commands, tasks
 
 from utils.db_handler import (
-    get_affection,
-    add_affection,
+    get_all_mode_affection,
+    add_affection_to_mode,
     get_mood,
     update_mood,
     get_server_mode,
+    AFFECTION_TRACKED_MODES,
 )
 from utils.sentiment import analyze_sentiment, quick_sentiment_check
 from utils.logger import get_logger
@@ -83,6 +84,12 @@ AFFECTION_DISPLAY = {
     "friend": {"emoji": "😊", "title": "Friend", "color": 0x2ecc71},
     "close_friend": {"emoji": "💕", "title": "Close Friend", "color": 0xe91e63},
     "beloved": {"emoji": "💖", "title": "Beloved", "color": 0xff69b4},
+}
+
+MODE_AFFECTION_DISPLAY = {
+    "mode_femboy": {"emoji": "🎀", "name": "Femboy Mode"},
+    "mode_tsundere": {"emoji": "💢", "name": "Tsundere Mode"},
+    "mode_oneesan": {"emoji": "💋", "name": "Oneesan Mode"},
 }
 
 AFFECTION_THRESHOLDS = [
@@ -179,6 +186,55 @@ class Affection(commands.Cog):
     
     def cog_unload(self):
         self.mood_decay_loop.cancel()
+
+    def _build_affection_embed(self, target: discord.Member, data_by_mode: dict) -> discord.Embed:
+        embed = discord.Embed(
+            title=f"💖 {target.display_name}'s Affection",
+            color=discord.Color.from_rgb(255, 182, 193),
+        )
+
+        for mode_key in AFFECTION_TRACKED_MODES:
+            mode_data = data_by_mode.get(mode_key, {})
+            level = mode_data.get("affection_level", "stranger")
+            points = mode_data.get("affection_points", 0)
+            interactions = mode_data.get("total_interactions", 0)
+            level_display = AFFECTION_DISPLAY.get(level, AFFECTION_DISPLAY["stranger"])
+            mode_display = MODE_AFFECTION_DISPLAY.get(
+                mode_key,
+                {"emoji": "✨", "name": mode_key},
+            )
+
+            progress = 100.0
+            next_threshold = None
+            for min_pts, max_pts, lvl_name in AFFECTION_THRESHOLDS:
+                if lvl_name == level:
+                    if max_pts != float("inf"):
+                        next_threshold = max_pts
+                        progress = (points - min_pts) / (max_pts - min_pts) * 100
+                    else:
+                        progress = 100.0
+                    break
+
+            filled = int(progress // 10)
+            bar = "█" * filled + "░" * (10 - filled)
+            if next_threshold:
+                progress_line = f"[{bar}] {progress:.1f}% ({points}/{next_threshold})"
+            else:
+                progress_line = "✨ Max Level Reached! ✨"
+
+            value = (
+                f"{level_display['emoji']} **{level_display['title']}**\n"
+                f"Points: **{points:,}** | Interactions: **{interactions:,}**\n"
+                f"{progress_line}"
+            )
+            embed.add_field(
+                name=f"{mode_display['emoji']} {mode_display['name']}",
+                value=value,
+                inline=False,
+            )
+
+        embed.set_thumbnail(url=target.display_avatar.url)
+        return embed
     
     # ============================================
     # Commands
@@ -192,63 +248,8 @@ class Affection(commands.Cog):
             return
 
         target = member or ctx.author
-        data = await get_affection(ctx.guild.id, target.id)
-        
-        level = data["affection_level"]
-        points = data["affection_points"]
-        interactions = data["total_interactions"]
-        display = AFFECTION_DISPLAY.get(level, AFFECTION_DISPLAY["stranger"])
-        
-        # Calculate progress to next level
-        next_threshold = None
-        for min_pts, max_pts, lvl_name in AFFECTION_THRESHOLDS:
-            if lvl_name == level and max_pts != float("inf"):
-                next_threshold = max_pts
-                progress = (points - min_pts) / (max_pts - min_pts) * 100
-                break
-        else:
-            progress = 100
-        
-        # Build progress bar
-        filled = int(progress // 10)
-        bar = "█" * filled + "░" * (10 - filled)
-        
-        embed = discord.Embed(
-            title=f"{display['emoji']} {target.display_name}'s Affection",
-            color=display["color"]
-        )
-        
-        embed.add_field(
-            name="Level",
-            value=f"**{display['title']}**",
-            inline=True
-        )
-        embed.add_field(
-            name="Points",
-            value=f"**{points:,}** pts",
-            inline=True
-        )
-        embed.add_field(
-            name="Interactions",
-            value=f"**{interactions:,}**",
-            inline=True
-        )
-        
-        if next_threshold:
-            embed.add_field(
-                name="Progress to Next Level",
-                value=f"[{bar}] {progress:.1f}%\n{points}/{next_threshold}",
-                inline=False
-            )
-        else:
-            embed.add_field(
-                name="Progress",
-                value="✨ Max Level Reached! ✨",
-                inline=False
-            )
-        
-        embed.set_thumbnail(url=target.display_avatar.url)
-        
+        data_by_mode = await get_all_mode_affection(ctx.guild.id, target.id)
+        embed = self._build_affection_embed(target, data_by_mode)
         await ctx.send(embed=embed)
 
     @app_commands.command(name="affection", description="View your or another user's affection level.")
@@ -259,43 +260,8 @@ class Affection(commands.Cog):
             return
 
         target = member or interaction.user
-        data = await get_affection(interaction.guild.id, target.id)
-
-        level = data["affection_level"]
-        points = data["affection_points"]
-        interactions = data["total_interactions"]
-        display = AFFECTION_DISPLAY.get(level, AFFECTION_DISPLAY["stranger"])
-
-        next_threshold = None
-        for min_pts, max_pts, lvl_name in AFFECTION_THRESHOLDS:
-            if lvl_name == level and max_pts != float("inf"):
-                next_threshold = max_pts
-                progress = (points - min_pts) / (max_pts - min_pts) * 100
-                break
-        else:
-            progress = 100
-
-        filled = int(progress // 10)
-        bar = "█" * filled + "░" * (10 - filled)
-
-        embed = discord.Embed(
-            title=f"{display['emoji']} {target.display_name}'s Affection",
-            color=display["color"],
-        )
-        embed.add_field(name="Level", value=f"**{display['title']}**", inline=True)
-        embed.add_field(name="Points", value=f"**{points:,}** pts", inline=True)
-        embed.add_field(name="Interactions", value=f"**{interactions:,}**", inline=True)
-
-        if next_threshold:
-            embed.add_field(
-                name="Progress to Next Level",
-                value=f"[{bar}] {progress:.1f}%\n{points}/{next_threshold}",
-                inline=False,
-            )
-        else:
-            embed.add_field(name="Progress", value="✨ Max Level Reached! ✨", inline=False)
-
-        embed.set_thumbnail(url=target.display_avatar.url)
+        data_by_mode = await get_all_mode_affection(interaction.guild.id, target.id)
+        embed = self._build_affection_embed(target, data_by_mode)
         await interaction.response.send_message(embed=embed)
     
     @commands.command(name="mood")
@@ -371,7 +337,8 @@ class Affection(commands.Cog):
         
         # Update mood and affection
         await update_mood(ctx.guild.id, 5)
-        await add_affection(ctx.guild.id, ctx.author.id, 3)
+        if mode != "mode_default":
+            await add_affection_to_mode(ctx.guild.id, ctx.author.id, mode, 3)
         
         responses = HEADPAT_RESPONSES.get(mode, HEADPAT_RESPONSES["mode_femboy"])
         response = random.choice(responses)
@@ -386,7 +353,8 @@ class Affection(commands.Cog):
 
         mode = await get_server_mode(interaction.guild.id)
         await update_mood(interaction.guild.id, 5)
-        await add_affection(interaction.guild.id, interaction.user.id, 3)
+        if mode != "mode_default":
+            await add_affection_to_mode(interaction.guild.id, interaction.user.id, mode, 3)
 
         responses = HEADPAT_RESPONSES.get(mode, HEADPAT_RESPONSES["mode_femboy"])
         response = random.choice(responses)
@@ -402,7 +370,8 @@ class Affection(commands.Cog):
         
         # Update mood and affection
         await update_mood(ctx.guild.id, 5)
-        await add_affection(ctx.guild.id, ctx.author.id, 3)
+        if mode != "mode_default":
+            await add_affection_to_mode(ctx.guild.id, ctx.author.id, mode, 3)
         
         responses = HUG_RESPONSES.get(mode, HUG_RESPONSES["mode_femboy"])
         response = random.choice(responses)
@@ -417,7 +386,8 @@ class Affection(commands.Cog):
 
         mode = await get_server_mode(interaction.guild.id)
         await update_mood(interaction.guild.id, 5)
-        await add_affection(interaction.guild.id, interaction.user.id, 3)
+        if mode != "mode_default":
+            await add_affection_to_mode(interaction.guild.id, interaction.user.id, mode, 3)
 
         responses = HUG_RESPONSES.get(mode, HUG_RESPONSES["mode_femboy"])
         response = random.choice(responses)
@@ -437,9 +407,13 @@ class Affection(commands.Cog):
         
         # Small mood boost for any activity
         await update_mood(message.guild.id, 1)
+
+        mode = await get_server_mode(message.guild.id)
         
         # If bot is mentioned, analyze sentiment and adjust affection
         if self.bot.user in message.mentions:
+            if mode == "mode_default":
+                return
             # Get message content without the mention
             content = message.content
             content = content.replace(f"<@{self.bot.user.id}>", "").strip()
@@ -456,13 +430,13 @@ class Affection(commands.Cog):
                     sentiment, delta = await analyze_sentiment(message.guild.id, content)
                 
                 # Apply affection change (don't reply here - ai_brain handles responses)
-                await add_affection(message.guild.id, message.author.id, delta)
+                await add_affection_to_mode(message.guild.id, message.author.id, mode, delta)
                 
                 if sentiment in ("negative", "very_negative", "hostile"):
                     logger.info(f"Negative interaction from {message.author}: {sentiment} ({delta} pts)")
             else:
                 # Default positive for short mentions
-                await add_affection(message.guild.id, message.author.id, 1)
+                await add_affection_to_mode(message.guild.id, message.author.id, mode, 1)
     
     # ============================================
     # Background Tasks

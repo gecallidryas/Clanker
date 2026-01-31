@@ -4,10 +4,10 @@ Admin Cog for Femmy Discord Bot
 Admin commands for managing user data, facts, and affection.
 
 Commands (Admin Only):
-    !admin reset @user [type]     - Reset user data (all/facts/affection/aliases)
+    !admin reset @user [type] [mode] - Reset user data (all/facts/affection/aliases)
     !admin setfact @user <fact>   - Add a fact for a user
     !admin delfact @user <id>     - Delete a specific fact by ID
-    !admin setaffection @user <n> - Set affection points
+    !admin setaffection @user <n> <mode> - Set affection points
     !admin view @user             - View complete user profile
 """
 
@@ -19,12 +19,14 @@ from utils.db_handler import (
     set_gender_role,
     delete_gender_role,
     reset_user_data,
-    set_affection_value,
+    set_affection_value_by_mode,
     get_user_full_profile,
     add_fact_with_source,
     delete_fact_by_id,
-    get_facts_detailed
+    get_facts_detailed,
+    AFFECTION_TRACKED_MODES,
 )
+from modes import resolve_mode_key
 from utils.logger import get_logger
 
 logger = get_logger(__name__)
@@ -81,7 +83,7 @@ class Admin(commands.Cog):
         embed.add_field(
             name="User Data",
             value=(
-                "`!admin reset @user [type]` - Reset data (all/facts/affection/aliases)\n"
+                "`!admin reset @user [type] [mode]` - Reset data (all/facts/affection/aliases)\n"
                 "`!admin view @user` - View complete profile\n"
             ),
             inline=False
@@ -96,35 +98,60 @@ class Admin(commands.Cog):
         )
         embed.add_field(
             name="Affection",
-            value="`!admin setaffection @user <points>` - Set affection",
+            value="`!admin setaffection @user <points> <mode>` - Set affection",
             inline=False
         )
         await ctx.send(embed=embed)
     
     @admin_group.command(name="reset")
-    async def reset_user(self, ctx: commands.Context, member: discord.Member, reset_type: str = "all"):
+    async def reset_user(
+        self,
+        ctx: commands.Context,
+        member: discord.Member,
+        reset_type: str = "all",
+        mode: str = None,
+    ):
         """Reset user data. Types: all, facts, affection, aliases"""
         valid_types = ["all", "facts", "affection", "aliases"]
         if reset_type.lower() not in valid_types:
             await ctx.send(f"❌ Invalid type. Use one of: {', '.join(valid_types)}")
             return
-        
-        deleted = await reset_user_data(ctx.guild.id, member.id, reset_type.lower())
+
+        target = reset_type.lower()
+        resolved_mode = None
+        if target == "affection":
+            if not mode:
+                await ctx.send("❌ Please provide a mode: femboy, tsundere, or oneesan.")
+                return
+            resolved_mode = resolve_mode_key(mode)
+            if resolved_mode not in AFFECTION_TRACKED_MODES:
+                await ctx.send("❌ Invalid mode. Use: femboy, tsundere, or oneesan.")
+                return
+
+        deleted = await reset_user_data(
+            ctx.guild.id,
+            member.id,
+            target,
+            mode=resolved_mode,
+        )
         
         embed = discord.Embed(
             title=f"🗑️ Reset Data for {member.display_name}",
             color=discord.Color.red()
         )
         
-        if reset_type == "all":
+        if target == "all":
             embed.add_field(name="Facts Deleted", value=str(deleted["facts"]), inline=True)
             embed.add_field(name="Affection Reset", value="Yes" if deleted["affection"] else "No", inline=True)
             embed.add_field(name="Aliases Deleted", value=str(deleted["aliases"]), inline=True)
         else:
-            embed.description = f"Reset `{reset_type}` for {member.mention}"
+            if target == "affection":
+                embed.description = f"Reset `{target}` ({resolved_mode}) for {member.mention}"
+            else:
+                embed.description = f"Reset `{target}` for {member.mention}"
         
         await ctx.send(embed=embed)
-        logger.info(f"Admin {ctx.author} reset {reset_type} for {member}")
+        logger.info(f"Admin {ctx.author} reset {target} for {member}")
     
     @admin_group.command(name="view")
     async def view_user(self, ctx: commands.Context, member: discord.Member):
@@ -136,12 +163,19 @@ class Admin(commands.Cog):
             color=discord.Color.blue()
         )
         
-        # Affection
-        aff = profile.get("affection", {})
+        # Affection (per mode)
+        aff_by_mode = profile.get("affection_by_mode", {})
+        aff_lines = []
+        for mode_key in AFFECTION_TRACKED_MODES:
+            mode_label = mode_key.replace("mode_", "").title()
+            data = aff_by_mode.get(mode_key, {})
+            points = data.get("affection_points", 0)
+            level = data.get("affection_level", "stranger")
+            aff_lines.append(f"**{mode_label}**: {points} pts ({level})")
         embed.add_field(
-            name="💕 Affection",
-            value=f"{aff.get('affection_points', 0)} pts ({aff.get('affection_level', 'stranger')})",
-            inline=True
+            name="💕 Affection (By Mode)",
+            value="\n".join(aff_lines) if aff_lines else "None",
+            inline=False,
         )
         
         # Timezone
@@ -217,19 +251,30 @@ class Admin(commands.Cog):
             await ctx.send("❌ Failed to delete fact")
     
     @admin_group.command(name="setaffection")
-    async def set_affection(self, ctx: commands.Context, member: discord.Member, points: int):
+    async def set_affection(self, ctx: commands.Context, member: discord.Member, points: int, mode: str = None):
         """Set a user's affection points."""
         if points < 0:
             await ctx.send("❌ Points cannot be negative")
             return
-        
-        result = await set_affection_value(ctx.guild.id, member.id, points)
+
+        if not mode:
+            await ctx.send("❌ Please provide a mode: femboy, tsundere, or oneesan.")
+            return
+
+        resolved_mode = resolve_mode_key(mode)
+        if resolved_mode not in AFFECTION_TRACKED_MODES:
+            await ctx.send("❌ Invalid mode. Use: femboy, tsundere, or oneesan.")
+            return
+
+        result = await set_affection_value_by_mode(ctx.guild.id, member.id, resolved_mode, points)
+        mode_label = resolved_mode.replace("mode_", "").title()
         
         await ctx.send(
             f"✅ Set {member.display_name}'s affection to "
-            f"**{points}** points (Level: {result['affection_level']})"
+            f"**{points}** points in **{mode_label}** mode "
+            f"(Level: {result['affection_level']})"
         )
-        logger.info(f"Admin {ctx.author} set affection for {member} to {points}")
+        logger.info(f"Admin {ctx.author} set affection for {member} to {points} ({resolved_mode})")
 
     @admin_group.command(name="sync")
     async def sync_tree(self, ctx: commands.Context, target: str = "guild"):
@@ -290,18 +335,28 @@ class Admin(commands.Cog):
 
     @admin_app_group.command(name="reset", description="Reset user data.")
     @app_commands.checks.has_permissions(manage_guild=True)
-    @app_commands.describe(member="User to reset", reset_type="all, facts, affection, or aliases")
+    @app_commands.describe(
+        member="User to reset",
+        reset_type="all, facts, affection, or aliases",
+        mode="Mode to reset when reset_type=affection",
+    )
     @app_commands.choices(reset_type=[
         app_commands.Choice(name="all", value="all"),
         app_commands.Choice(name="facts", value="facts"),
         app_commands.Choice(name="affection", value="affection"),
         app_commands.Choice(name="aliases", value="aliases"),
     ])
+    @app_commands.choices(mode=[
+        app_commands.Choice(name="femboy", value="femboy"),
+        app_commands.Choice(name="tsundere", value="tsundere"),
+        app_commands.Choice(name="oneesan", value="oneesan"),
+    ])
     async def reset_user_slash(
         self,
         interaction: discord.Interaction,
         member: discord.Member,
-        reset_type: app_commands.Choice[str] = None
+        reset_type: app_commands.Choice[str] = None,
+        mode: app_commands.Choice[str] = None,
     ):
         if not interaction.guild:
             await interaction.response.send_message("Use this command in a server.", ephemeral=True)
@@ -316,7 +371,28 @@ class Admin(commands.Cog):
             )
             return
 
-        deleted = await reset_user_data(interaction.guild.id, member.id, target)
+        resolved_mode = None
+        if target == "affection":
+            if not mode:
+                await interaction.response.send_message(
+                    "❌ Please provide a mode: femboy, tsundere, or oneesan.",
+                    ephemeral=True,
+                )
+                return
+            resolved_mode = resolve_mode_key(mode.value)
+            if resolved_mode not in AFFECTION_TRACKED_MODES:
+                await interaction.response.send_message(
+                    "❌ Invalid mode. Use: femboy, tsundere, or oneesan.",
+                    ephemeral=True,
+                )
+                return
+
+        deleted = await reset_user_data(
+            interaction.guild.id,
+            member.id,
+            target,
+            mode=resolved_mode,
+        )
 
         embed = discord.Embed(
             title=f"🗑️ Reset Data for {member.display_name}",
@@ -328,7 +404,10 @@ class Admin(commands.Cog):
             embed.add_field(name="Affection Reset", value="Yes" if deleted["affection"] else "No", inline=True)
             embed.add_field(name="Aliases Deleted", value=str(deleted["aliases"]), inline=True)
         else:
-            embed.description = f"Reset `{target}` for {member.mention}"
+            if target == "affection":
+                embed.description = f"Reset `{target}` ({resolved_mode}) for {member.mention}"
+            else:
+                embed.description = f"Reset `{target}` for {member.mention}"
 
         await interaction.response.send_message(embed=embed)
         logger.info("Admin %s reset %s for %s", interaction.user, target, member)
@@ -348,11 +427,18 @@ class Admin(commands.Cog):
             color=discord.Color.blue(),
         )
 
-        aff = profile.get("affection", {})
+        aff_by_mode = profile.get("affection_by_mode", {})
+        aff_lines = []
+        for mode_key in AFFECTION_TRACKED_MODES:
+            mode_label = mode_key.replace("mode_", "").title()
+            data = aff_by_mode.get(mode_key, {})
+            points = data.get("affection_points", 0)
+            level = data.get("affection_level", "stranger")
+            aff_lines.append(f"**{mode_label}**: {points} pts ({level})")
         embed.add_field(
-            name="💖 Affection",
-            value=f"{aff.get('affection_points', 0)} pts ({aff.get('affection_level', 'stranger')})",
-            inline=True,
+            name="💖 Affection (By Mode)",
+            value="\n".join(aff_lines) if aff_lines else "None",
+            inline=False,
         )
 
         embed.add_field(
@@ -441,22 +527,42 @@ class Admin(commands.Cog):
 
     @admin_app_group.command(name="affection", description="Set affection points for a user.")
     @app_commands.checks.has_permissions(manage_guild=True)
-    @app_commands.describe(member="User", points="Affection points")
-    async def set_affection_slash(self, interaction: discord.Interaction, member: discord.Member, points: int):
+    @app_commands.describe(member="User", points="Affection points", mode="Personality mode")
+    @app_commands.choices(mode=[
+        app_commands.Choice(name="femboy", value="femboy"),
+        app_commands.Choice(name="tsundere", value="tsundere"),
+        app_commands.Choice(name="oneesan", value="oneesan"),
+    ])
+    async def set_affection_slash(
+        self,
+        interaction: discord.Interaction,
+        member: discord.Member,
+        points: int,
+        mode: app_commands.Choice[str],
+    ):
         if not interaction.guild:
             await interaction.response.send_message("Use this command in a server.", ephemeral=True)
             return
         if points < 0:
             await interaction.response.send_message("❌ Points cannot be negative", ephemeral=True)
             return
+        resolved_mode = resolve_mode_key(mode.value)
+        if resolved_mode not in AFFECTION_TRACKED_MODES:
+            await interaction.response.send_message(
+                "❌ Invalid mode. Use: femboy, tsundere, or oneesan.",
+                ephemeral=True,
+            )
+            return
 
-        result = await set_affection_value(interaction.guild.id, member.id, points)
+        result = await set_affection_value_by_mode(interaction.guild.id, member.id, resolved_mode, points)
+        mode_label = resolved_mode.replace("mode_", "").title()
 
         await interaction.response.send_message(
             f"✅ Set {member.display_name}'s affection to "
-            f"**{points}** points (Level: {result['affection_level']})"
+            f"**{points}** points in **{mode_label}** mode "
+            f"(Level: {result['affection_level']})"
         )
-        logger.info("Admin %s set affection for %s to %s", interaction.user, member, points)
+        logger.info("Admin %s set affection for %s to %s (%s)", interaction.user, member, points, resolved_mode)
 
     @admin_app_group.command(name="model", description="Change the active AI model.")
     @app_commands.checks.has_permissions(manage_guild=True)
