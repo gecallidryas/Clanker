@@ -25,7 +25,7 @@ For each account:
 3. Click "Create API Key"
 4. Copy the key
 
-### Step 3: Configure Your .env File
+### Step 3: Configure Your Guild .env File
 ```env
 # Set to "free" for proactive key rotation
 GEMINI_KEY_TYPE=free

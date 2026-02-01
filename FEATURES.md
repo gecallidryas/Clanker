@@ -169,6 +169,7 @@ This document is the canonical, detailed feature inventory for this repository. 
   - starboard: `starboard_settings`, `starboard_entries`, `starboard_ignored_channels`
 - `starboard_settings` fields include `channel_id`, `emoji_trigger`, `emoji_triggers`, `emoji_mode`, `threshold`, `allow_self_star`, `enabled`.
 - `guild_config` includes `gemini_profile_key` for profile analysis.
+- `guild_config` includes `gemini_key_type` for Gemini key rotation mode.
 - Built-in migrations for new columns and tables.
 
 ### Deployment and ops
@@ -210,6 +211,7 @@ This document is the canonical, detailed feature inventory for this repository. 
 - Bot-level configuration: `discord_bot/.env` (see `discord_bot/.env.example`).
 - Guild-level configuration: upload `discord_bot/guild.env.example` via `/config env upload`; `/config env example` replies with the text template (ephemeral).
 - Guild env keys include `GEMINI_PROFILE_KEY` for `/analyze` profile summaries.
+- Guild env supports `GEMINI_KEY_TYPE` to control Gemini key rotation (`free` rotates every request, `paid` sticks unless a key fails).
 - Per-guild API keys are stored encrypted using `ENCRYPTION_KEY`.
 
 ## Folder skeleton (top level)

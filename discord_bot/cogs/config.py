@@ -71,6 +71,7 @@ ENV_TO_DB = {
     "GEMINI_SUMMARIZE_KEY_3": "gemini_summarize_key_3",
     "GEMINI_SUMMARIZE_KEY_4": "gemini_summarize_key_4",
     "GEMINI_SUMMARIZE_KEY_5": "gemini_summarize_key_5",
+    "GEMINI_KEY_TYPE": "gemini_key_type",
     "GEMINI_PROFILE_KEY": "gemini_profile_key",
     "OPENROUTER_API_KEY": "openrouter_api_key",
     "OPENROUTER_API_KEY_2": "openrouter_api_key_2",
@@ -646,6 +647,13 @@ class Config(commands.Cog):
                 warnings.append("GEMINI_MODEL is not in the recommended list.")
             updates["gemini_model"] = normalized or None
             summary.append(f"GEMINI_MODEL={updates['gemini_model'] or 'CLEARED'}")
+
+        if "GEMINI_KEY_TYPE" in parsed:
+            key_type = (parsed["GEMINI_KEY_TYPE"] or "").strip().lower()
+            if key_type not in {"free", "paid", ""}:
+                warnings.append("GEMINI_KEY_TYPE should be 'free' or 'paid'.")
+            updates["gemini_key_type"] = key_type or None
+            summary.append(f"GEMINI_KEY_TYPE={updates['gemini_key_type'] or 'CLEARED'}")
 
         if "OPENROUTER_MODEL" in parsed:
             model = parsed["OPENROUTER_MODEL"] or ""

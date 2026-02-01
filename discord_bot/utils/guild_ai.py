@@ -125,6 +125,12 @@ async def get_guild_gemini_model(guild_id: int) -> str:
     return normalized or model
 
 
+async def get_guild_gemini_key_type(guild_id: int) -> str:
+    config = await get_guild_config(guild_id)
+    key_type = (config.get("gemini_key_type") or "paid").strip().lower()
+    return key_type if key_type in {"free", "paid"} else "paid"
+
+
 async def get_guild_translate_model(guild_id: int) -> str:
     config = await get_guild_config(guild_id)
     model = config.get("gemini_translate_model") or config.get("gemini_model") or GEMINI_DEFAULT_MODEL
@@ -167,6 +173,17 @@ async def _next_key_index(guild_id: int, task: str, key_count: int) -> int:
         return current
 
 
+async def _get_key_index(guild_id: int, task: str, key_count: int) -> int:
+    async with _guild_key_lock:
+        current = _guild_key_index.get((guild_id, task), 0)
+        return current % max(key_count, 1)
+
+
+async def _set_key_index(guild_id: int, task: str, index: int, key_count: int) -> None:
+    async with _guild_key_lock:
+        _guild_key_index[(guild_id, task)] = index % max(key_count, 1)
+
+
 async def _generate_with_keys(
     guild_id: int,
     task: str,
@@ -177,12 +194,20 @@ async def _generate_with_keys(
     if not keys:
         raise GuildConfigError(f"{task} keys not configured for this server.")
     request_timeout = _parse_timeout(os.getenv("GEMINI_REQUEST_TIMEOUT_SECONDS"), 30.0)
-    start = await _next_key_index(guild_id, task, len(keys))
+    key_type = await get_guild_gemini_key_type(guild_id)
+    if key_type == "free":
+        start = await _next_key_index(guild_id, task, len(keys))
+    else:
+        start = await _get_key_index(guild_id, task, len(keys))
     last_error: Optional[Exception] = None
     for offset in range(len(keys)):
-        key = keys[(start + offset) % len(keys)]
+        key_index = (start + offset) % len(keys)
+        key = keys[key_index]
         try:
-            return await generate_gemini_with_key(key, model, prompt, request_timeout)
+            response = await generate_gemini_with_key(key, model, prompt, request_timeout)
+            if key_type != "free":
+                await _set_key_index(guild_id, task, key_index, len(keys))
+            return response
         except UserInputError:
             raise
         except Exception as exc:
@@ -228,13 +253,21 @@ async def generate_guild_gemini_vision(guild_id: int, prompt: str, image) -> tup
     model = await get_guild_gemini_model(guild_id)
     request_timeout = _parse_timeout(os.getenv("GEMINI_REQUEST_TIMEOUT_SECONDS"), 30.0)
 
-    start = await _next_key_index(guild_id, "general", len(keys))
+    key_type = await get_guild_gemini_key_type(guild_id)
+    if key_type == "free":
+        start = await _next_key_index(guild_id, "general", len(keys))
+    else:
+        start = await _get_key_index(guild_id, "general", len(keys))
     last_error: Optional[Exception] = None
 
     for offset in range(len(keys)):
-        key = keys[(start + offset) % len(keys)]
+        key_index = (start + offset) % len(keys)
+        key = keys[key_index]
         try:
-            return await generate_gemini_with_key_and_image(key, model, prompt, image, request_timeout)
+            response = await generate_gemini_with_key_and_image(key, model, prompt, image, request_timeout)
+            if key_type != "free":
+                await _set_key_index(guild_id, "general", key_index, len(keys))
+            return response
         except UserInputError:
             raise
         except Exception as exc:
