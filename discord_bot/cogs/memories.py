@@ -1030,16 +1030,8 @@ class Memories(commands.Cog):
         await interaction.response.defer(thinking=True)
 
         try:
-            # Import profile manager
-            from utils.api_manager import get_gemini_profile_manager, UserInputError
-            try:
-                profile_manager = get_gemini_profile_manager()
-            except ValueError:
-                await interaction.followup.send(
-                    "Profile analysis not configured. Ask admin to set GEMINI_PROFILE_KEY.",
-                    ephemeral=True
-                )
-                return
+            from utils.api_manager import UserInputError
+            from utils.guild_ai import generate_guild_gemini_profile_text, GuildConfigError
 
             # Collect messages from all channels the bot can see
             messages = []
@@ -1091,7 +1083,13 @@ Keep it playful, not mean. Use emojis. Be creative!
 Write the analysis:"""
 
             try:
-                response, _ = await profile_manager.generate(prompt)
+                response, _ = await generate_guild_gemini_profile_text(interaction.guild.id, prompt)
+            except GuildConfigError:
+                await interaction.followup.send(
+                    "Profile analysis not configured. Ask admin to set GEMINI_PROFILE_KEY.",
+                    ephemeral=True,
+                )
+                return
             except UserInputError:
                 await interaction.followup.send("Could not analyze - content may be sensitive.", ephemeral=True)
                 return

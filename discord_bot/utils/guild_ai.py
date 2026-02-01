@@ -69,6 +69,10 @@ GEMINI_SUMMARIZE_FIELDS = [
     "gemini_summarize_key_5",
 ]
 
+GEMINI_PROFILE_FIELDS = [
+    "gemini_profile_key",
+]
+
 OPENROUTER_KEY_FIELDS = [
     "openrouter_api_key",
     "openrouter_api_key_2",
@@ -107,6 +111,11 @@ async def get_guild_translate_keys(guild_id: int) -> List[str]:
 
 async def get_guild_summarize_keys(guild_id: int) -> List[str]:
     return await _get_keys_from_config(guild_id, GEMINI_SUMMARIZE_FIELDS)
+
+
+async def get_guild_profile_key(guild_id: int) -> Optional[str]:
+    keys = await _get_keys_from_config(guild_id, GEMINI_PROFILE_FIELDS)
+    return keys[0] if keys else None
 
 
 async def get_guild_gemini_model(guild_id: int) -> str:
@@ -200,6 +209,15 @@ async def generate_guild_gemini_summary_text(guild_id: int, prompt: str) -> tupl
     keys = await get_guild_summarize_keys(guild_id)
     model = await get_guild_summarize_model(guild_id)
     return await _generate_with_keys(guild_id, "summarize", keys, model, prompt)
+
+
+async def generate_guild_gemini_profile_text(guild_id: int, prompt: str) -> tuple[str, str]:
+    key = await get_guild_profile_key(guild_id)
+    if not key:
+        raise GuildConfigError("Profile key not configured for this server.")
+    model = await get_guild_gemini_model(guild_id)
+    request_timeout = _parse_timeout(os.getenv("GEMINI_REQUEST_TIMEOUT_SECONDS"), 30.0)
+    return await generate_gemini_with_key(key, model, prompt, request_timeout)
 
 
 async def generate_guild_gemini_vision(guild_id: int, prompt: str, image) -> tuple[str, str]:

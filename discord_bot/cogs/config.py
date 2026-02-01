@@ -71,6 +71,7 @@ ENV_TO_DB = {
     "GEMINI_SUMMARIZE_KEY_3": "gemini_summarize_key_3",
     "GEMINI_SUMMARIZE_KEY_4": "gemini_summarize_key_4",
     "GEMINI_SUMMARIZE_KEY_5": "gemini_summarize_key_5",
+    "GEMINI_PROFILE_KEY": "gemini_profile_key",
     "OPENROUTER_API_KEY": "openrouter_api_key",
     "OPENROUTER_API_KEY_2": "openrouter_api_key_2",
     "OPENROUTER_API_KEY_3": "openrouter_api_key_3",
@@ -108,6 +109,9 @@ CATEGORY_FIELDS = {
         "gemini_summarize_key_3",
         "gemini_summarize_key_4",
         "gemini_summarize_key_5",
+    ],
+    "profile": [
+        "gemini_profile_key",
     ],
     "uncensored": [
         "openrouter_api_key",
@@ -319,6 +323,11 @@ class Config(commands.Cog):
             inline=False,
         )
         embed.add_field(
+            name="Gemini (Profile)",
+            value=format_group(CATEGORY_FIELDS["profile"]),
+            inline=False,
+        )
+        embed.add_field(
             name="OpenRouter (Uncensored)",
             value=format_group(CATEGORY_FIELDS["uncensored"]),
             inline=False,
@@ -327,7 +336,7 @@ class Config(commands.Cog):
 
     @keys_group.command(name="clear", description="Clear all stored API keys.")
     @app_commands.checks.has_permissions(administrator=True)
-    @app_commands.describe(category="general, translate, summarize, uncensored", slot="Key slot (1-5)")
+    @app_commands.describe(category="general, translate, summarize, profile, uncensored", slot="Key slot (1-5)")
     async def keys_clear(self, interaction: discord.Interaction, category: Optional[str] = None, slot: Optional[int] = None):
         if not await self._require_guild(interaction):
             return
@@ -346,7 +355,7 @@ class Config(commands.Cog):
         field = self._resolve_category_field(category, slot)
         if not field:
             await interaction.response.send_message(
-                "Invalid category or slot. Categories: general, translate, summarize, uncensored.",
+                "Invalid category or slot. Categories: general, translate, summarize, profile, uncensored.",
                 ephemeral=True,
             )
             return
@@ -378,7 +387,7 @@ class Config(commands.Cog):
         field = self._resolve_category_field(category, slot)
         if not field:
             await interaction.response.send_message(
-                "Invalid category or slot. Categories: general, translate, summarize, uncensored.",
+                "Invalid category or slot. Categories: general, translate, summarize, profile, uncensored.",
                 ephemeral=True,
             )
             return
@@ -402,7 +411,7 @@ class Config(commands.Cog):
         interaction: discord.Interaction,
         current: str,
     ) -> list[app_commands.Choice[str]]:
-        options = ["general", "translate", "summarize", "uncensored"]
+        options = ["general", "translate", "summarize", "profile", "uncensored"]
         current_lower = current.lower().strip()
         matches = [opt for opt in options if current_lower in opt]
         return [app_commands.Choice(name=opt, value=opt) for opt in matches[:25]]
@@ -571,9 +580,19 @@ class Config(commands.Cog):
                 ephemeral=True,
             )
             return
-        await interaction.response.send_message(
-            "Here is the guild .env.example template.",
-            file=discord.File(template_path),
+        template_text = template_path.read_text(encoding="utf-8")
+        warning = (
+            "Heads up: OpenRouter free keys are often rate-limited or unavailable unless you have very high "
+            "priority from OpenRouter. If you want reliable uncensored mode, use Gemini free keys and set an "
+            "OpenRouter credit limit to $1 in your OpenRouter settings. About $0.70 can yield ~1500-2500 "
+            "uncensored messages (varies by model and prompt size).\\n"
+            "Security note: API keys are stored encrypted and only admins can view them. "
+            "The bot creator does not access or use your keys."
+        )
+        await interaction.response.send_message(warning, ephemeral=True)
+        await interaction.followup.send(
+            "Guild env template (copy/paste this into a .env file):\\n```\\n"
+            f"{template_text.strip()}\\n```",
             ephemeral=True,
         )
 
