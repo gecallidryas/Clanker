@@ -590,12 +590,19 @@ class Config(commands.Cog):
             "Security note: API keys are stored encrypted and only admins can view them. "
             "The bot creator does not access or use your keys."
         )
-        await interaction.response.send_message(warning, ephemeral=True)
-        await interaction.followup.send(
-            "Guild env template (copy/paste this into a .env file):\\n```\\n"
-            f"{template_text.strip()}\\n```",
-            ephemeral=True,
+        instructions = (
+            "How to upload:\\n"
+            "1) Copy the template below into a file named `guild.env` (or any .env name).\\n"
+            "2) Fill in your keys and models.\\n"
+            "3) Upload it with `/config env upload`."
         )
+        template_block = f"Guild env template (copy/paste):\\n```\\n{template_text.strip()}\\n```"
+        combined = f"{warning}\\n\\n{instructions}\\n\\n{template_block}"
+        if len(combined) <= 1900:
+            await interaction.response.send_message(combined, ephemeral=True)
+        else:
+            await interaction.response.send_message(f\"{warning}\\n\\n{instructions}\", ephemeral=True)
+            await interaction.followup.send(template_block, ephemeral=True)
 
     @env_group.command(name="upload", description="Upload a .env file for this guild.")
     @app_commands.checks.has_permissions(administrator=True)
