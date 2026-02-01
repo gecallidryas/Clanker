@@ -120,7 +120,17 @@ CATEGORY_FIELDS = {
 
 
 class Config(commands.Cog):
+    # Main config group
     config = app_commands.Group(name="config", description="Guild configuration")
+    
+    # Subgroups under /config
+    password_group = app_commands.Group(name="password", description="Manage guild config password", parent=config)
+    keys_group = app_commands.Group(name="keys", description="View or manage stored API keys", parent=config)
+    model_group = app_commands.Group(name="model", description="View or set models", parent=config)
+    env_group = app_commands.Group(name="env", description="Upload or retrieve guild env template", parent=config)
+    toggle_group = app_commands.Group(name="toggle", description="Toggle guild features", parent=config)
+    
+    # Standalone top-level groups
     staff_group = app_commands.Group(name="staff", description="Manage bot staff roles")
     modlog_group = app_commands.Group(name="modlog", description="Moderation log channel")
     autorole_group = app_commands.Group(name="autorole", description="Auto-role settings")
@@ -214,15 +224,6 @@ class Config(commands.Cog):
             ephemeral=True,
         )
 
-    @config.group(name="password", description="Manage guild config password.")
-    @app_commands.checks.has_permissions(administrator=True)
-    async def password_group(self, interaction: discord.Interaction):
-        if not await self._require_guild(interaction):
-            return
-        await interaction.response.send_message(
-            "Use a subcommand: set, change, or reset.",
-            ephemeral=True,
-        )
 
     @password_group.command(name="set", description="Set the config password (first time only).")
     @app_commands.checks.has_permissions(administrator=True)
@@ -284,15 +285,6 @@ class Config(commands.Cog):
     # Keys
     # =========================
 
-    @config.group(name="keys", description="View or clear stored API keys.")
-    @app_commands.checks.has_permissions(administrator=True)
-    async def keys_group(self, interaction: discord.Interaction):
-        if not await self._require_guild(interaction):
-            return
-        await interaction.response.send_message(
-            "Use a subcommand: view or clear.",
-            ephemeral=True,
-        )
 
     @keys_group.command(name="view", description="View masked API keys.")
     @app_commands.checks.has_permissions(administrator=True)
@@ -427,15 +419,6 @@ class Config(commands.Cog):
     # Models
     # =========================
 
-    @config.group(name="model", description="View or set models.")
-    @app_commands.checks.has_permissions(administrator=True)
-    async def model_group(self, interaction: discord.Interaction):
-        if not await self._require_guild(interaction):
-            return
-        await interaction.response.send_message(
-            "Use a subcommand: view or set.",
-            ephemeral=True,
-        )
 
     @model_group.command(name="view", description="View current model settings.")
     @app_commands.checks.has_permissions(administrator=True)
@@ -575,15 +558,6 @@ class Config(commands.Cog):
     # Env
     # =========================
 
-    @config.group(name="env", description="Upload or retrieve guild env template.")
-    @app_commands.checks.has_permissions(administrator=True)
-    async def env_group(self, interaction: discord.Interaction):
-        if not await self._require_guild(interaction):
-            return
-        await interaction.response.send_message(
-            "Use a subcommand: upload or example.",
-            ephemeral=True,
-        )
 
     @env_group.command(name="example", description="Send the guild .env.example template.")
     @app_commands.checks.has_permissions(administrator=True)
@@ -717,15 +691,6 @@ class Config(commands.Cog):
     # Toggle
     # =========================
 
-    @config.group(name="toggle", description="Toggle guild features.")
-    @app_commands.checks.has_permissions(administrator=True)
-    async def toggle_group(self, interaction: discord.Interaction):
-        if not await self._require_guild(interaction):
-            return
-        await interaction.response.send_message(
-            "Use a subcommand: evil, autorole, welcome.",
-            ephemeral=True,
-        )
 
     @toggle_group.command(name="evil", description="Enable or disable evil mode.")
     @app_commands.checks.has_permissions(administrator=True)
