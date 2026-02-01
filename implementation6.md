@@ -1,4 +1,4 @@
-# Implementation Plan: Natural Language Admin Interface
+﻿# Implementation Plan: Natural Language Admin Interface
 
 Enable admins to configure the bot using conversational commands instead of slash commands.
 
@@ -7,11 +7,17 @@ Enable admins to configure the bot using conversational commands instead of slas
 ## Example Interactions
 
 ```
-User: "Femmy, set the starboard channel to #starboard with ⭐ as trigger, threshold 4"
-Bot:  "Done! Starboard configured: #starboard, ⭐ emoji, 4 reactions needed ✨"
+User: "Yumi, set starboard channel in #starboard and set any emoji as the trigger emojis, send messages to starboard after it gets more than 4 reacts per message"
+Bot:  "I can do that. Please confirm the trigger emojis (any emoji, or a specific list) and threshold. Current parse: channel #starboard, threshold 5, emoji mode any. Reply 'confirm' or provide corrections."
+
+User: "Femmy, set starboard channel in #starboard and set trigger emojis 💀🤣😂⭐🌟. Send to starboard after more than 4 reacts."
+Bot:  "Done! Starboard configured: #starboard, triggers: 💀 🤣 😂 ⭐ 🌟, threshold: 5 reactions."
+
+User: "Yumi, set starboard to #starboard with <:partyblob:123456789012345678> and :tada:"
+Bot:  "Done! Starboard configured: #starboard, triggers: <:partyblob:123456789012345678> 🎉, threshold: 3 reactions."
 
 User: "Yumi, ban @spammer for raiding"
-Bot:  "Banned @spammer. Reason: raiding 🔨"
+Bot:  "Banned @spammer. Reason: raiding"
 
 User: "Clanker, set welcome channel to #welcome and send 'Welcome {member}!' to new users"
 Bot:  "Welcome system configured for #welcome with your custom message."
@@ -40,8 +46,9 @@ Bot:  "Welcome system configured for #welcome with your custom message."
 | Category | Action | Example Phrase |
 |----------|--------|----------------|
 | **Starboard** | Setup channel | "set starboard to #channel" |
-| | Set threshold | "starboard needs 5 reacts" |
-| | Set emoji | "use 🌟 for starboard" |
+| | Set threshold | "starboard needs at least 5 reacts" |
+| | Set emoji list | "use 💀 🤣 😂 ⭐ 🌟 for starboard" |
+| | Set any emoji | "starboard triggers on any emoji" |
 | | Toggle | "disable/enable starboard" |
 | **Welcome** | Set channel | "welcome new users in #welcome" |
 | | Set message | "welcome message: Hello {member}!" |
@@ -67,7 +74,7 @@ Add to AI system prompt when user has admin permissions:
 # Admin Commands
 You can execute admin commands when asked. Detect these intents:
 
-STARBOARD_SETUP: channel, emoji, threshold
+STARBOARD_SETUP: channel, emoji_triggers, emoji_mode, threshold
 WELCOME_SETUP: channel, message, dm_message
 AUTOMOD_ADD: keyword, action (delete/timeout/ban), duration
 MOD_BAN: user, reason
@@ -78,9 +85,16 @@ CONFIG_LOG: channel
 
 When you detect an admin command, respond with a special JSON block:
 \`\`\`admin_action
-{"action": "STARBOARD_SETUP", "params": {"channel_id": 123, "emoji": "⭐", "threshold": 4}}
+{"action": "STARBOARD_SETUP", "params": {"channel_id": 123, "emoji_triggers": ["💀", "🤣", "😂", "⭐", "🌟"], "threshold": 5}}
 \`\`\`
 Then provide a natural confirmation message.
+
+Parsing rules:
+- If the user says "more than X", set `threshold = X + 1`.
+- If the user says "at least X" or "X or more", set `threshold = X`.
+- If the user says "any emoji", set `emoji_mode = "any"` and leave `emoji_triggers` empty.
+- If the user lists multiple emojis, set `emoji_triggers` to the list in order of appearance.
+- If any of channel, emojis (list or any), or threshold are missing, ask a follow-up confirmation question and do NOT emit an `admin_action` block.
 ```
 
 ### 2. Action Executor
@@ -116,30 +130,34 @@ async def execute_admin_action(
     """Execute an admin action and return result."""
     if action not in ACTIONS:
         return {"success": False, "error": "Unknown action"}
-    
+
     # Permission check
     if not executor.guild_permissions.administrator:
         return {"success": False, "error": "Insufficient permissions"}
-    
+
     return await ACTIONS[action](params, guild, executor)
 
 
 async def execute_starboard_setup(params, guild, executor):
     channel_id = params.get("channel_id")
-    emoji = params.get("emoji", "⭐")
+    emoji_triggers = params.get("emoji_triggers", [])
+    emoji_mode = params.get("emoji_mode", "list")
     threshold = params.get("threshold", 3)
-    
+
     await set_starboard_settings(
         guild.id,
         channel_id=channel_id,
-        emoji_trigger=emoji,
+        emoji_triggers=emoji_triggers,
+        emoji_mode=emoji_mode,
         threshold=threshold,
         enabled=True
     )
-    
+
+    display_emojis = "any emoji" if emoji_mode == "any" else " ".join(emoji_triggers)
+
     return {
         "success": True,
-        "message": f"Starboard configured: <#{channel_id}>, {emoji}, {threshold} reactions"
+        "message": f"Starboard configured: <#{channel_id}>, triggers: {display_emojis}, threshold: {threshold} reactions"
     }
 ```
 
@@ -155,7 +173,7 @@ from utils.admin_actions import execute_admin_action
 async def process_response(self, message, response_text):
     # Check for admin action block
     action_match = re.search(r'```admin_action\n(.+?)\n```', response_text, re.DOTALL)
-    
+
     if action_match:
         try:
             action_data = json.loads(action_match.group(1))
@@ -165,7 +183,7 @@ async def process_response(self, message, response_text):
                 guild=message.guild,
                 executor=message.author
             )
-            
+
             if not result["success"]:
                 # Replace action block with error
                 response_text = response_text.replace(
@@ -174,10 +192,10 @@ async def process_response(self, message, response_text):
                 )
         except Exception as e:
             logger.error(f"Admin action failed: {e}")
-        
+
         # Remove the JSON block from visible response
         response_text = re.sub(r'```admin_action\n.+?\n```\s*', '', response_text, flags=re.DOTALL)
-    
+
     return response_text
 ```
 
@@ -189,7 +207,7 @@ Only inject admin capabilities into prompt when user has permissions:
 def build_admin_prompt(member: discord.Member) -> str:
     if not member.guild_permissions.administrator:
         return ""
-    
+
     return """
 # Admin Commands
 You can execute configuration commands. When the user asks to configure something, output:
@@ -198,7 +216,7 @@ You can execute configuration commands. When the user asks to configure somethin
 ```
 
 Available actions:
-- STARBOARD_SETUP: channel_id, emoji, threshold
+- STARBOARD_SETUP: channel_id, emoji_triggers, emoji_mode, threshold
 - WELCOME_SETUP: channel_id, message, dm_message  
 - MOD_BAN: user_id, reason
 - MOD_TIMEOUT: user_id, duration_minutes, reason
@@ -208,9 +226,9 @@ Available actions:
 
 ---
 
-## Channel/User Resolution
+## Channel/User/Emoji Resolution
 
-The AI must resolve mentions/names to IDs:
+The AI must resolve mentions/names to IDs and validate emojis:
 
 ```python
 def resolve_channel(guild, text):
@@ -218,13 +236,50 @@ def resolve_channel(guild, text):
     match = re.match(r'<#(\d+)>', text)
     if match:
         return int(match.group(1))
-    
+
     # Try channel name
     for channel in guild.text_channels:
         if channel.name.lower() == text.lower().strip('#'):
             return channel.id
-    
+
     return None
+
+
+def resolve_emoji_list(guild, tokens):
+    """Return a list of normalized emoji strings (unicode or custom emoji mention)."""
+    resolved = []
+    for token in tokens:
+        token = token.strip()
+
+        # Custom emoji mention: <:name:id> or <a:name:id>
+        match = re.match(r'<a?:\w+:(\d+)>', token)
+        if match:
+            emoji_id = int(match.group(1))
+            emoji_obj = discord.utils.get(guild.emojis, id=emoji_id)
+            if emoji_obj:
+                resolved.append(str(emoji_obj))
+            continue
+
+        # Name-based custom emoji, like :partyblob:
+        if token.startswith(':') and token.endswith(':'):
+            name = token.strip(':')
+            emoji_obj = discord.utils.get(guild.emojis, name=name)
+            if emoji_obj:
+                resolved.append(str(emoji_obj))
+                continue
+
+        # Fallback: assume unicode emoji
+        if token:
+            resolved.append(token)
+
+    return resolved
+
+
+def normalize_threshold(phrase: str, number: int) -> int:
+    phrase = phrase.lower()
+    if "more than" in phrase:
+        return number + 1
+    return number
 ```
 
 ---
@@ -237,6 +292,7 @@ def resolve_channel(guild, text):
 | AI hallucinates action | Validate action exists in ACTIONS dict |
 | Invalid parameters | Parameter validation in each executor |
 | Destructive actions (ban/kick) | Require explicit confirmation for moderation |
+| Emoji list includes invalid custom emoji | Resolve against `guild.emojis`, reject unknown entries |
 
 ---
 
@@ -257,8 +313,13 @@ Bot:  "✅ Banned @baduser. Reason: spam"
 
 - [ ] Create `utils/admin_actions.py` with action executors
 - [ ] Add channel/user resolution helpers
+- [ ] Add emoji list resolution and validation (unicode + custom)
+- [ ] Normalize threshold language (more than / at least / or more)
+- [ ] Add missing-parameter confirmation flow (no action block until confirmed)
 - [ ] Update AI prompt to include admin capabilities (permission-gated)
 - [ ] Add action block parsing in `ai_brain.py`
 - [ ] Implement confirmation flow for destructive actions
 - [ ] Add audit logging for NLU admin commands
+- [ ] Update starboard settings storage to allow multiple emoji triggers
+- [ ] Update starboard reaction counting to match any configured trigger emoji
 - [ ] Test with various natural language phrasings

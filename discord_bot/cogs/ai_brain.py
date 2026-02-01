@@ -21,7 +21,7 @@ import asyncio
 from datetime import datetime, timedelta
 from io import BytesIO
 from pathlib import Path
-from typing import Dict, Optional
+from typing import Any, Dict, Optional
 import json
 import os
 import re
@@ -65,6 +65,7 @@ from utils.guild_ai import (
     get_guild_gemini_model,
     GuildConfigError,
 )
+from utils.admin_actions import execute_admin_action
 from modes import get_mode_profile
 from utils.rate_limiter import ai_limiter, get_rate_limit_message
 from utils.logger import get_logger
@@ -100,6 +101,10 @@ WELLBEING_NIGHT_END = 23
 
 
 AGENTIC_JSON_PATTERN = re.compile(r"```json\s*(\{.*?\})\s*```", re.DOTALL)
+ADMIN_ACTION_PATTERN = re.compile(r"```admin_action\s*(\{.*?\})\s*```", re.DOTALL)
+ADMIN_CONFIRM_TOKENS = {"confirm", "yes", "y", "ok", "okay"}
+ADMIN_CANCEL_TOKENS = {"cancel", "stop", "never mind", "nevermind"}
+ADMIN_PENDING_TTL_SECONDS = 180
 
 AGENTIC_TOOL_INSTRUCTIONS = """
 [AGENTIC TOOL USE]
@@ -121,6 +126,30 @@ If the user has permission and asks for a role or moderation action, respond ONL
 If the user does NOT have permission, refuse politely and do NOT output JSON.
 """.strip()
 
+ADMIN_ACTION_INSTRUCTIONS = """
+[ADMIN CONFIG ACTIONS]
+Only if [Admin config access: yes], you can configure server settings with admin_action JSON.
+Supported actions:
+- STARBOARD_SETUP: channel_id, emoji_triggers (list) or emoji_mode "any", threshold
+- WELCOME_SETUP: channel_id, message, dm_message, dm_enabled
+- AUTOMOD_ADD: keyword, action (delete/timeout/kick/ban), duration (minutes)
+- AUTOMOD_REMOVE: keyword
+- CONFIG_MODE: mode (femboy/tsundere/oneesan)
+- CONFIG_LOG: channel_id
+
+If the user asks to configure starboard, respond with:
+
+```admin_action
+{"action": "STARBOARD_SETUP", "params": {"channel_id": 123, "emoji_triggers": ["⭐", "🌟"], "emoji_mode": "list", "threshold": 5}}
+```
+
+Rules:
+- If channel, emojis (list or any), or threshold is missing, ask a short confirmation question and do NOT output admin_action.
+- "more than X" -> threshold = X + 1.
+- "at least X" or "X or more" -> threshold = X.
+- "any emoji" -> emoji_mode = "any" and omit emoji_triggers.
+""".strip()
+
 DEFAULT_ROLE_PERMISSIONS = discord.Permissions(
     view_channel=True,
     send_messages=True,
@@ -133,6 +162,32 @@ DEFAULT_ROLE_PERMISSIONS = discord.Permissions(
 def _find_agentic_json_block(response_text: str) -> Optional[str]:
     match = AGENTIC_JSON_PATTERN.search(response_text or "")
     return match.group(1) if match else None
+
+
+def _find_admin_action_block(response_text: str) -> Optional[str]:
+    match = ADMIN_ACTION_PATTERN.search(response_text or "")
+    return match.group(1) if match else None
+
+
+def _strip_admin_action_block(response_text: str) -> str:
+    if not response_text:
+        return ""
+    return ADMIN_ACTION_PATTERN.sub("", response_text).strip()
+
+
+def _build_admin_confirmation_prompt(result: Dict[str, Any]) -> str:
+    missing = result.get("missing") or []
+    summary = result.get("summary") or ""
+    missing_text = ", ".join(missing) if missing else "details"
+    if summary:
+        return (
+            "I can set that up, but I still need "
+            f"{missing_text}. Please confirm: {summary}. Reply \"confirm\" or provide corrections."
+        )
+    return (
+        "I can set that up, but I still need "
+        f"{missing_text}. Please confirm the missing details."
+    )
 
 
 async def _get_agentic_permission_level(member: Optional[discord.Member]) -> int:
@@ -316,6 +371,47 @@ async def handle_agentic_actions(
         return await message.reply(f"Action failed: {exc}", mention_author=False)
 
 
+async def handle_admin_actions(
+    brain: "AIBrain",
+    message: discord.Message,
+    ai_response_text: str,
+) -> Optional[discord.Message]:
+    """Parse and execute admin_action JSON blocks."""
+    payload = _find_admin_action_block(ai_response_text)
+    if not payload:
+        return None
+
+    if not message.guild or not isinstance(message.author, discord.Member):
+        return await message.reply("Sorry, I can only do that in a server.", mention_author=False)
+
+    try:
+        data = json.loads(payload)
+    except json.JSONDecodeError:
+        return await message.reply("I couldn't parse that admin request.", mention_author=False)
+
+    if not isinstance(data, dict):
+        return None
+
+    action = data.get("action")
+    params = data.get("params") or {}
+
+    result = await execute_admin_action(action, params, message.guild, message.author)
+
+    if result.get("needs_confirmation"):
+        brain._store_pending_admin_action(message.channel.id, message.author.id, action, params, result)
+        prompt = _build_admin_confirmation_prompt(result)
+        return await message.reply(prompt, mention_author=False)
+
+    if not result.get("success"):
+        return await message.reply(result.get("error", "Admin action failed."), mention_author=False)
+
+    cleaned = _strip_admin_action_block(ai_response_text)
+    if cleaned:
+        return await message.reply(cleaned, mention_author=False)
+
+    return await message.reply(result.get("message", "Done."), mention_author=False)
+
+
 # ============================================
 # Personality System Prompts
 # ============================================
@@ -406,6 +502,7 @@ class AIBrain(commands.Cog):
         self.chain_order: deque[int] = deque()
         self.chain_limit = CHAIN_MEMORY_LIMIT
         self._video_clients: Dict[str, tuple] = {}
+        self.pending_admin_actions: Dict[tuple[int, int], Dict[str, Any]] = {}
         # Active conversations: (channel_id, user_id) -> {"remaining": int, "last_active": datetime}
         self.active_convos: Dict[tuple[int, int], dict] = {}
     
@@ -488,6 +585,83 @@ class AIBrain(commands.Cog):
             "remaining": ACTIVE_CONVO_MESSAGES,
             "last_active": datetime.now()
         }
+
+    def _pending_admin_key(self, channel_id: int, user_id: int) -> tuple[int, int]:
+        return (channel_id, user_id)
+
+    def _store_pending_admin_action(
+        self,
+        channel_id: int,
+        user_id: int,
+        action: str,
+        params: Dict[str, Any],
+        result: Dict[str, Any],
+    ) -> None:
+        self.pending_admin_actions[self._pending_admin_key(channel_id, user_id)] = {
+            "action": action,
+            "params": params,
+            "result": result,
+            "created_at": datetime.now(),
+        }
+
+    def _pop_pending_admin_action(self, channel_id: int, user_id: int) -> Optional[Dict[str, Any]]:
+        return self.pending_admin_actions.pop(self._pending_admin_key(channel_id, user_id), None)
+
+    def _get_pending_admin_action(self, channel_id: int, user_id: int) -> Optional[Dict[str, Any]]:
+        pending = self.pending_admin_actions.get(self._pending_admin_key(channel_id, user_id))
+        if not pending:
+            return None
+        created_at = pending.get("created_at")
+        if created_at and (datetime.now() - created_at).total_seconds() > ADMIN_PENDING_TTL_SECONDS:
+            self._pop_pending_admin_action(channel_id, user_id)
+            return None
+        return pending
+
+    async def _handle_pending_admin_confirmation(self, message: discord.Message) -> Optional[discord.Message]:
+        if not message.guild or not isinstance(message.author, discord.Member):
+            return None
+        content = (message.content or "").strip().lower()
+        if not content:
+            return None
+        pending = self._get_pending_admin_action(message.channel.id, message.author.id)
+        if not pending:
+            return None
+
+        if content in ADMIN_CANCEL_TOKENS:
+            self._pop_pending_admin_action(message.channel.id, message.author.id)
+            return await message.reply("Cancelled.", mention_author=False)
+
+        if content not in ADMIN_CONFIRM_TOKENS:
+            return None
+
+        action = pending.get("action")
+        params = dict(pending.get("params") or {})
+        result = pending.get("result") or {}
+        defaults = result.get("defaults") or {}
+        missing = result.get("missing") or []
+
+        for key, value in defaults.items():
+            params.setdefault(key, value)
+
+        if "channel" in missing and not params.get("channel_id"):
+            return await message.reply("Please provide the channel to use.", mention_author=False)
+
+        follow_up = await execute_admin_action(action, params, message.guild, message.author)
+        if follow_up.get("needs_confirmation"):
+            self._store_pending_admin_action(
+                message.channel.id,
+                message.author.id,
+                action,
+                params,
+                follow_up,
+            )
+            prompt = _build_admin_confirmation_prompt(follow_up)
+            return await message.reply(prompt, mention_author=False)
+
+        self._pop_pending_admin_action(message.channel.id, message.author.id)
+        if not follow_up.get("success"):
+            return await message.reply(follow_up.get("error", "Admin action failed."), mention_author=False)
+        return await message.reply(follow_up.get("message", "Done."), mention_author=False)
 
     async def _get_reply_context(self, message: discord.Message) -> str:
         """Get the content of the message being replied to for context."""
@@ -1069,6 +1243,12 @@ You can explain these commands to the user if asked:
             agentic_access = "none"
         agentic_note = f"[Agentic access: {agentic_access}]"
 
+        admin_access = "yes" if member and (
+            member.guild_permissions.administrator or member.guild_permissions.manage_guild
+        ) else "no"
+        admin_note = f"[Admin config access: {admin_access}]"
+        admin_instructions = ADMIN_ACTION_INSTRUCTIONS if admin_access == "yes" else ""
+
         # Build full prompt
         prompt = f"""
 {persona}
@@ -1084,10 +1264,12 @@ Low affection = reserved, won't agree to demands. High affection = eager to plea
 {address_note}
 {wellbeing_note}
 {agentic_note}
+{admin_note}
 {emoji_policy_note}
 
 {commands_help}{custom_emoji_section}{emoji_section}
 {AGENTIC_TOOL_INSTRUCTIONS}
+{admin_instructions}
 {facts_section}
 
 Recent conversation:
@@ -1163,6 +1345,10 @@ Respond naturally in character. Keep responses concise.
         
         # Ignore DMs for now (TODO: implement DM handling)
         if not message.guild:
+            return
+
+        pending_reply = await self._handle_pending_admin_confirmation(message)
+        if pending_reply is not None:
             return
 
         # Track chain memory for attribution
@@ -1311,6 +1497,8 @@ Respond naturally in character. Keep responses concise.
 
         raw_response = response
         sent = await handle_agentic_actions(message, raw_response)
+        if sent is None:
+            sent = await handle_admin_actions(self, message, raw_response)
         if sent is None:
             response = raw_response
             evil_mode_enabled = allow_evil and await get_evil_mode(message.guild.id)

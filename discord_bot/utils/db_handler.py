@@ -1,4 +1,4 @@
-"""
+﻿"""
 Database Handler for Femmy Discord Bot
 =======================================
 Async SQLite wrapper for all database operations.
@@ -17,6 +17,8 @@ Usage:
 """
 
 import os
+import json
+import re
 from pathlib import Path
 import aiosqlite
 from typing import Optional, List, Dict, Any, Set
@@ -492,12 +494,25 @@ async def _init_guild_schema(db: aiosqlite.Connection) -> None:
         CREATE TABLE IF NOT EXISTS starboard_settings (
             guild_id INTEGER PRIMARY KEY,
             channel_id INTEGER,
-            emoji_trigger TEXT DEFAULT '⭐',
+            emoji_trigger TEXT DEFAULT 'â­',
+            emoji_triggers TEXT,
+            emoji_mode TEXT DEFAULT 'list',
             threshold INTEGER DEFAULT 3,
             allow_self_star INTEGER DEFAULT 0,
             enabled INTEGER DEFAULT 1
         )
     """)
+
+    # Add starboard emoji list/mode columns if missing (migration)
+    try:
+        async with db.execute("PRAGMA table_info(starboard_settings)") as cursor:
+            columns = {row[1] for row in await cursor.fetchall()}
+        if "emoji_triggers" not in columns:
+            await db.execute("ALTER TABLE starboard_settings ADD COLUMN emoji_triggers TEXT")
+        if "emoji_mode" not in columns:
+            await db.execute("ALTER TABLE starboard_settings ADD COLUMN emoji_mode TEXT DEFAULT 'list'")
+    except Exception:
+        pass
 
     # Starboard entries
     await db.execute("""
@@ -1506,6 +1521,24 @@ async def get_automod_rules(guild_id: int) -> List[Dict[str, Any]]:
 # Starboard Settings + Entries
 # ============================================
 
+def _parse_starboard_triggers(raw: Any) -> List[str]:
+    if raw is None:
+        return []
+    if isinstance(raw, list):
+        return [str(item) for item in raw if str(item).strip()]
+    text = str(raw).strip()
+    if not text:
+        return []
+    if text.startswith("[") and text.endswith("]"):
+        try:
+            parsed = json.loads(text)
+            if isinstance(parsed, list):
+                return [str(item) for item in parsed if str(item).strip()]
+        except json.JSONDecodeError:
+            pass
+    return [token for token in re.split(r"[\\s,]+", text) if token]
+
+
 async def get_starboard_settings(guild_id: int) -> Optional[Dict[str, Any]]:
     """Get starboard settings for a guild, if configured."""
     async with guild_db(guild_id) as db:
@@ -1515,32 +1548,71 @@ async def get_starboard_settings(guild_id: int) -> Optional[Dict[str, Any]]:
             (guild_id,),
         ) as cursor:
             row = await cursor.fetchone()
-            return dict(row) if row else None
+            if not row:
+                return None
+            settings = dict(row)
+            settings["emoji_triggers"] = _parse_starboard_triggers(settings.get("emoji_triggers"))
+            emoji_mode = (settings.get("emoji_mode") or "").strip().lower()
+            legacy_trigger = (settings.get("emoji_trigger") or "").strip()
+            if not emoji_mode:
+                if legacy_trigger.upper() == "ANY":
+                    emoji_mode = "any"
+                else:
+                    emoji_mode = "list"
+            if emoji_mode != "any" and not settings["emoji_triggers"] and legacy_trigger:
+                settings["emoji_triggers"] = [legacy_trigger]
+            settings["emoji_mode"] = emoji_mode
+            return settings
 
 
 async def upsert_starboard_settings(
     guild_id: int,
     channel_id: Optional[int],
-    emoji_trigger: str,
+    emoji_triggers: Optional[List[str]],
     threshold: int,
     allow_self_star: bool,
     enabled: bool = True,
+    emoji_mode: str = "list",
 ) -> None:
     """Create or update starboard settings."""
-    emoji_trigger = (emoji_trigger or "⭐").strip()
+    emoji_mode = (emoji_mode or "list").strip().lower()
+    emoji_triggers = [str(item).strip() for item in (emoji_triggers or []) if str(item).strip()]
+    if emoji_mode == "any":
+        emoji_triggers = []
+    else:
+        emoji_mode = "list"
     threshold = max(1, int(threshold))
+
+    if emoji_mode == "any":
+        emoji_trigger = "ANY"
+    else:
+        emoji_trigger = emoji_triggers[0] if emoji_triggers else "â­"
+
+    emoji_triggers_json = json.dumps(emoji_triggers, ensure_ascii=False)
+
     async with guild_db(guild_id) as db:
         await db.execute(
             """INSERT INTO starboard_settings
-               (guild_id, channel_id, emoji_trigger, threshold, allow_self_star, enabled)
-               VALUES (?, ?, ?, ?, ?, ?)
+               (guild_id, channel_id, emoji_trigger, emoji_triggers, emoji_mode, threshold, allow_self_star, enabled)
+               VALUES (?, ?, ?, ?, ?, ?, ?, ?)
                ON CONFLICT(guild_id) DO UPDATE SET
                    channel_id = excluded.channel_id,
                    emoji_trigger = excluded.emoji_trigger,
+                   emoji_triggers = excluded.emoji_triggers,
+                   emoji_mode = excluded.emoji_mode,
                    threshold = excluded.threshold,
                    allow_self_star = excluded.allow_self_star,
                    enabled = excluded.enabled""",
-            (guild_id, channel_id, emoji_trigger, threshold, int(allow_self_star), int(enabled)),
+            (
+                guild_id,
+                channel_id,
+                emoji_trigger,
+                emoji_triggers_json,
+                emoji_mode,
+                threshold,
+                int(allow_self_star),
+                int(enabled),
+            ),
         )
         await db.commit()
 
@@ -2130,3 +2202,4 @@ async def cleanup_guild_audit(guild_id: int, max_age_days: int = 90) -> int:
         )
         await db.commit()
         return cursor.rowcount
+

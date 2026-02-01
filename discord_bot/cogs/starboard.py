@@ -1,6 +1,7 @@
-from __future__ import annotations
+﻿from __future__ import annotations
 
-from typing import Optional
+from typing import List, Optional
+import re
 
 import discord
 from discord import app_commands
@@ -46,6 +47,44 @@ class Starboard(commands.Cog):
         if parsed and parsed.name:
             return (emoji.name or "") == parsed.name
         return str(emoji) == trigger
+
+    def _emoji_matches_any(self, triggers: List[str], emoji: discord.PartialEmoji) -> bool:
+        return any(self._emoji_matches(trigger, emoji) for trigger in triggers)
+
+    def _get_trigger_config(self, settings: dict) -> tuple[str, List[str]]:
+        emoji_mode = (settings.get("emoji_mode") or "").strip().lower()
+        triggers = settings.get("emoji_triggers") or []
+        legacy_trigger = (settings.get("emoji_trigger") or "").strip()
+
+        if not emoji_mode:
+            if legacy_trigger.upper() == "ANY":
+                emoji_mode = "any"
+            else:
+                emoji_mode = "list"
+
+        if emoji_mode != "any" and not triggers and legacy_trigger:
+            triggers = [legacy_trigger]
+
+        return emoji_mode, triggers
+
+    def _split_emoji_input(self, raw: str) -> List[str]:
+        text = (raw or "").strip()
+        if not text:
+            return []
+
+        tokens: List[str] = []
+        custom_tokens = re.findall(r"<a?:\\w+:\\d+>|:\\w+:", text)
+        if custom_tokens:
+            tokens.extend(custom_tokens)
+            text = re.sub(r"<a?:\\w+:\\d+>|:\\w+:", " ", text)
+
+        parts = [part for part in re.split(r"[\\s,]+", text.strip()) if part]
+        if len(parts) == 1 and parts[0] and not re.search(r"[\\s,]", raw) and not custom_tokens:
+            tokens.extend(list(parts[0]))
+        else:
+            tokens.extend(parts)
+
+        return [token for token in tokens if token]
 
     def _stringify_emoji(self, emoji: discord.PartialEmoji) -> str:
         if emoji.is_custom():
@@ -182,18 +221,18 @@ class Starboard(commands.Cog):
         if payload.channel_id in ignored_channels:
             return
 
-        trigger = settings.get("emoji_trigger") or "⭐"
+        emoji_mode, triggers = self._get_trigger_config(settings)
         payload_emoji = payload.emoji
-        if trigger.strip().upper() != "ANY" and not self._emoji_matches(trigger, payload_emoji):
+        if emoji_mode != "any" and not self._emoji_matches_any(triggers, payload_emoji):
             return
 
         entry = await get_starboard_entry(payload.guild_id, payload.message_id)
         if entry and entry.get("is_deleted"):
             return
 
-        if entry and entry.get("emoji_used") and trigger.strip().upper() == "ANY":
-            if entry.get("emoji_used") != self._stringify_emoji(payload_emoji):
-                return
+        emoji_display = self._stringify_emoji(payload_emoji)
+        if entry and entry.get("emoji_used") and entry.get("emoji_used") != emoji_display:
+            return
 
         channel = await self._fetch_channel(payload.channel_id)
         if not channel:
@@ -205,13 +244,7 @@ class Starboard(commands.Cog):
         if message.author and message.author.bot:
             return
 
-        if trigger.strip().upper() == "ANY":
-            emoji_to_track = payload_emoji
-            emoji_display = self._stringify_emoji(payload_emoji)
-        else:
-            parsed = self._parse_trigger(trigger)
-            emoji_to_track = parsed or payload_emoji
-            emoji_display = trigger
+        emoji_to_track = payload_emoji
 
         reaction = self._get_reaction_count(message, emoji_to_track)
         effective_count = await self._effective_count(
@@ -313,7 +346,7 @@ class Starboard(commands.Cog):
             footer_text = new_embed.footer.text or ""
             suffix = "Original message deleted."
             if suffix not in footer_text:
-                new_footer = f"{footer_text} • {suffix}".strip(" •")
+                new_footer = f"{footer_text} â€¢ {suffix}".strip(" â€¢")
                 new_embed.set_footer(text=new_footer)
             await sb_message.edit(embed=new_embed)
 
@@ -328,7 +361,7 @@ class Starboard(commands.Cog):
     @app_commands.describe(
         channel="Starboard destination channel",
         threshold="Minimum reactions to post",
-        emoji="Emoji to track (default ⭐)",
+        emoji="Emoji(s) to track (single, multiple, or 'any')",
         allow_self_star="Allow the author to star their own message",
     )
     async def starboard_setup(
@@ -336,19 +369,26 @@ class Starboard(commands.Cog):
         interaction: discord.Interaction,
         channel: discord.TextChannel,
         threshold: int = 3,
-        emoji: str = "⭐",
+        emoji: str = "â­",
         allow_self_star: Optional[bool] = False,
     ):
         if not interaction.guild:
             await interaction.response.send_message("Use this command in a server.", ephemeral=True)
             return
+        emoji_input = (emoji or "").strip()
+        emoji_mode = "any" if emoji_input.lower() in {"any", "all", "*"} else "list"
+        emoji_triggers = [] if emoji_mode == "any" else self._split_emoji_input(emoji_input)
+        if emoji_mode != "any" and not emoji_triggers:
+            emoji_triggers = ["â­"]
+
         await upsert_starboard_settings(
             interaction.guild.id,
             channel.id,
-            emoji,
+            emoji_triggers,
             threshold,
             bool(allow_self_star),
             enabled=True,
+            emoji_mode=emoji_mode,
         )
         await interaction.response.send_message(
             f"Starboard set to {channel.mention} with threshold {max(1, threshold)}.",
@@ -429,3 +469,4 @@ class Starboard(commands.Cog):
 
 async def setup(bot: commands.Bot):
     await bot.add_cog(Starboard(bot))
+

@@ -38,6 +38,7 @@ This document is the canonical, detailed feature inventory for this repository. 
   - Default: Gemini.
   - Uncensored (evil) mode: OpenRouter when enabled and allowed by affection level; falls back to Gemini if needed.
 - Agentic action execution (role management and moderation) via structured JSON responses when user has configured staff permissions; logs to mod-log channel.
+- Natural-language admin configuration via `admin_action` JSON for starboard, welcome, automod, and basic config actions, with confirmation prompts if required fields are missing.
 
 ### Vision analysis (discord_bot/cogs/vision.py)
 - Explicit image analysis via `!describe` or `/describe` with optional question prompt.
@@ -105,7 +106,7 @@ This document is the canonical, detailed feature inventory for this repository. 
 - Gender role mappings for pronoun guidance (`/admin setgenderrole`).
 
 ### Starboard (discord_bot/cogs/starboard.py)
-- Configurable starboard channel, threshold, and emoji trigger (specific emoji or ANY).
+- Configurable starboard channel, threshold, and emoji triggers (single emoji, multiple list, or ANY).
 - Optional self-star allowance.
 - Ignore/unignore channels.
 - Updates starboard entries on reaction add/remove.
@@ -166,6 +167,7 @@ This document is the canonical, detailed feature inventory for this repository. 
   - auth/audit: `guild_admin_auth`, `guild_auth_sessions`, `guild_config_audit`
   - moderation: `staff_roles`, `gender_roles`, `automod_rules`, `mod_log_channel_id` (in `guild_config`)
   - starboard: `starboard_settings`, `starboard_entries`, `starboard_ignored_channels`
+- `starboard_settings` fields include `channel_id`, `emoji_trigger`, `emoji_triggers`, `emoji_mode`, `threshold`, `allow_self_star`, `enabled`.
 - Built-in migrations for new columns and tables.
 
 ### Deployment and ops
@@ -256,6 +258,7 @@ This document is the canonical, detailed feature inventory for this repository. 
       tsundere.txt
       tsundere_evil.txt
     utils/
+      admin_actions.py
       api_manager.py
       app_emojis.py
       auth.py
