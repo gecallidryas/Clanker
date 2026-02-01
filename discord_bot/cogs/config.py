@@ -146,6 +146,31 @@ class Config(commands.Cog):
         self.encryption = get_encryption()
         self.auth_limiter = RateLimiter(rate=5, per=60)
 
+    async def cog_load(self) -> None:
+        # Ensure command groups are registered even if auto-registration fails.
+        for group in (
+            self.config,
+            self.staff_group,
+            self.modlog_group,
+            self.autorole_group,
+            self.welcome_group,
+        ):
+            if self.bot.tree.get_command(group.name) is None:
+                self.bot.tree.add_command(group)
+
+    async def cog_unload(self) -> None:
+        for group in (
+            self.config,
+            self.staff_group,
+            self.modlog_group,
+            self.autorole_group,
+            self.welcome_group,
+        ):
+            try:
+                self.bot.tree.remove_command(group.name)
+            except Exception:
+                pass
+
     async def _rate_limit(self, guild_id: int, user_id: int) -> bool:
         key = f"{guild_id}:{user_id}"
         return await self.auth_limiter.acquire(key)
@@ -601,7 +626,7 @@ class Config(commands.Cog):
         if len(combined) <= 1900:
             await interaction.response.send_message(combined, ephemeral=True)
         else:
-            await interaction.response.send_message(f\"{warning}\\n\\n{instructions}\", ephemeral=True)
+            await interaction.response.send_message(f"{warning}\n\n{instructions}", ephemeral=True)
             await interaction.followup.send(template_block, ephemeral=True)
 
     @env_group.command(name="upload", description="Upload a .env file for this guild.")
