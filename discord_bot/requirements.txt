@@ -29,5 +29,8 @@ psutil>=5.9.0
 # Image processing for vision
 Pillow>=10.0.0
 
+# WebP encoder support for Pillow (system package on Ubuntu)
+# Install: sudo apt-get install -y libwebp libwebp-dev
+
 # OpenAI SDK (used for OpenRouter API compatibility)
 openai>=1.0.0
