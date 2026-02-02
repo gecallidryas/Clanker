@@ -369,6 +369,79 @@ async def _init_guild_schema(db: aiosqlite.Connection) -> None:
         )
     """)
 
+    # Custom personas (per guild)
+    await db.execute("""
+        CREATE TABLE IF NOT EXISTS custom_personas (
+            id INTEGER PRIMARY KEY AUTOINCREMENT,
+            guild_id INTEGER NOT NULL,
+            name TEXT NOT NULL,
+            mode_key TEXT NOT NULL,
+            bio TEXT,
+            avatar_path TEXT,
+            banner_path TEXT,
+            normal_prompt TEXT NOT NULL,
+            evil_prompt TEXT,
+            created_by INTEGER NOT NULL,
+            created_at TIMESTAMP DEFAULT CURRENT_TIMESTAMP,
+            updated_at TIMESTAMP DEFAULT CURRENT_TIMESTAMP,
+            is_active BOOLEAN DEFAULT 1,
+            UNIQUE (mode_key),
+            UNIQUE (guild_id, name)
+        )
+    """)
+
+    # Migrate legacy uniqueness (name-only) to guild-scoped uniqueness if needed.
+    try:
+        async with db.execute("PRAGMA index_list(custom_personas)") as cursor:
+            indexes = await cursor.fetchall()
+        legacy_name_unique = False
+        for index in indexes:
+            index_name = index[1]
+            is_unique = bool(index[2])
+            if not is_unique:
+                continue
+            async with db.execute(f"PRAGMA index_info({index_name})") as icursor:
+                cols = [row[2] for row in await icursor.fetchall()]
+            if cols == ["name"]:
+                legacy_name_unique = True
+                break
+
+        if legacy_name_unique:
+            await db.execute("""
+                CREATE TABLE IF NOT EXISTS custom_personas_new (
+                    id INTEGER PRIMARY KEY AUTOINCREMENT,
+                    guild_id INTEGER NOT NULL,
+                    name TEXT NOT NULL,
+                    mode_key TEXT NOT NULL,
+                    bio TEXT,
+                    avatar_path TEXT,
+                    banner_path TEXT,
+                    normal_prompt TEXT NOT NULL,
+                    evil_prompt TEXT,
+                    created_by INTEGER NOT NULL,
+                    created_at TIMESTAMP DEFAULT CURRENT_TIMESTAMP,
+                    updated_at TIMESTAMP DEFAULT CURRENT_TIMESTAMP,
+                    is_active BOOLEAN DEFAULT 1,
+                    UNIQUE (mode_key),
+                    UNIQUE (guild_id, name)
+                )
+            """)
+            await db.execute(
+                """
+                INSERT INTO custom_personas_new
+                    (id, guild_id, name, mode_key, bio, avatar_path, banner_path,
+                     normal_prompt, evil_prompt, created_by, created_at, updated_at, is_active)
+                SELECT
+                    id, guild_id, name, mode_key, bio, avatar_path, banner_path,
+                    normal_prompt, evil_prompt, created_by, created_at, updated_at, is_active
+                FROM custom_personas
+                """
+            )
+            await db.execute("DROP TABLE custom_personas")
+            await db.execute("ALTER TABLE custom_personas_new RENAME TO custom_personas")
+    except Exception:
+        pass
+
     # Add birthday column if missing (migration)
     try:
         await db.execute("ALTER TABLE users ADD COLUMN birthday TEXT")
@@ -773,15 +846,15 @@ async def set_server_mode(guild_id: int, mode: str) -> None:
     
     Args:
         guild_id: Discord guild/server ID
-        mode: One of "mode_default", "mode_femboy", "mode_tsundere", "mode_oneesan"
+        mode: One of "mode_default", "mode_femboy", "mode_tsundere", "mode_oneesan", or custom_*
         
     TODO:
         - [ ] Validate mode string
         - [ ] Emit event for mode change
     """
     valid_modes = ["mode_default", "mode_femboy", "mode_tsundere", "mode_oneesan"]
-    if mode not in valid_modes:
-        raise ValueError(f"Invalid mode. Must be one of: {valid_modes}")
+    if mode not in valid_modes and not mode.startswith("custom_"):
+        raise ValueError(f"Invalid mode. Must be one of: {valid_modes} or custom_*")
     
     async with guild_db(guild_id) as db:
         await db.execute("""
@@ -2108,6 +2181,159 @@ async def record_guild_avatar_update(guild_id: int) -> None:
                 (guild_id, now.isoformat(), 1, now.isoformat()),
             )
         await db.commit()
+
+
+# ============================================
+# Custom Personas
+# ============================================
+
+def sanitize_persona_name(name: str) -> str:
+    """Normalize persona names for mode keys and file paths."""
+    if not name:
+        return ""
+    value = name.strip().lower()
+    value = re.sub(r"[^a-z0-9]+", "_", value)
+    value = re.sub(r"_+", "_", value).strip("_")
+    return value
+
+
+def build_custom_mode_key(guild_id: int, name: str) -> str:
+    """Build the custom mode key for a guild persona."""
+    slug = sanitize_persona_name(name)
+    return f"custom_{guild_id}_{slug}" if slug else ""
+
+
+async def create_custom_persona(
+    guild_id: int,
+    name: str,
+    mode_key: str,
+    bio: Optional[str],
+    avatar_path: Optional[str],
+    banner_path: Optional[str],
+    normal_prompt: str,
+    evil_prompt: Optional[str],
+    created_by: int,
+) -> int:
+    """Create a custom persona and return its row id."""
+    async with guild_db(guild_id) as db:
+        cursor = await db.execute(
+            """
+            INSERT INTO custom_personas
+                (guild_id, name, mode_key, bio, avatar_path, banner_path,
+                 normal_prompt, evil_prompt, created_by)
+            VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?)
+            """,
+            (
+                guild_id,
+                name,
+                mode_key,
+                bio,
+                avatar_path,
+                banner_path,
+                normal_prompt,
+                evil_prompt,
+                created_by,
+            ),
+        )
+        await db.commit()
+        return int(cursor.lastrowid or 0)
+
+
+async def get_custom_persona_by_mode_key(guild_id: int, mode_key: str) -> Optional[Dict[str, Any]]:
+    """Fetch a custom persona by its mode key."""
+    async with guild_db(guild_id) as db:
+        db.row_factory = aiosqlite.Row
+        async with db.execute(
+            """
+            SELECT * FROM custom_personas
+            WHERE guild_id = ? AND mode_key = ? AND is_active = 1
+            """,
+            (guild_id, mode_key),
+        ) as cursor:
+            row = await cursor.fetchone()
+            return dict(row) if row else None
+
+
+async def get_custom_persona_by_name(guild_id: int, name: str) -> Optional[Dict[str, Any]]:
+    """Fetch a custom persona by name (case-insensitive)."""
+    async with guild_db(guild_id) as db:
+        db.row_factory = aiosqlite.Row
+        async with db.execute(
+            """
+            SELECT * FROM custom_personas
+            WHERE guild_id = ? AND lower(name) = lower(?) AND is_active = 1
+            """,
+            (guild_id, name),
+        ) as cursor:
+            row = await cursor.fetchone()
+            return dict(row) if row else None
+
+
+async def get_guild_custom_personas(guild_id: int) -> List[Dict[str, Any]]:
+    """Return all active custom personas for a guild."""
+    async with guild_db(guild_id) as db:
+        db.row_factory = aiosqlite.Row
+        async with db.execute(
+            """
+            SELECT * FROM custom_personas
+            WHERE guild_id = ? AND is_active = 1
+            ORDER BY created_at DESC
+            """,
+            (guild_id,),
+        ) as cursor:
+            rows = await cursor.fetchall()
+            return [dict(row) for row in rows]
+
+
+async def update_custom_persona(
+    guild_id: int,
+    mode_key: str,
+    **updates: Any,
+) -> bool:
+    """Update a custom persona. Returns True if a row was updated."""
+    if not updates:
+        return False
+
+    allowed = {
+        "name",
+        "bio",
+        "avatar_path",
+        "banner_path",
+        "normal_prompt",
+        "evil_prompt",
+        "updated_at",
+        "is_active",
+    }
+    filtered = {k: v for k, v in updates.items() if k in allowed}
+    if not filtered:
+        return False
+
+    filtered["updated_at"] = datetime.now()
+    set_clause = ", ".join([f"{key} = ?" for key in filtered.keys()])
+    values = list(filtered.values())
+
+    async with guild_db(guild_id) as db:
+        cursor = await db.execute(
+            f"""
+            UPDATE custom_personas
+            SET {set_clause}
+            WHERE guild_id = ? AND mode_key = ?
+            """,
+            (*values, guild_id, mode_key),
+        )
+        await db.commit()
+        return cursor.rowcount > 0
+
+
+async def delete_custom_persona(guild_id: int, mode_key: str) -> bool:
+    """Delete a custom persona by mode key."""
+    async with guild_db(guild_id) as db:
+        cursor = await db.execute(
+            "DELETE FROM custom_personas WHERE guild_id = ? AND mode_key = ?",
+            (guild_id, mode_key),
+        )
+        await db.commit()
+        return cursor.rowcount > 0
 
 
 # ============================================
