@@ -279,8 +279,10 @@ class Affection(commands.Cog):
         if interaction_type == "pat" and mode == "mode_oneesan":
             delta = -1
 
+        affection_mode = mode if mode in AFFECTION_TRACKED_MODES else "mode_femboy"
+
         await update_mood(guild_id, 5)
-        await add_affection_to_mode(guild_id, user_id, mode, delta)
+        await add_affection_to_mode(guild_id, user_id, affection_mode, delta)
         await record_interaction(guild_id, user_id, interaction_type)
 
         responses = HEADPAT_RESPONSES if interaction_type == "pat" else HUG_RESPONSES
@@ -433,6 +435,7 @@ class Affection(commands.Cog):
         if self.bot.user in message.mentions:
             if mode == "mode_default":
                 return
+            affection_mode = mode if mode in AFFECTION_TRACKED_MODES else "mode_femboy"
             # Get message content without the mention
             content = message.content
             content = content.replace(f"<@{self.bot.user.id}>", "").strip()
@@ -449,13 +452,13 @@ class Affection(commands.Cog):
                     sentiment, delta = await analyze_sentiment(message.guild.id, content)
                 
                 # Apply affection change (don't reply here - ai_brain handles responses)
-                await add_affection_to_mode(message.guild.id, message.author.id, mode, delta)
+                await add_affection_to_mode(message.guild.id, message.author.id, affection_mode, delta)
                 
                 if sentiment in ("negative", "very_negative", "hostile"):
                     logger.info(f"Negative interaction from {message.author}: {sentiment} ({delta} pts)")
             else:
                 # Default positive for short mentions
-                await add_affection_to_mode(message.guild.id, message.author.id, mode, 1)
+                await add_affection_to_mode(message.guild.id, message.author.id, affection_mode, 1)
     
     # ============================================
     # Background Tasks

@@ -45,6 +45,7 @@ from utils.db_handler import (
     set_last_wellbeing_date,
     get_staff_roles,
     get_mod_log_channel_id,
+    AFFECTION_TRACKED_MODES,
 )
 from utils.api_manager import UserInputError
 from utils.app_emojis import (
@@ -930,8 +931,23 @@ class AIBrain(commands.Cog):
                 descriptions.append(description)
         return descriptions
 
-    def _load_persona(self, mode: str, evil_mode: bool) -> str:
-        """Load persona prompt from file, falling back to defaults."""
+    async def _load_persona(self, guild_id: int, mode: str, evil_mode: bool) -> str:
+        """Load persona prompt from custom persona or file, falling back to defaults."""
+        if mode.startswith("custom_"):
+            try:
+                from utils.db_handler import get_custom_persona_by_mode_key
+                persona = await get_custom_persona_by_mode_key(guild_id, mode)
+            except Exception as exc:
+                logger.warning("Failed to load custom persona %s: %s", mode, exc)
+                persona = None
+
+            if persona:
+                if evil_mode and persona.get("evil_prompt"):
+                    return persona["evil_prompt"]
+                normal_prompt = persona.get("normal_prompt")
+                if normal_prompt:
+                    return normal_prompt
+
         profile = get_mode_profile(mode)
         filename = profile.evil_prompt_file if evil_mode else profile.prompt_file
         path = PROMPTS_DIR / filename
@@ -1076,7 +1092,7 @@ class AIBrain(commands.Cog):
         # Get current persona mode
         mode = await get_server_mode(guild_id)
         evil_mode = allow_evil and await get_evil_mode(guild_id)
-        persona = self._load_persona(mode, evil_mode)
+        persona = await self._load_persona(guild_id, mode, evil_mode)
         
         # Get user facts (Current speaker)
         facts = await get_facts(guild_id, user_id)
@@ -1110,7 +1126,8 @@ class AIBrain(commands.Cog):
                     "total_interactions": 0,
                 }
             else:
-                affection_data = await get_affection_by_mode(guild_id, user_id, mode)
+                affection_mode = mode if mode in AFFECTION_TRACKED_MODES else "mode_femboy"
+                affection_data = await get_affection_by_mode(guild_id, user_id, affection_mode)
         affection_level = affection_data.get("affection_level", "stranger")
         affection_points = affection_data.get("affection_points", 0)
 
@@ -1458,7 +1475,8 @@ Respond naturally in character. Keep responses concise.
                 "total_interactions": 0,
             }
         else:
-            affection_data = await get_affection_by_mode(message.guild.id, message.author.id, mode)
+            affection_mode = mode if mode in AFFECTION_TRACKED_MODES else "mode_femboy"
+            affection_data = await get_affection_by_mode(message.guild.id, message.author.id, affection_mode)
         affection_points = affection_data.get("affection_points", 0)
         allow_evil = affection_points >= 500
         if mode == "mode_default":

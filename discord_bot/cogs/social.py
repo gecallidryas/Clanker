@@ -15,6 +15,7 @@ Personality Modes:
 
 import os
 import random
+from pathlib import Path
 import discord
 from discord import app_commands
 from discord.ext import commands
@@ -33,6 +34,10 @@ from utils.db_handler import (
     get_welcome_config,
     get_dm_welcome_message,
     get_dm_welcome_enabled,
+    get_custom_persona_by_name,
+    get_custom_persona_by_mode_key,
+    get_guild_custom_personas,
+    set_guild_avatar_path,
 )
 from utils.guild_ai import generate_guild_gemini_text, GuildConfigError
 from utils.logger import get_logger
@@ -215,6 +220,12 @@ class Social(commands.Cog):
         # Normalize mode name
         mode_name = mode_name.lower().strip()
         target_mode = resolve_mode_key(mode_name)
+        custom_persona = None
+
+        if not target_mode:
+            custom_persona = await get_custom_persona_by_name(ctx.guild.id, mode_name)
+            if custom_persona:
+                target_mode = custom_persona.get("mode_key")
 
         if not target_mode:
             await ctx.send(
@@ -226,49 +237,62 @@ class Social(commands.Cog):
         # Check if already in this mode
         current_mode = await get_server_mode(ctx.guild.id)
         if current_mode == target_mode:
+            if custom_persona:
+                await ctx.send(f"Already in **{custom_persona.get('name', 'custom')}** mode!")
+                return
             profile = get_mode_profile(target_mode)
             mode_icon = await self._get_mode_icon(target_mode)
             prefix = f"{mode_icon} " if mode_icon else ""
             await ctx.send(f"{prefix}Already in **{profile.display_name}** mode!")
             return
 
+        left_custom = current_mode.startswith("custom_") and not target_mode.startswith("custom_")
+        if left_custom:
+            await set_guild_avatar_path(ctx.guild.id, None)
+
         # Switch mode
         await set_server_mode(ctx.guild.id, target_mode)
         if target_mode == "mode_default":
             await set_evil_mode(ctx.guild.id, False)
 
-        profile = get_mode_profile(target_mode)
-        mode_icon = await self._get_mode_icon(target_mode)
-        prefix = f"{mode_icon} " if mode_icon else ""
-        await ctx.send(f"{prefix}{profile.switch_message}")
+        if custom_persona:
+            await ctx.send(f"Mode changed to **{custom_persona.get('name', 'custom')}**!")
+        else:
+            profile = get_mode_profile(target_mode)
+            mode_icon = await self._get_mode_icon(target_mode)
+            prefix = f"{mode_icon} " if mode_icon else ""
+            await ctx.send(f"{prefix}{profile.switch_message}")
         try:
             await self._set_presence_for_mode(target_mode)
         except Exception as exc:
             logger.warning("Failed to update presence for %s: %s", target_mode, exc)
         try:
-            from utils.server_avatar import set_mode_avatar
-            evil_mode_enabled = await get_evil_mode(ctx.guild.id)
-            success, reason = await set_mode_avatar(
-                self.bot,
-                ctx.guild.id,
-                target_mode,
-                evil_mode=evil_mode_enabled,
-            )
-            if not success and reason != "custom":
-                logger.warning("Failed to update server avatar for %s: %s", target_mode, reason)
+            if custom_persona:
+                avatar_path = custom_persona.get("avatar_path")
+                if avatar_path:
+                    from utils.server_avatar import set_custom_avatar
+                    avatar_bytes = Path(avatar_path).read_bytes()
+                    success, reason = await set_custom_avatar(self.bot, ctx.guild.id, avatar_bytes)
+                    if not success:
+                        logger.warning("Failed to update server avatar for %s: %s", target_mode, reason)
+            else:
+                from utils.server_avatar import set_mode_avatar
+                evil_mode_enabled = await get_evil_mode(ctx.guild.id)
+                success, reason = await set_mode_avatar(
+                    self.bot,
+                    ctx.guild.id,
+                    target_mode,
+                    evil_mode=evil_mode_enabled,
+                )
+                if not success and reason != "custom":
+                    logger.warning("Failed to update server avatar for %s: %s", target_mode, reason)
         except Exception as exc:
             logger.warning("Failed to update server avatar for %s: %s", target_mode, exc)
 
     @app_commands.command(name="mode", description="Switch the bot's personality mode.")
     @app_commands.checks.has_permissions(manage_guild=True)
     @app_commands.describe(mode="Personality mode")
-    @app_commands.choices(mode=[
-        app_commands.Choice(name="default", value="default"),
-        app_commands.Choice(name="femboy", value="femboy"),
-        app_commands.Choice(name="tsundere", value="tsundere"),
-        app_commands.Choice(name="oneesan", value="oneesan"),
-    ])
-    async def switch_mode_slash(self, interaction: discord.Interaction, mode: app_commands.Choice[str]):
+    async def switch_mode_slash(self, interaction: discord.Interaction, mode: str):
         if not interaction.guild:
             await interaction.response.send_message("Use this command in a server.", ephemeral=True)
             return
@@ -282,8 +306,14 @@ class Social(commands.Cog):
             )
             return
 
-        mode_name = mode.value
+        mode_name = (mode or "").lower().strip()
         target_mode = resolve_mode_key(mode_name)
+        custom_persona = None
+
+        if not target_mode:
+            custom_persona = await get_custom_persona_by_name(interaction.guild.id, mode_name)
+            if custom_persona:
+                target_mode = custom_persona.get("mode_key")
 
         if not target_mode:
             await interaction.response.send_message(
@@ -295,6 +325,11 @@ class Social(commands.Cog):
 
         current_mode = await get_server_mode(interaction.guild.id)
         if current_mode == target_mode:
+            if custom_persona:
+                await interaction.response.send_message(
+                    f"Already in **{custom_persona.get('name', 'custom')}** mode!"
+                )
+                return
             profile = get_mode_profile(target_mode)
             mode_icon = await self._get_mode_icon(target_mode)
             prefix = f"{mode_icon} " if mode_icon else ""
@@ -303,30 +338,80 @@ class Social(commands.Cog):
             )
             return
 
+        left_custom = current_mode.startswith("custom_") and not target_mode.startswith("custom_")
+        if left_custom:
+            await set_guild_avatar_path(interaction.guild.id, None)
+
         await set_server_mode(interaction.guild.id, target_mode)
         if target_mode == "mode_default":
             await set_evil_mode(interaction.guild.id, False)
-        profile = get_mode_profile(target_mode)
-        mode_icon = await self._get_mode_icon(target_mode)
-        prefix = f"{mode_icon} " if mode_icon else ""
-        await interaction.response.send_message(f"{prefix}{profile.switch_message}")
+        if custom_persona:
+            await interaction.response.send_message(
+                f"Mode changed to **{custom_persona.get('name', 'custom')}**!"
+            )
+        else:
+            profile = get_mode_profile(target_mode)
+            mode_icon = await self._get_mode_icon(target_mode)
+            prefix = f"{mode_icon} " if mode_icon else ""
+            await interaction.response.send_message(f"{prefix}{profile.switch_message}")
         try:
             await self._set_presence_for_mode(target_mode)
         except Exception as exc:
             logger.warning("Failed to update presence for %s: %s", target_mode, exc)
         try:
-            from utils.server_avatar import set_mode_avatar
-            evil_mode_enabled = await get_evil_mode(interaction.guild.id)
-            success, reason = await set_mode_avatar(
-                self.bot,
-                interaction.guild.id,
-                target_mode,
-                evil_mode=evil_mode_enabled,
-            )
-            if not success and reason != "custom":
-                logger.warning("Failed to update server avatar for %s: %s", target_mode, reason)
+            if custom_persona:
+                avatar_path = custom_persona.get("avatar_path")
+                if avatar_path:
+                    from utils.server_avatar import set_custom_avatar
+                    avatar_bytes = Path(avatar_path).read_bytes()
+                    success, reason = await set_custom_avatar(self.bot, interaction.guild.id, avatar_bytes)
+                    if not success:
+                        logger.warning("Failed to update server avatar for %s: %s", target_mode, reason)
+            else:
+                from utils.server_avatar import set_mode_avatar
+                evil_mode_enabled = await get_evil_mode(interaction.guild.id)
+                success, reason = await set_mode_avatar(
+                    self.bot,
+                    interaction.guild.id,
+                    target_mode,
+                    evil_mode=evil_mode_enabled,
+                )
+                if not success and reason != "custom":
+                    logger.warning("Failed to update server avatar for %s: %s", target_mode, reason)
         except Exception as exc:
             logger.warning("Failed to update server avatar for %s: %s", target_mode, exc)
+
+    @switch_mode_slash.autocomplete("mode")
+    async def mode_autocomplete(
+        self,
+        interaction: discord.Interaction,
+        current: str,
+    ) -> list[app_commands.Choice[str]]:
+        if not interaction.guild:
+            return []
+
+        current_lower = (current or "").lower()
+        options = ["default", "femboy", "tsundere", "oneesan"]
+
+        try:
+            personas = await get_guild_custom_personas(interaction.guild.id)
+        except Exception:
+            personas = []
+
+        for persona in personas:
+            name = persona.get("name")
+            if name:
+                options.append(name)
+
+        results = []
+        for option in options:
+            if current_lower and current_lower not in option.lower():
+                continue
+            results.append(app_commands.Choice(name=option, value=option))
+            if len(results) >= 25:
+                break
+
+        return results
 
     @commands.command(name="modes", aliases=["personalities", "personas"])
     async def show_modes(self, ctx: commands.Context):
@@ -400,10 +485,22 @@ class Social(commands.Cog):
         """Display the current personality mode."""
         current_mode = await get_server_mode(ctx.guild.id)
         current_evil = await get_evil_mode(ctx.guild.id)
+        custom_persona = None
+        if current_mode.startswith("custom_"):
+            custom_persona = await get_custom_persona_by_mode_key(ctx.guild.id, current_mode)
+
+        evil_text = " 😈 (Evil Mode Active)" if current_evil else ""
+        if custom_persona:
+            description = custom_persona.get("bio") or "Custom persona."
+            await ctx.send(
+                f"Currently in **{custom_persona.get('name', 'custom')}** mode!{evil_text}\n"
+                f"*{description}*"
+            )
+            return
+
         profile = get_mode_profile(current_mode)
         mode_icon = await self._get_mode_icon(current_mode)
         prefix = f"{mode_icon} " if mode_icon else ""
-        evil_text = " 😈 (Evil Mode Active)" if current_evil else ""
 
         await ctx.send(
             f"{prefix}Currently in **{profile.display_name}** mode!{evil_text}\n"
@@ -418,10 +515,22 @@ class Social(commands.Cog):
 
         current_mode = await get_server_mode(interaction.guild.id)
         current_evil = await get_evil_mode(interaction.guild.id)
+        custom_persona = None
+        if current_mode.startswith("custom_"):
+            custom_persona = await get_custom_persona_by_mode_key(interaction.guild.id, current_mode)
+
+        evil_text = " 😈 (Evil Mode Active)" if current_evil else ""
+        if custom_persona:
+            description = custom_persona.get("bio") or "Custom persona."
+            await interaction.response.send_message(
+                f"Currently in **{custom_persona.get('name', 'custom')}** mode!{evil_text}\n"
+                f"*{description}*"
+            )
+            return
+
         profile = get_mode_profile(current_mode)
         mode_icon = await self._get_mode_icon(current_mode)
         prefix = f"{mode_icon} " if mode_icon else ""
-        evil_text = " 😈 (Evil Mode Active)" if current_evil else ""
 
         await interaction.response.send_message(
             f"{prefix}Currently in **{profile.display_name}** mode!{evil_text}\n"
