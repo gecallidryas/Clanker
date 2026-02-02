@@ -1,10 +1,10 @@
-# Improvement 7: Mode-Based Personalization & Server Avatars
+﻿# Improvement 7: Mode-Based Personalization, Help Output, Hug/Pat Rules, and Server Avatars
 
 ## Overview
 This improvement covers four major features:
 1. Bot activity status change
-2. Help command personalization by mode
-3. Hug/Pat rate limits with mode-specific responses/affection
+2. Help output personalization by mode with a full command list
+3. Hug/Pat rate limits with mode-specific responses and affection rules
 4. Server-specific bot avatars (replacing webhooks)
 
 ---
@@ -18,7 +18,7 @@ In `on_ready()`, change the activity from "Watching: over you~" to "Playing: Cla
 ```python
 async def on_ready(self):
     # ... existing logging code ...
-    
+
     # Set bot activity
     activity = discord.Game(name="Clanking with humans")
     await self.change_presence(activity=activity)
@@ -26,30 +26,116 @@ async def on_ready(self):
 
 ---
 
-## Part 2: Help Command Personalization
+## Part 2: Help Output Personalization (Full Command List + Mode Tone Rules)
+
+### Goal
+- The help command must show a complete command list (prefix and slash).
+- The greeting and tone must be based on mode.
+- Default mode (Clanker) must be plain and neutral.
+- Femboy uses "Nii-chan", Oneesan uses "my dear", Tsundere uses "baka".
 
 ### [MODIFY] utilities.py
 
-**Update HELP_INTROS to include mode_default (Clanker mode):**
+#### A) Centralize command inventory
+Add a single source of truth so the command list is not missing items.
+
+Example structure:
+```python
+HELP_COMMANDS = {
+    "ai": {
+        "prefix": ["!describe", "!tldr"],
+        "slash": ["/describe", "/tldr"],
+    },
+    "memory": {
+        "prefix": ["!remember", "!forget", "!myinfo", "!set_timezone", "!birthday", "!aboutuser", "!aka", "!aliases", "!whois"],
+        "slash": ["/remember", "/forget", "/myinfo", "/timezone", "/birthday", "/aboutuser", "/aka", "/aliases", "/whois", "/analyze"],
+    },
+    "affection": {
+        "prefix": ["!affection", "!mood", "!headpat", "!hug"],
+        "slash": ["/affection", "/mood", "/headpat", "/hug"],
+    },
+    "personality": {
+        "prefix": ["!mode", "!modes", "!currentmode"],
+        "slash": ["/mode", "/modes", "/currentmode", "/evil"],
+    },
+    "utility": {
+        "prefix": ["!help", "!ping", "!stats", "!about", "!translate", "!remind", "!reminders"],
+        "slash": ["/help", "/ping", "/stats", "/about", "/translate", "/tldr", "/generate_embed"],
+    },
+    "moderation": {
+        "prefix": ["!setbump", "!clearbump", "!sync"],
+        "slash": ["/bumpchannel", "/bumpstart", "/bumpstop", "/automod add", "/automod remove", "/automod list", "/automod spam", "/starboard setup", "/starboard toggle", "/starboard ignore", "/starboard unignore", "/starboard ignored"],
+    },
+    "config": {
+        "prefix": ["!admin", "!reload"],
+        "slash": ["/config auth", "/config password", "/config keys", "/config model", "/config env", "/config staff", "/config modlog", "/config autorole", "/config welcome", "/admin reset", "/admin view"],
+    },
+}
+```
+
+#### B) Generate the help output from the inventory
+Add a function that builds the output from `HELP_COMMANDS` so it cannot go out of date:
+
+```python
+def build_help_lines() -> list[str]:
+    lines = []
+    for section, cmds in HELP_COMMANDS.items():
+        title = section.replace("_", " ").title()
+        prefix_cmds = " ".join(cmds.get("prefix", []))
+        slash_cmds = " ".join(cmds.get("slash", []))
+        if prefix_cmds:
+            lines.append(f"{title} (Prefix): {prefix_cmds}")
+        if slash_cmds:
+            lines.append(f"{title} (Slash): {slash_cmds}")
+    return lines
+```
+
+#### C) Enforce mode-based greeting rules
+Add intros and make sure the tone applies to the whole output.
 
 ```python
 HELP_INTROS = {
     "mode_default": "Here are my available commands:",
-    "mode_femboy": "Here's everything I can do for you, Nii-chan~ ♡",
-    "mode_tsundere": "Fine, here's what I can do, baka! Don't expect me to help you though!",
-    "mode_oneesan": "Ara ara~ Let me show you what I can help you with, my dear~"
+    "mode_femboy": "Here is everything I can do for you, Nii-chan~",
+    "mode_tsundere": "Fine, here is what I can do, baka.",
+    "mode_oneesan": "Let me show you what I can help you with, my dear.",
 }
 ```
 
+When assembling the response:
+- Use `HELP_INTROS[mode]` as the first line.
+- Do NOT add extra cutesy text in `mode_default`.
+- Do NOT add Nii-chan/my dear/baka outside their modes.
+
 ---
 
-## Part 3: Hug/Pat Mode-Specific Responses & Rate Limits
+## Part 3: Hug/Pat Mode-Specific Responses and Rate Limits
+
+### Requirements Summary
+- Only `/hug` and `/headpat` (and aliases) use this logic.
+- Rate limits apply only to non-default modes: 1 per hour and 3 per day.
+- `mode_default` (Clanker):
+  - Response: "Human, such actions are meaningless!" for both hug and pat.
+  - Affection system disabled. Do not add or remove affection points.
+  - Evil mode disabled (hard block) while in default mode.
+- `mode_femboy`:
+  - Hug: +1 affection
+  - Pat: +1 affection
+  - Response must be submissive and affectionate (generate message)
+- `mode_tsundere`:
+  - Hug: +1 affection
+  - Pat: +1 affection
+  - Response must be angry and include "baka"
+- `mode_oneesan`:
+  - Hug: +1 affection
+  - Pat: -1 affection
+  - Pat response must be cold/angry
 
 ### Database Schema
 
 #### [MODIFY] db_handler.py
 
-Add table for tracking hug/pat cooldowns:
+Add a table for hug/pat cooldowns:
 
 ```sql
 CREATE TABLE IF NOT EXISTS interaction_cooldowns (
@@ -66,318 +152,208 @@ CREATE TABLE IF NOT EXISTS interaction_cooldowns (
 Add helper functions:
 ```python
 async def check_interaction_limit(guild_id, user_id, interaction_type) -> tuple[bool, str]:
-    """Returns (can_interact, reason_if_blocked)"""
-    # Check hourly limit (1 per hour)
-    # Check daily limit (3 per day)
-    # Returns ("ok", None), ("hourly", "right now"), or ("daily", "today")
+    """Returns (can_interact, reason_if_blocked)
+    reason_if_blocked is "hourly" or "daily".
+    """
+    # if daily_reset != today: reset daily_count to 0
+    # if last_used within 1 hour: return (False, "hourly")
+    # if daily_count >= 3: return (False, "daily")
+    # otherwise return (True, "ok")
 
 async def record_interaction(guild_id, user_id, interaction_type) -> None:
-    """Records interaction timestamp and increments daily count"""
+    """Update last_used, daily_count, daily_reset."""
 ```
 
----
-
-### Response Dictionaries
+### Response Dictionaries (ASCII only)
 
 #### [MODIFY] affection.py
 
-**Add mode_default responses and rate limit messages:**
-
 ```python
-# Clanker mode (mode_default) responses
 HEADPAT_RESPONSES = {
     "mode_default": ["Human, such actions are meaningless!"],
     "mode_femboy": [
-        "*leans into your hand* Mmm~ Nii-chan's pats are the best~ ♡",
-        "*purrs softly* M-more please... I love this so much~ ✨",
-        "*tail wags excitedly* Ehehe~ You're spoiling me~ >w<"
+        "Mmm... your pats feel so nice, Nii-chan.",
+        "Please keep going... I love your pats.",
+        "E-eh... that feels really good... thank you."
     ],
     "mode_tsundere": [
-        "*blushes furiously* W-what are you doing, baka?! ...d-don't stop.",
-        "Hmph! It's not like I like this or anything! *secretly enjoys it*",
-        "*crosses arms but doesn't move away* F-fine, just this once!"
+        "W-what are you doing, baka?!",
+        "Hmph. I do not need your pats, baka.",
+        "D-don't get the wrong idea, baka."
     ],
     "mode_oneesan": [
-        "*looks coldly* ...What are you doing?",
-        "Ara... I'm not a child to be patted. *pulls away*",
-        "*sighs* You're quite bold, aren't you? But I don't need that."
+        "Stop that. I am not a child.",
+        "Do not pat me. That is rude.",
+        "Enough. I will not tolerate that."
     ]
 }
 
 HUG_RESPONSES = {
     "mode_default": ["Human, such actions are meaningless!"],
     "mode_femboy": [
-        "*melts into your arms* Nii-chan~ I feel so safe with you~ ♡",
-        "*hugs back tightly* Never let go, okay? ✨",
-        "*nuzzles against you* Your hugs are the best thing ever~"
+        "I feel safe in your arms, Nii-chan...",
+        "Your hugs make me melt...",
+        "I-I'm happy when you hold me..."
     ],
     "mode_tsundere": [
-        "*stiffens* B-baka! What do you think you're- ...fine. *hugs back*",
-        "I-it's not like I wanted a hug! *squeezes you anyway*",
-        "Hmph! You're lucky I'm allowing this! *secretly smiling*"
+        "B-baka! What do you think you're doing?!",
+        "Hmph. I am only allowing this, baka.",
+        "D-don't get used to it, baka."
     ],
     "mode_oneesan": [
-        "*wraps arms around you gently* There there, my dear~ ♡",
-        "Ara ara~ Come here, let me hold you properly~",
-        "*gentle embrace* You give the sweetest hugs, little one~"
+        "There, there... calm down, my dear.",
+        "Come here. I will hold you properly.",
+        "You are safe. I have you."
     ]
 }
 
-# Rate limit messages by mode
 RATE_LIMIT_MESSAGES = {
     "mode_femboy": {
-        "pat_hourly": "Femmy had all the pats right now! Come back later~ ♡",
-        "pat_daily": "Femmy had all the pats today! See you tomorrow~ ✨",
-        "hug_hourly": "Femmy had all the hugs right now! Come back later~ ♡",
-        "hug_daily": "Femmy had all the hugs today! See you tomorrow~ ✨"
+        "pat_hourly": "Femmy had all the pats right now!",
+        "pat_daily": "Femmy had all the pats today!",
+        "hug_hourly": "Femmy had all the hugs right now!",
+        "hug_daily": "Femmy had all the hugs today!"
     },
     "mode_tsundere": {
-        "pat_hourly": "S-stop it! I've had enough pats for now, baka!",
-        "pat_daily": "No more pats today! Come back tomorrow, baka!",
-        "hug_hourly": "I-I've had enough hugs for now! Go away!",
-        "hug_daily": "No more hugs today! ...come back tomorrow."
+        "pat_hourly": "Stop it. No more pats right now, baka.",
+        "pat_daily": "No more pats today, baka.",
+        "hug_hourly": "I have had enough hugs right now, baka.",
+        "hug_daily": "No more hugs today."
     },
     "mode_oneesan": {
-        "pat_hourly": "That's quite enough for now, dear~",
-        "pat_daily": "We've had our moments today. Perhaps tomorrow~",
-        "hug_hourly": "One hug is enough for now, little one~",
-        "hug_daily": "You've had your fill of hugs today, my dear~"
+        "pat_hourly": "That is enough for now.",
+        "pat_daily": "No more pats today.",
+        "hug_hourly": "One hug is enough for now.",
+        "hug_daily": "No more hugs today, my dear."
     }
 }
 ```
 
----
-
-### Affection Point Rules by Mode
+### Affection Rules Table
 
 | Mode | Headpat | Hug | Limits |
 |------|---------|-----|--------|
-| mode_default | 0 (no effect) | 0 (no effect) | None |
+| mode_default | 0 | 0 | None |
 | mode_femboy | +1 | +1 | 3/day, 1/hour |
 | mode_tsundere | +1 | +1 | 3/day, 1/hour |
-| mode_oneesan | **-1** | +1 | 3/day, 1/hour |
+| mode_oneesan | -1 | +1 | 3/day, 1/hour |
+
+### Updated Command Logic (summary)
+- Default mode: return fixed response, skip affection and limits.
+- Other modes: apply rate limits first, then affection changes.
+
+Also hard-block affection system and evil mode while in `mode_default` (Clanker).
 
 ---
 
-### Updated Command Logic
+## Part 4: Server-Specific Bot Avatars (Replace Webhooks)
 
-```python
-@commands.command(name="headpat", aliases=["pat", "pets"])
-async def headpat(self, ctx: commands.Context):
-    if not ctx.guild:
-        return
-    
-    mode = await get_server_mode(ctx.guild.id)
-    
-    # mode_default: no affection, no limits
-    if mode == "mode_default":
-        await ctx.send("Human, such actions are meaningless!")
-        return
-    
-    # Check rate limits
-    can_interact, reason = await check_interaction_limit(
-        ctx.guild.id, ctx.author.id, "pat"
-    )
-    
-    if not can_interact:
-        msg_key = f"pat_{reason}"
-        message = RATE_LIMIT_MESSAGES.get(mode, {}).get(msg_key, "Too many pats!")
-        await ctx.send(message)
-        return
-    
-    # Record interaction
-    await record_interaction(ctx.guild.id, ctx.author.id, "pat")
-    
-    # Update mood
-    await update_mood(ctx.guild.id, 5)
-    
-    # Apply affection based on mode
-    if mode == "mode_oneesan":
-        await add_affection_to_mode(ctx.guild.id, ctx.author.id, mode, -1)
-    else:
-        await add_affection_to_mode(ctx.guild.id, ctx.author.id, mode, 1)
-    
-    # Send response
-    responses = HEADPAT_RESPONSES.get(mode, HEADPAT_RESPONSES["mode_femboy"])
-    await ctx.send(random.choice(responses))
-```
-
----
-
-## Part 4: Server-Specific Bot Avatars
-
-### Overview
-Replace webhook-based persona system with Discord's native Server Profiles API.
+### Goal
+- Remove all webhook-based persona delivery.
+- Use Discord server profile avatars instead.
+- Mode changes auto-update avatars.
+- Admins can upload custom avatars (max 500 KB).
 
 ### New Utility File
 
 #### [NEW] server_avatar.py
 
+Same as previous, plus:
+- Reject files larger than 500 KB.
+- Support per-guild custom avatar override path.
+
+### Avatar Storage and Persistence
+
+#### Storage
+```
+discord_bot/data/avatars/
+  mode_default.png
+  mode_femboy.png
+  mode_tsundere.png
+  mode_oneesan.png
+
+discord_bot/data/avatars/custom/
+  guild_<GUILD_ID>.png
+```
+
+#### [MODIFY] db_handler.py
+Add a table to store per-guild avatar overrides:
+
+```sql
+CREATE TABLE IF NOT EXISTS guild_avatar_config (
+    guild_id INTEGER PRIMARY KEY,
+    custom_avatar_path TEXT,
+    updated_at TIMESTAMP
+)
+```
+
+Add helpers:
 ```python
-"""Server-specific avatar management using Discord's raw API."""
-
-import discord
-import base64
-from pathlib import Path
-from utils.logger import get_logger
-
-logger = get_logger(__name__)
-
-# Default avatar paths per mode
-MODE_AVATARS = {
-    "mode_default": "data/avatars/clanker.png",
-    "mode_femboy": "data/avatars/femmy.png",
-    "mode_tsundere": "data/avatars/tsun.png",
-    "mode_oneesan": "data/avatars/yumi.png",
-}
-
-
-async def set_server_avatar(bot: discord.Client, guild_id: int, image_path: str | None) -> tuple[bool, str]:
-    """
-    Set the bot's avatar for a specific server.
-    
-    Args:
-        bot: The discord bot instance
-        guild_id: The guild to update avatar for
-        image_path: Path to image file, or None to reset to global default
-    
-    Returns:
-        (success: bool, message: str)
-    """
-    try:
-        if image_path is None:
-            payload = {"avatar": None}
-        else:
-            path = Path(image_path)
-            if not path.exists():
-                return False, f"Image not found: {image_path}"
-            
-            image_bytes = path.read_bytes()
-            b64_data = base64.b64encode(image_bytes).decode('utf-8')
-            
-            # Detect mime type
-            suffix = path.suffix.lower()
-            mime_map = {".png": "image/png", ".jpg": "image/jpeg", ".jpeg": "image/jpeg", ".gif": "image/gif"}
-            mime_type = mime_map.get(suffix, "image/png")
-            
-            data_uri = f"data:{mime_type};base64,{b64_data}"
-            payload = {"avatar": data_uri}
-        
-        url = f"/guilds/{guild_id}/members/@me"
-        await bot.http.request(
-            discord.http.Route("PATCH", url),
-            json=payload
-        )
-        
-        return True, "Avatar updated successfully"
-        
-    except discord.HTTPException as e:
-        if e.status == 429:
-            return False, "Rate limited - changing avatars too fast"
-        elif e.status == 403:
-            return False, "Missing permissions to change avatar"
-        else:
-            return False, f"API Error: {e.status}"
-
-
-async def set_mode_avatar(bot: discord.Client, guild_id: int, mode: str) -> tuple[bool, str]:
-    """Set the bot's avatar based on personality mode."""
-    avatar_path = MODE_AVATARS.get(mode)
-    if avatar_path:
-        return await set_server_avatar(bot, guild_id, avatar_path)
-    return False, f"No avatar defined for mode: {mode}"
+async def get_guild_avatar_path(guild_id: int) -> Optional[str]
+async def set_guild_avatar_path(guild_id: int, path: Optional[str]) -> None
 ```
-
----
-
-### Avatar Storage Structure
-
-```
-discord_bot/
-├── data/
-│   └── avatars/
-│       ├── clanker.png    # Default Clanker mode
-│       ├── femmy.png      # Femboy mode
-│       ├── tsun.png       # Tsundere mode
-│       └── yumi.png       # Oneesan mode
-```
-
----
 
 ### Admin Commands for Server Avatars
 
 #### [MODIFY] admin.py
-
-Add new slash command group:
+Add a new slash command group:
 
 ```python
 avatar_group = app_commands.Group(name="avatar", description="Manage bot server avatar")
 
-@avatar_group.command(name="set", description="Upload a custom server avatar")
-@app_commands.checks.has_permissions(administrator=True)
-async def avatar_set(self, interaction: discord.Interaction, image: discord.Attachment):
-    """Upload a custom avatar for this server."""
+@avatar_group.command(name="set")
+async def avatar_set(self, interaction, image: discord.Attachment):
     # Validate file type
-    # Save to server-specific path
+    # Validate size <= 500 KB
+    # Save to discord_bot/data/avatars/custom/guild_<ID>.png
+    # set_guild_avatar_path()
     # Call set_server_avatar()
 
-@avatar_group.command(name="mode", description="Set avatar to match personality mode")
-@app_commands.checks.has_permissions(administrator=True)
-async def avatar_mode(self, interaction: discord.Interaction):
-    """Set avatar to match current personality mode."""
-    mode = await get_server_mode(interaction.guild.id)
-    success, msg = await set_mode_avatar(self.bot, interaction.guild.id, mode)
-    await interaction.response.send_message(msg, ephemeral=True)
+@avatar_group.command(name="mode")
+async def avatar_mode(self, interaction):
+    # Set avatar based on current mode and clear custom override
 
-@avatar_group.command(name="reset", description="Reset to global default avatar")
-@app_commands.checks.has_permissions(administrator=True)
-async def avatar_reset(self, interaction: discord.Interaction):
-    """Reset server avatar to global default."""
-    success, msg = await set_server_avatar(self.bot, interaction.guild.id, None)
-    await interaction.response.send_message(msg, ephemeral=True)
+@avatar_group.command(name="reset")
+async def avatar_reset(self, interaction):
+    # Clear custom override and reset to global default
 ```
-
----
 
 ### Auto-Update Avatar on Mode Change
 
 #### [MODIFY] social.py
-
-In the `!mode` command, after changing mode:
-
+After mode change succeeds:
 ```python
-# After mode change succeeds
 from utils.server_avatar import set_mode_avatar
-
-# Attempt to update avatar (non-blocking, log errors)
-try:
-    success, msg = await set_mode_avatar(self.bot, ctx.guild.id, new_mode)
-    if not success:
-        logger.warning("Avatar update failed: %s", msg)
-except Exception as e:
-    logger.error("Avatar update error: %s", e)
+await set_mode_avatar(self.bot, ctx.guild.id, new_mode)
 ```
 
----
+If a custom avatar exists for the guild, do NOT override it unless the admin calls `/avatar mode` or `/avatar reset`.
 
-### Remove Webhook System
+### Remove Webhook System Completely
 
-#### [DELETE] Webhook-related code from persona_manager.py
+#### [REMOVE] persona_manager.py
+- Delete webhook creation and send_as_mode logic.
+- Replace usage in `ai_brain.py` with normal `message.reply()` or channel send.
+- Remove webhook config fields if any are stored.
 
-Remove `get_webhook()` and `send_as_mode()` methods that create/use webhooks.
+### Migration/cleanup
+- Remove any webhook IDs stored in data/config.
+- Remove any webhook setup docs from FEATURES and help.
 
 ---
 
 ## Verification Plan
 
 ### Automated Tests
-1. Test activity shows "Playing: Clanking with humans"
-2. Test help command shows mode-appropriate greeting
-3. Test hug/pat rate limits (1/hour, 3/day)
-4. Test mode-specific affection changes
+1. Activity shows "Playing: Clanking with humans".
+2. Help output uses correct greeting per mode and includes full command list.
+3. Hug/pat rate limits: 1/hour and 3/day for non-default modes.
+4. Affection changes: default=0, femboy/tsundere=+1, oneesan pat=-1.
+5. Gemini key rotation still works with new config.
 
 ### Manual Verification
-1. Run `!mode femboy` and verify avatar changes
-2. Test `!pat` in each mode and verify correct response
-3. Spam `!hug` to verify rate limiting works
-4. Check `/avatar set` with custom image
+1. Run `!mode femboy` and verify avatar changes.
+2. Test `!pat` and `!hug` in each mode and verify response tone.
+3. Spam `!hug` to verify rate limits.
+4. Use `/avatar set` with < 500 KB image.
+5. Verify custom avatar persists and mode change does not override unless forced.
