@@ -79,7 +79,12 @@ HELP_COMMANDS = {
     "config": {
         "visibility": "admin",
         "prefix": ["!admin", "!reload"],
-        "slash": ["/config auth", "/config password", "/config keys", "/config model", "/config env", "/config toggle", "/config staff", "/config modlog", "/config autorole", "/config welcome", "/admin reset", "/admin view", "/admin setfact", "/admin delfact", "/admin affection", "/admin model", "/admin clearglobal", "/admin clearguild", "/setgenderrole", "/avatar set", "/avatar mode", "/avatar reset"],
+        "slash": ["/config auth", "/config password", "/config keys", "/config model", "/config env", "/config toggle", "/config staff", "/config modlog", "/config autorole", "/config welcome", "/admin reset", "/admin view", "/admin setfact", "/admin delfact", "/admin affection", "/admin model", "/admin clearglobal", "/admin clearguild", "/setgenderrole", "/avatar mode", "/avatar reset"],
+    },
+    "persona": {
+        "visibility": "admin",
+        "prefix": [],
+        "slash": ["/create persona", "/persona create", "/persona list", "/persona preview", "/persona edit", "/persona delete"],
     },
 }
 

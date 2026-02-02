@@ -4,7 +4,7 @@ This document is the canonical, detailed feature inventory for this repository. 
 
 ## System summary
 - Multi-cog Discord bot with per-guild configuration, persistent storage, and AI-driven chat.
-- Persona system with multiple modes, per-mode prompts, and server-specific avatars.
+- Persona system with multiple modes, per-mode prompts, server-specific avatars, and custom personas per guild.
 - Per-guild SQLite databases plus a global stats database.
 
 ## Feature catalog (by subsystem)
@@ -63,7 +63,9 @@ This document is the canonical, detailed feature inventory for this repository. 
   - Optional emoji prefix and activity string
 - Mode switching with permission checks; optional global lock via `BOT_MODE`.
 - Server-specific bot avatars are applied per guild; mode changes can auto-update the server avatar.
-- Admins can set, reset, or revert to mode-based avatars via `/avatar` commands (rate-limited to 2 updates per hour).
+- Admins can reset or revert to mode-based avatars via `/avatar` commands (rate-limited to 2 updates per hour).
+- Custom personas can be created per guild with their own bio, prompts, and avatar/banner URLs, then activated with `!mode` or `/mode`.
+- Deleting an active custom persona reverts the guild back to `mode_default` and clears the server avatar override.
 - Evil mode can use separate avatar images per mode when available.
 
 ### Affection and mood (discord_bot/cogs/affection.py, discord_bot/utils/sentiment.py)
@@ -148,7 +150,8 @@ This document is the canonical, detailed feature inventory for this repository. 
   - Set affection points by mode
   - Slash command sync and clearing
   - Gender role mapping
-- Server avatar management via `/avatar set`, `/avatar mode`, and `/avatar reset` (500 KB max, 2 updates per hour).
+- Server avatar management via `/avatar mode` and `/avatar reset` (rate-limited to 2 updates per hour).
+- Custom persona management via `/create persona` and `/persona` subcommands (create, list, preview, edit, delete).
 
 ### Emoji systems (discord_bot/utils/app_emojis.py, discord_bot/utils/emoji_manager.py)
 - Application emoji fetching and caching.
@@ -168,6 +171,7 @@ This document is the canonical, detailed feature inventory for this repository. 
   - relationships: `user_affection_by_mode`, `bot_mood`, `wellbeing_checks`, `interaction_cooldowns`
   - reminders: `reminders`
   - server settings: `server_config`, `guild_config`, `guild_avatar_config`
+  - custom personas: `custom_personas`
   - auth/audit: `guild_admin_auth`, `guild_auth_sessions`, `guild_config_audit`
   - moderation: `staff_roles`, `gender_roles`, `automod_rules`, `mod_log_channel_id` (in `guild_config`)
   - starboard: `starboard_settings`, `starboard_entries`, `starboard_ignored_channels`
@@ -175,6 +179,7 @@ This document is the canonical, detailed feature inventory for this repository. 
 - `guild_config` includes `gemini_profile_key` for profile analysis.
 - `guild_config` includes `gemini_key_type` for Gemini key rotation mode.
 - Built-in migrations for new columns and tables.
+- Custom persona assets are stored under `discord_bot/data/avatars/custom/` by guild.
 
 ### Deployment and ops
 - Deployment scripts in `deploy/` with a systemd service template.
@@ -182,7 +187,7 @@ This document is the canonical, detailed feature inventory for this repository. 
 - Logging to `discord_bot/logs/femmy.log` with rotation.
 
 ### Tests
-- Unit tests for API key manager and mode registry in `tests/`.
+- Unit tests for API key manager, mode registry, image downloader, and persona DB helpers in `tests/`.
 
 ## Commands
 
@@ -199,7 +204,8 @@ This document is the canonical, detailed feature inventory for this repository. 
 
 ### Slash commands
 - Admin: `/admin reset`, `/admin view`, `/admin setfact`, `/admin delfact`, `/admin affection`, `/admin model`, `/admin clearglobal`, `/admin clearguild`
-- Avatar: `/avatar set`, `/avatar mode`, `/avatar reset`
+- Avatar: `/avatar mode`, `/avatar reset`
+- Persona: `/create persona`, `/persona create`, `/persona list`, `/persona preview`, `/persona edit`, `/persona delete`
 - Affection: `/affection`, `/mood`, `/headpat`, `/hug`
 - Automod: `/automod add`, `/automod remove`, `/automod list`, `/automod spam`
 - Config: `/config auth`, `/config password set|change|reset`, `/config keys view|set|clear`, `/config model view|set`, `/config env example|upload`, `/config toggle evil|autorole|welcome`, `/config staff add|remove|list`, `/config modlog set|clear|view`, `/config autorole set|clear|view`, `/config welcome channel|clear|test|set_message|view_message|clear_message|set_dm_message|clear_dm_message|toggle_dm`
@@ -241,6 +247,7 @@ This document is the canonical, detailed feature inventory for this repository. 
       config.py
       logger.py
       memories.py
+      persona.py
       reminders.py
       scheduler.py
       social.py
@@ -251,13 +258,12 @@ This document is the canonical, detailed feature inventory for this repository. 
     data/
       avatars/
         .gitkeep
-        mode_default.png
-        mode_femboy.png
-        mode_femboy_evil.png
-        mode_tsundere.png
-        mode_tsundere_evil.png
-        mode_oneesan.png
-        mode_oneesan_evil.png
+        mode_femboy.webp
+        mode_femboy_evil.webp
+        mode_tsundere.webp
+        mode_tsundere_evil.webp
+        mode_oneesan.webp
+        mode_oneesan_evil.webp
         custom/
           .gitkeep
       emoji_config.json
@@ -285,6 +291,7 @@ This document is the canonical, detailed feature inventory for this repository. 
       emoji_manager.py
       encryption.py
       guild_ai.py
+      image_downloader.py
       logger.py
       rate_limiter.py
       server_avatar.py
@@ -299,7 +306,9 @@ This document is the canonical, detailed feature inventory for this repository. 
     split_db.py
   tests/
     test_api_manager.py
+    test_image_downloader.py
     test_mode_registry.py
+    test_persona_db.py
   AGENTS.md
   FEATURES.md
   emojilist.md
