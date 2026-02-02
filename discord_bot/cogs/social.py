@@ -79,12 +79,7 @@ class Social(commands.Cog):
         return ""
 
     async def _set_presence_for_mode(self, mode_key: str) -> None:
-        profile = get_mode_profile(mode_key)
-        activity_name = profile.activity_watching or "over you"
-        activity = discord.Activity(
-            type=discord.ActivityType.watching,
-            name=activity_name,
-        )
+        activity = discord.Game(name="Clanking with humans")
         await self.bot.change_presence(activity=activity)
 
     def _is_mention_only(self, message: discord.Message) -> bool:
@@ -139,6 +134,12 @@ class Social(commands.Cog):
         
         Usage: !evil [on/off]
         """
+        current_mode = await get_server_mode(ctx.guild.id)
+        if current_mode == "mode_default":
+            await set_evil_mode(ctx.guild.id, False)
+            await ctx.send("Evil Mode is disabled in default mode.")
+            return
+
         if not state:
             current = await get_evil_mode(ctx.guild.id)
             status = "ENABLED" if current else "DISABLED"
@@ -161,6 +162,12 @@ class Social(commands.Cog):
     async def toggle_evil_mode_slash(self, interaction: discord.Interaction, state: str = None):
         if not interaction.guild:
             await interaction.response.send_message("Use this command in a server.", ephemeral=True)
+            return
+
+        current_mode = await get_server_mode(interaction.guild.id)
+        if current_mode == "mode_default":
+            await set_evil_mode(interaction.guild.id, False)
+            await interaction.response.send_message("Evil Mode is disabled in default mode.", ephemeral=True)
             return
 
         if not state:
@@ -227,6 +234,8 @@ class Social(commands.Cog):
 
         # Switch mode
         await set_server_mode(ctx.guild.id, target_mode)
+        if target_mode == "mode_default":
+            await set_evil_mode(ctx.guild.id, False)
 
         profile = get_mode_profile(target_mode)
         mode_icon = await self._get_mode_icon(target_mode)
@@ -236,6 +245,19 @@ class Social(commands.Cog):
             await self._set_presence_for_mode(target_mode)
         except Exception as exc:
             logger.warning("Failed to update presence for %s: %s", target_mode, exc)
+        try:
+            from utils.server_avatar import set_mode_avatar
+            evil_mode_enabled = await get_evil_mode(ctx.guild.id)
+            success, reason = await set_mode_avatar(
+                self.bot,
+                ctx.guild.id,
+                target_mode,
+                evil_mode=evil_mode_enabled,
+            )
+            if not success and reason != "custom":
+                logger.warning("Failed to update server avatar for %s: %s", target_mode, reason)
+        except Exception as exc:
+            logger.warning("Failed to update server avatar for %s: %s", target_mode, exc)
 
     @app_commands.command(name="mode", description="Switch the bot's personality mode.")
     @app_commands.checks.has_permissions(manage_guild=True)
@@ -282,6 +304,8 @@ class Social(commands.Cog):
             return
 
         await set_server_mode(interaction.guild.id, target_mode)
+        if target_mode == "mode_default":
+            await set_evil_mode(interaction.guild.id, False)
         profile = get_mode_profile(target_mode)
         mode_icon = await self._get_mode_icon(target_mode)
         prefix = f"{mode_icon} " if mode_icon else ""
@@ -290,6 +314,19 @@ class Social(commands.Cog):
             await self._set_presence_for_mode(target_mode)
         except Exception as exc:
             logger.warning("Failed to update presence for %s: %s", target_mode, exc)
+        try:
+            from utils.server_avatar import set_mode_avatar
+            evil_mode_enabled = await get_evil_mode(interaction.guild.id)
+            success, reason = await set_mode_avatar(
+                self.bot,
+                interaction.guild.id,
+                target_mode,
+                evil_mode=evil_mode_enabled,
+            )
+            if not success and reason != "custom":
+                logger.warning("Failed to update server avatar for %s: %s", target_mode, reason)
+        except Exception as exc:
+            logger.warning("Failed to update server avatar for %s: %s", target_mode, exc)
 
     @commands.command(name="modes", aliases=["personalities", "personas"])
     async def show_modes(self, ctx: commands.Context):
@@ -392,14 +429,12 @@ class Social(commands.Cog):
         )
 
     @commands.Cog.listener()
-
     async def on_member_join(self, member: discord.Member):
         """
         Handle auto-role assignment and optional AI welcome message.
         """
         guild_id = member.guild.id
         mode = await get_server_mode(guild_id)
-        evil_mode_enabled = await get_evil_mode(guild_id)
 
         # Auto-role
         try:
@@ -456,17 +491,10 @@ class Social(commands.Cog):
                 welcome_text = self._ensure_join_count_sentence(welcome_text, member_count)
 
             try:
-                persona_manager = getattr(self.bot, "persona_manager", None)
-                if persona_manager:
-                    await persona_manager.send_as_mode(
-                        channel=channel,
-                        content=welcome_text,
-                        mode_id=mode,
-                        evil_mode=evil_mode_enabled,
-                        allowed_mentions=discord.AllowedMentions(users=True, roles=False, everyone=False),
-                    )
-                else:
-                    await channel.send(welcome_text)
+                await channel.send(
+                    welcome_text,
+                    allowed_mentions=discord.AllowedMentions(users=True, roles=False, everyone=False),
+                )
             except discord.Forbidden:
                 logger.warning("Missing permissions to send welcome in %s", member.guild.name)
 
@@ -504,22 +532,12 @@ class Social(commands.Cog):
             return
 
         mode = await get_server_mode(message.guild.id)
-        evil_mode_enabled = await get_evil_mode(message.guild.id)
         profile = get_mode_profile(mode)
         responses = profile.mention_reactions or ()
         if not responses:
             return
         response_text = random.choice(responses)
-        persona_manager = getattr(self.bot, "persona_manager", None)
-        if persona_manager:
-            await persona_manager.send_as_mode(
-                channel=message.channel,
-                content=response_text,
-                mode_id=mode,
-                evil_mode=evil_mode_enabled,
-            )
-        else:
-            await message.reply(response_text, mention_author=False)
+        await message.reply(response_text, mention_author=False)
 
 
 async def setup(bot: commands.Bot):

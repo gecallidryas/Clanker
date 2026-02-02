@@ -22,7 +22,7 @@ import re
 from pathlib import Path
 import aiosqlite
 from typing import Optional, List, Dict, Any, Set
-from datetime import datetime
+from datetime import datetime, timezone, timedelta, date
 from contextlib import asynccontextmanager
 
 from utils.logger import get_logger
@@ -342,6 +342,30 @@ async def _init_guild_schema(db: aiosqlite.Connection) -> None:
             user_id INTEGER NOT NULL,
             last_asked_date TEXT,
             PRIMARY KEY (guild_id, user_id)
+        )
+    """)
+
+    # Hug/pat interaction cooldowns (UTC-based)
+    await db.execute("""
+        CREATE TABLE IF NOT EXISTS interaction_cooldowns (
+            guild_id INTEGER,
+            user_id INTEGER,
+            interaction_type TEXT,
+            last_used TIMESTAMP,
+            daily_count INTEGER DEFAULT 0,
+            daily_reset DATE,
+            PRIMARY KEY (guild_id, user_id, interaction_type)
+        )
+    """)
+
+    # Guild-specific avatar overrides and rate limits
+    await db.execute("""
+        CREATE TABLE IF NOT EXISTS guild_avatar_config (
+            guild_id INTEGER PRIMARY KEY,
+            custom_avatar_path TEXT,
+            last_updated TIMESTAMP,
+            hourly_count INTEGER DEFAULT 0,
+            hourly_reset TIMESTAMP
         )
     """)
 
@@ -749,13 +773,13 @@ async def set_server_mode(guild_id: int, mode: str) -> None:
     
     Args:
         guild_id: Discord guild/server ID
-        mode: One of "mode_femboy", "mode_tsundere", "mode_oneesan"
+        mode: One of "mode_default", "mode_femboy", "mode_tsundere", "mode_oneesan"
         
     TODO:
         - [ ] Validate mode string
         - [ ] Emit event for mode change
     """
-    valid_modes = ["mode_femboy", "mode_tsundere", "mode_oneesan"]
+    valid_modes = ["mode_default", "mode_femboy", "mode_tsundere", "mode_oneesan"]
     if mode not in valid_modes:
         raise ValueError(f"Invalid mode. Must be one of: {valid_modes}")
     
@@ -780,6 +804,10 @@ async def get_evil_mode(guild_id: int) -> bool:
     Returns:
         True if evil mode is enabled
     """
+    mode = await get_server_mode(guild_id)
+    if mode == "mode_default":
+        return False
+
     async with guild_db(guild_id) as db:
         async with db.execute(
             "SELECT evil_mode FROM server_config WHERE guild_id = ?",
@@ -797,6 +825,10 @@ async def set_evil_mode(guild_id: int, enabled: bool) -> None:
         guild_id: Discord guild/server ID
         enabled: True to enable evil mode
     """
+    mode = await get_server_mode(guild_id)
+    if mode == "mode_default":
+        enabled = False
+
     async with guild_db(guild_id) as db:
         await db.execute("""
             INSERT INTO server_config (guild_id, evil_mode, updated_at)
@@ -1851,6 +1883,231 @@ async def cleanup_expired_pending_facts(guild_id: int) -> int:
         )
         await db.commit()
         return cursor.rowcount
+
+
+# ============================================
+# Interaction Cooldowns (Hug/Pat)
+# ============================================
+
+def _utcnow() -> datetime:
+    return datetime.now(timezone.utc)
+
+
+def _parse_timestamp(value: Optional[str]) -> Optional[datetime]:
+    if not value:
+        return None
+    if isinstance(value, datetime):
+        dt = value
+    else:
+        try:
+            dt = datetime.fromisoformat(value)
+        except ValueError:
+            return None
+    if dt.tzinfo is None:
+        dt = dt.replace(tzinfo=timezone.utc)
+    return dt
+
+
+def _parse_date(value: Optional[str]) -> Optional[date]:
+    if not value:
+        return None
+    if isinstance(value, date) and not isinstance(value, datetime):
+        return value
+    try:
+        return date.fromisoformat(value)
+    except ValueError:
+        return None
+
+
+async def check_interaction_limit(guild_id: int, user_id: int, interaction_type: str) -> tuple[bool, str]:
+    """Returns (can_interact, reason_if_blocked). reason_if_blocked is "hourly" or "daily"."""
+    now = _utcnow()
+    today = now.date()
+
+    async with guild_db(guild_id) as db:
+        db.row_factory = aiosqlite.Row
+        async with db.execute(
+            """SELECT last_used, daily_count, daily_reset
+               FROM interaction_cooldowns
+               WHERE guild_id = ? AND user_id = ? AND interaction_type = ?""",
+            (guild_id, user_id, interaction_type),
+        ) as cursor:
+            row = await cursor.fetchone()
+
+        if row:
+            daily_count = int(row["daily_count"] or 0)
+            daily_reset = _parse_date(row["daily_reset"])
+            if daily_reset != today:
+                daily_count = 0
+                daily_reset = today
+                await db.execute(
+                    """UPDATE interaction_cooldowns
+                       SET daily_count = ?, daily_reset = ?
+                       WHERE guild_id = ? AND user_id = ? AND interaction_type = ?""",
+                    (daily_count, today.isoformat(), guild_id, user_id, interaction_type),
+                )
+                await db.commit()
+
+            last_used = _parse_timestamp(row["last_used"])
+            if last_used and (now - last_used) < timedelta(hours=1):
+                return False, "hourly"
+            if daily_count >= 3:
+                return False, "daily"
+            return True, "ok"
+
+        await db.execute(
+            """INSERT INTO interaction_cooldowns
+               (guild_id, user_id, interaction_type, last_used, daily_count, daily_reset)
+               VALUES (?, ?, ?, ?, ?, ?)""",
+            (guild_id, user_id, interaction_type, None, 0, today.isoformat()),
+        )
+        await db.commit()
+        return True, "ok"
+
+
+async def record_interaction(guild_id: int, user_id: int, interaction_type: str) -> None:
+    """Update last_used, daily_count, daily_reset (UTC)."""
+    now = _utcnow()
+    today = now.date()
+
+    async with guild_db(guild_id) as db:
+        db.row_factory = aiosqlite.Row
+        async with db.execute(
+            """SELECT daily_count, daily_reset
+               FROM interaction_cooldowns
+               WHERE guild_id = ? AND user_id = ? AND interaction_type = ?""",
+            (guild_id, user_id, interaction_type),
+        ) as cursor:
+            row = await cursor.fetchone()
+
+        if row:
+            daily_count = int(row["daily_count"] or 0)
+            daily_reset = _parse_date(row["daily_reset"])
+            if daily_reset != today:
+                daily_count = 0
+            daily_count += 1
+
+            await db.execute(
+                """UPDATE interaction_cooldowns
+                   SET last_used = ?, daily_count = ?, daily_reset = ?
+                   WHERE guild_id = ? AND user_id = ? AND interaction_type = ?""",
+                (
+                    now.isoformat(),
+                    daily_count,
+                    today.isoformat(),
+                    guild_id,
+                    user_id,
+                    interaction_type,
+                ),
+            )
+        else:
+            await db.execute(
+                """INSERT INTO interaction_cooldowns
+                   (guild_id, user_id, interaction_type, last_used, daily_count, daily_reset)
+                   VALUES (?, ?, ?, ?, ?, ?)""",
+                (guild_id, user_id, interaction_type, now.isoformat(), 1, today.isoformat()),
+            )
+        await db.commit()
+
+
+# ============================================
+# Guild Avatar Configuration
+# ============================================
+
+async def get_guild_avatar_path(guild_id: int) -> Optional[str]:
+    """Get the custom avatar path for a guild, if any."""
+    async with guild_db(guild_id) as db:
+        async with db.execute(
+            "SELECT custom_avatar_path FROM guild_avatar_config WHERE guild_id = ?",
+            (guild_id,),
+        ) as cursor:
+            row = await cursor.fetchone()
+            return row[0] if row and row[0] else None
+
+
+async def set_guild_avatar_path(guild_id: int, path: Optional[str]) -> None:
+    """Set or clear the custom avatar path for a guild."""
+    async with guild_db(guild_id) as db:
+        await db.execute(
+            """INSERT INTO guild_avatar_config (guild_id, custom_avatar_path)
+               VALUES (?, ?)
+               ON CONFLICT(guild_id) DO UPDATE SET custom_avatar_path = ?""",
+            (guild_id, path, path),
+        )
+        await db.commit()
+
+
+async def can_update_guild_avatar(guild_id: int) -> tuple[bool, str]:
+    """Return (can_update, reason). reason is 'hourly' when blocked."""
+    now = _utcnow()
+
+    async with guild_db(guild_id) as db:
+        db.row_factory = aiosqlite.Row
+        async with db.execute(
+            "SELECT hourly_count, hourly_reset FROM guild_avatar_config WHERE guild_id = ?",
+            (guild_id,),
+        ) as cursor:
+            row = await cursor.fetchone()
+
+        if row:
+            hourly_count = int(row["hourly_count"] or 0)
+            hourly_reset = _parse_timestamp(row["hourly_reset"])
+            if hourly_reset is None or (now - hourly_reset) >= timedelta(hours=1):
+                hourly_count = 0
+                hourly_reset = now
+                await db.execute(
+                    """UPDATE guild_avatar_config
+                       SET hourly_count = ?, hourly_reset = ?
+                       WHERE guild_id = ?""",
+                    (hourly_count, hourly_reset.isoformat(), guild_id),
+                )
+                await db.commit()
+            if hourly_count >= 2:
+                return False, "hourly"
+            return True, "ok"
+
+        await db.execute(
+            """INSERT INTO guild_avatar_config (guild_id, hourly_count, hourly_reset)
+               VALUES (?, ?, ?)""",
+            (guild_id, 0, now.isoformat()),
+        )
+        await db.commit()
+        return True, "ok"
+
+
+async def record_guild_avatar_update(guild_id: int) -> None:
+    """Record a successful avatar update and increment the hourly count."""
+    now = _utcnow()
+
+    async with guild_db(guild_id) as db:
+        db.row_factory = aiosqlite.Row
+        async with db.execute(
+            "SELECT hourly_count, hourly_reset FROM guild_avatar_config WHERE guild_id = ?",
+            (guild_id,),
+        ) as cursor:
+            row = await cursor.fetchone()
+
+        if row:
+            hourly_count = int(row["hourly_count"] or 0)
+            hourly_reset = _parse_timestamp(row["hourly_reset"])
+            if hourly_reset is None or (now - hourly_reset) >= timedelta(hours=1):
+                hourly_count = 0
+                hourly_reset = now
+            hourly_count += 1
+            await db.execute(
+                """UPDATE guild_avatar_config
+                   SET last_updated = ?, hourly_count = ?, hourly_reset = ?
+                   WHERE guild_id = ?""",
+                (now.isoformat(), hourly_count, hourly_reset.isoformat(), guild_id),
+            )
+        else:
+            await db.execute(
+                """INSERT INTO guild_avatar_config
+                   (guild_id, last_updated, hourly_count, hourly_reset)
+                   VALUES (?, ?, ?, ?)""",
+                (guild_id, now.isoformat(), 1, now.isoformat()),
+            )
+        await db.commit()
 
 
 # ============================================

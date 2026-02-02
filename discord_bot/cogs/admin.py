@@ -11,6 +11,8 @@ Commands (Admin Only):
     !admin view @user             - View complete user profile
 """
 
+from pathlib import Path
+
 import discord
 from discord import app_commands
 from discord.ext import commands
@@ -24,10 +26,18 @@ from utils.db_handler import (
     add_fact_with_source,
     delete_fact_by_id,
     get_facts_detailed,
+    get_server_mode,
+    get_evil_mode,
+    set_guild_avatar_path,
     AFFECTION_TRACKED_MODES,
 )
 from modes import resolve_mode_key
 from utils.logger import get_logger
+from utils.server_avatar import (
+    MAX_AVATAR_BYTES,
+    set_custom_avatar,
+    set_mode_avatar,
+)
 
 logger = get_logger(__name__)
 
@@ -42,6 +52,10 @@ class Admin(commands.Cog):
     admin_app_group = app_commands.Group(
         name="admin",
         description="Admin commands",
+    )
+    avatar_group = app_commands.Group(
+        name="avatar",
+        description="Manage bot server avatar",
     )
     gender_suggestions = [
         "male",
@@ -65,6 +79,34 @@ class Admin(commands.Cog):
 
     async def cog_unload(self):
         pass
+
+    @staticmethod
+    def _is_valid_avatar_attachment(attachment: discord.Attachment) -> bool:
+        content_type = (attachment.content_type or "").lower().split(";")[0].strip()
+        if content_type.startswith("image/"):
+            return True
+        ext = Path(attachment.filename or "").suffix.lower()
+        return ext in {".png", ".jpg", ".jpeg", ".gif", ".webp"}
+
+    @staticmethod
+    def _avatar_error(reason: str) -> str:
+        if reason == "hourly":
+            return "Avatar updates are limited to 2 per hour. Try again later."
+        if reason == "size":
+            return "Avatar files must be 500 KB or smaller."
+        if reason == "forbidden":
+            return "Missing permissions to update the server avatar."
+        if reason == "http":
+            return "Discord rejected the avatar update. Try again later."
+        if reason == "write":
+            return "Failed to save the custom avatar."
+        if reason == "missing":
+            return "Avatar file could not be read."
+        if reason == "member":
+            return "Could not resolve the bot member for this server."
+        if reason == "guild":
+            return "Could not resolve guild information."
+        return "Avatar update failed."
     
     async def cog_check(self, ctx: commands.Context) -> bool:
         """Only allow admins to use these commands."""
@@ -332,6 +374,85 @@ class Admin(commands.Cog):
         except Exception as e:
             logger.error("Clear guild commands failed: %s", e, exc_info=True)
             await ctx.send("Clear guild commands failed. Check logs for details.")
+
+    # =========================
+    # Avatar Commands (Slash)
+    # =========================
+
+    @avatar_group.command(name="set", description="Set a custom server avatar for the bot.")
+    @app_commands.checks.has_permissions(manage_guild=True)
+    @app_commands.describe(image="Avatar image (png/jpg/webp/gif, max 500 KB)")
+    async def avatar_set(self, interaction: discord.Interaction, image: discord.Attachment):
+        if not interaction.guild:
+            await interaction.response.send_message("Use this command in a server.", ephemeral=True)
+            return
+
+        if not self._is_valid_avatar_attachment(image):
+            await interaction.response.send_message(
+                "Please upload a valid image file (png, jpg, gif, webp).",
+                ephemeral=True,
+            )
+            return
+
+        if image.size and image.size > MAX_AVATAR_BYTES:
+            await interaction.response.send_message(
+                "Avatar files must be 500 KB or smaller.",
+                ephemeral=True,
+            )
+            return
+
+        data = await image.read()
+        if len(data) > MAX_AVATAR_BYTES:
+            await interaction.response.send_message(
+                "Avatar files must be 500 KB or smaller.",
+                ephemeral=True,
+            )
+            return
+
+        success, reason = await set_custom_avatar(self.bot, interaction.guild.id, data)
+        if not success:
+            await interaction.response.send_message(self._avatar_error(reason), ephemeral=True)
+            return
+
+        await interaction.response.send_message("Custom server avatar updated.")
+
+    @avatar_group.command(name="mode", description="Use the current mode's avatar.")
+    @app_commands.checks.has_permissions(manage_guild=True)
+    async def avatar_mode(self, interaction: discord.Interaction):
+        if not interaction.guild:
+            await interaction.response.send_message("Use this command in a server.", ephemeral=True)
+            return
+
+        mode = await get_server_mode(interaction.guild.id)
+        evil_mode = await get_evil_mode(interaction.guild.id)
+        success, reason = await set_mode_avatar(
+            self.bot,
+            interaction.guild.id,
+            mode,
+            evil_mode=evil_mode,
+            force=True,
+        )
+        if not success:
+            await interaction.response.send_message(self._avatar_error(reason), ephemeral=True)
+            return
+
+        await set_guild_avatar_path(interaction.guild.id, None)
+        await interaction.response.send_message("Server avatar set to the current mode.")
+
+    @avatar_group.command(name="reset", description="Reset to the default server avatar.")
+    @app_commands.checks.has_permissions(manage_guild=True)
+    async def avatar_reset(self, interaction: discord.Interaction):
+        if not interaction.guild:
+            await interaction.response.send_message("Use this command in a server.", ephemeral=True)
+            return
+
+        success, reason = await set_mode_avatar(self.bot, interaction.guild.id, "mode_default", force=True)
+        if not success:
+            await interaction.response.send_message(self._avatar_error(reason), ephemeral=True)
+            return
+
+        await set_guild_avatar_path(interaction.guild.id, None)
+        await interaction.response.send_message("Server avatar reset to default.")
 
     @admin_app_group.command(name="reset", description="Reset user data.")
     @app_commands.checks.has_permissions(manage_guild=True)

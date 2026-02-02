@@ -4,7 +4,7 @@ This document is the canonical, detailed feature inventory for this repository. 
 
 ## System summary
 - Multi-cog Discord bot with per-guild configuration, persistent storage, and AI-driven chat.
-- Persona system with multiple modes, per-mode prompts, and webhook-based display customization.
+- Persona system with multiple modes, per-mode prompts, and server-specific avatars.
 - Per-guild SQLite databases plus a global stats database.
 
 ## Feature catalog (by subsystem)
@@ -15,7 +15,7 @@ This document is the canonical, detailed feature inventory for this repository. 
 - Auto-discovers and loads all cogs in `discord_bot/cogs` at startup.
 - Initializes databases and syncs slash commands on startup.
 - Enforces guild-only commands (blocks prefix and slash commands in DMs).
-- Sets bot presence based on the current mode profile for the first guild.
+- Sets bot presence to Playing: Clanking with humans.
 - Tracks command usage metrics.
 - Provides a standalone `!sync` command for on-demand slash sync.
 
@@ -62,11 +62,14 @@ This document is the canonical, detailed feature inventory for this repository. 
   - Switch message
   - Optional emoji prefix and activity string
 - Mode switching with permission checks; optional global lock via `BOT_MODE`.
-- Persona manager uses webhooks to send messages with mode-specific display names and avatars from `discord_bot/data/personas.json`.
+- Server-specific bot avatars are applied per guild; mode changes can auto-update the server avatar.
+- Admins can set, reset, or revert to mode-based avatars via `/avatar` commands (rate-limited to 2 updates per hour).
+- Evil mode can use separate avatar images per mode when available.
 
 ### Affection and mood (discord_bot/cogs/affection.py, discord_bot/utils/sentiment.py)
 - Per-mode affection tracking with levels and thresholds.
-- Affection changes from direct mentions (sentiment analysis) and explicit actions (headpat/hug).
+- Affection changes from direct mentions (sentiment analysis) and explicit actions (headpat/hug), with mode-specific deltas and rate limits (1 per hour, 3 per day) outside default mode.
+- Default mode uses fixed hug/pat responses and does not change affection.
 - Mood system per guild with hourly decay and interaction-based boosts.
 - Sentiment analysis uses keyword heuristics and Gemini fallback.
 
@@ -113,7 +116,7 @@ This document is the canonical, detailed feature inventory for this repository. 
 - Marks starboard entries when the original message is deleted.
 
 ### Utilities (discord_bot/cogs/utilities.py)
-- Custom help system with category layout.
+- Help output is generated from a centralized command inventory, with mode-specific intros and admin filtering.
 - Bot stats (uptime, servers, users, memory usage, messages, images).
 - Cog reload (owner only).
 - Translation via Gemini (`!translate`, `/translate`).
@@ -145,6 +148,7 @@ This document is the canonical, detailed feature inventory for this repository. 
   - Set affection points by mode
   - Slash command sync and clearing
   - Gender role mapping
+- Server avatar management via `/avatar set`, `/avatar mode`, and `/avatar reset` (500 KB max, 2 updates per hour).
 
 ### Emoji systems (discord_bot/utils/app_emojis.py, discord_bot/utils/emoji_manager.py)
 - Application emoji fetching and caching.
@@ -161,9 +165,9 @@ This document is the canonical, detailed feature inventory for this repository. 
   - global: `bot_stats`, `guild_registry`
   - users and profiles: `users`, `user_profiles`
   - memory: `user_facts`, `user_aliases`, `pending_facts`
-  - relationships: `user_affection_by_mode`, `bot_mood`, `wellbeing_checks`
+  - relationships: `user_affection_by_mode`, `bot_mood`, `wellbeing_checks`, `interaction_cooldowns`
   - reminders: `reminders`
-  - server settings: `server_config`, `guild_config`
+  - server settings: `server_config`, `guild_config`, `guild_avatar_config`
   - auth/audit: `guild_admin_auth`, `guild_auth_sessions`, `guild_config_audit`
   - moderation: `staff_roles`, `gender_roles`, `automod_rules`, `mod_log_channel_id` (in `guild_config`)
   - starboard: `starboard_settings`, `starboard_entries`, `starboard_ignored_channels`
@@ -195,6 +199,7 @@ This document is the canonical, detailed feature inventory for this repository. 
 
 ### Slash commands
 - Admin: `/admin reset`, `/admin view`, `/admin setfact`, `/admin delfact`, `/admin affection`, `/admin model`, `/admin clearglobal`, `/admin clearguild`
+- Avatar: `/avatar set`, `/avatar mode`, `/avatar reset`
 - Affection: `/affection`, `/mood`, `/headpat`, `/hug`
 - Automod: `/automod add`, `/automod remove`, `/automod list`, `/automod spam`
 - Config: `/config auth`, `/config password set|change|reset`, `/config keys view|set|clear`, `/config model view|set`, `/config env example|upload`, `/config toggle evil|autorole|welcome`, `/config staff add|remove|list`, `/config modlog set|clear|view`, `/config autorole set|clear|view`, `/config welcome channel|clear|test|set_message|view_message|clear_message|set_dm_message|clear_dm_message|toggle_dm`
@@ -244,8 +249,18 @@ This document is the canonical, detailed feature inventory for this repository. 
       vision.py
       __init__.py
     data/
+      avatars/
+        .gitkeep
+        mode_default.png
+        mode_femboy.png
+        mode_femboy_evil.png
+        mode_tsundere.png
+        mode_tsundere_evil.png
+        mode_oneesan.png
+        mode_oneesan_evil.png
+        custom/
+          .gitkeep
       emoji_config.json
-      personas.json
     modes/
       default.py
       femboy.py
@@ -271,8 +286,8 @@ This document is the canonical, detailed feature inventory for this repository. 
       encryption.py
       guild_ai.py
       logger.py
-      persona_manager.py
       rate_limiter.py
+      server_avatar.py
       sentiment.py
       __init__.py
     .env

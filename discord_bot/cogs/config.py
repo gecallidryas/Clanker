@@ -28,6 +28,7 @@ from utils.db_handler import (
     cleanup_guild_audit,
     get_evil_mode,
     set_evil_mode,
+    get_server_mode,
     add_staff_role,
     remove_staff_role,
     get_staff_roles,
@@ -756,6 +757,14 @@ class Config(commands.Cog):
     @app_commands.describe(state="on/off (leave empty to view)")
     async def toggle_evil(self, interaction: discord.Interaction, state: Optional[str] = None):
         if not await self._require_guild(interaction):
+            return
+        current_mode = await get_server_mode(interaction.guild.id)
+        if current_mode == "mode_default":
+            await set_evil_mode(interaction.guild.id, False)
+            await interaction.response.send_message(
+                "Evil Mode is disabled in default mode.",
+                ephemeral=True,
+            )
             return
         if not state:
             current = await get_evil_mode(interaction.guild.id)

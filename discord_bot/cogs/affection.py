@@ -19,8 +19,8 @@ Mood States:
 Commands:
     !affection       - View your affection level
     !mood            - Check bot's current mood
-    !headpat         - Give headpats (+5 mood, +3 affection)
-    !hug             - Give hugs (+5 mood, +3 affection)
+    !headpat         - Give headpats
+    !hug             - Give hugs
 """
 
 import random
@@ -34,6 +34,8 @@ from utils.db_handler import (
     get_mood,
     update_mood,
     get_server_mode,
+    check_interaction_limit,
+    record_interaction,
     AFFECTION_TRACKED_MODES,
 )
 from utils.sentiment import analyze_sentiment, quick_sentiment_check
@@ -139,39 +141,62 @@ MOOD_MESSAGES = {
 # ============================================
 
 HEADPAT_RESPONSES = {
+    "mode_default": ["Human, such actions are meaningless!"],
     "mode_femboy": [
-        "*purrs happily* Ehehe~ That feels nice, Nii-chan~ ♡",
-        "*melts* H-headpats... I love headpats~ ✨",
-        "*tail wags* More more more~ >w<"
+        "Mmm... your pats feel so nice, Nii-chan.",
+        "Please keep going... I love your pats.",
+        "E-eh... that feels really good... thank you.",
     ],
     "mode_tsundere": [
-        "*blushes furiously* W-what are you doing, baka?! ...don't stop though.",
-        "Hmph! I-it's not like I enjoy this or anything! ...pat me more.",
-        "*reluctantly leans into hand* ...fine, but only because you insist!"
+        "W-what are you doing, baka?!",
+        "Hmph. I do not need your pats, baka.",
+        "D-don't get the wrong idea, baka.",
     ],
     "mode_oneesan": [
-        "Ara ara~ How sweet of you, little one~ *pats you back*",
-        "Fufu~ You're so adorable when you try to spoil me~",
-        "*smiles warmly* Thank you, my dear. That was lovely~"
-    ]
+        "Stop that. I am not a child.",
+        "Do not pat me. That is rude.",
+        "Enough. I will not tolerate that.",
+    ],
 }
 
 HUG_RESPONSES = {
+    "mode_default": ["Human, such actions are meaningless!"],
     "mode_femboy": [
-        "*hugs back tightly* Nii-chan's hugs are the best~ ♡",
-        "*nuzzles* I could stay like this forever! ✨",
-        "*squeezes* Thank you thank you thank you~!"
+        "I feel safe in your arms, Nii-chan...",
+        "Your hugs make me melt...",
+        "I-I'm happy when you hold me...",
     ],
     "mode_tsundere": [
-        "*stiffens* W-what?! ...okay, fine. Just this once. *hugs back briefly*",
-        "Baka! You can't just- ...okay, I guess this is nice. Don't tell anyone!",
-        "*mumbles* It's warm... I hate how nice this feels. Hmph!"
+        "B-baka! What do you think you're doing?!",
+        "Hmph. I am only allowing this, baka.",
+        "D-don't get used to it, baka.",
     ],
     "mode_oneesan": [
-        "*wraps arms around you* There there, my dear~ *pats back*",
-        "Ara ara~ Come here, let me hold you properly~ ♡",
-        "*gentle embrace* You give the best hugs, little one~"
-    ]
+        "There, there... calm down, my dear.",
+        "Come here. I will hold you properly.",
+        "You are safe. I have you.",
+    ],
+}
+
+RATE_LIMIT_MESSAGES = {
+    "mode_femboy": {
+        "pat_hourly": "Femmy had all the pats right now!",
+        "pat_daily": "Femmy had all the pats today!",
+        "hug_hourly": "Femmy had all the hugs right now!",
+        "hug_daily": "Femmy had all the hugs today!",
+    },
+    "mode_tsundere": {
+        "pat_hourly": "Stop it. No more pats right now, baka.",
+        "pat_daily": "No more pats today, baka.",
+        "hug_hourly": "I have had enough hugs right now, baka.",
+        "hug_daily": "No more hugs today.",
+    },
+    "mode_oneesan": {
+        "pat_hourly": "That is enough for now.",
+        "pat_daily": "No more pats today.",
+        "hug_hourly": "One hug is enough for now.",
+        "hug_daily": "No more hugs today, my dear.",
+    },
 }
 
 
@@ -235,6 +260,34 @@ class Affection(commands.Cog):
 
         embed.set_thumbnail(url=target.display_avatar.url)
         return embed
+
+    async def _handle_interaction(self, guild_id: int, user_id: int, interaction_type: str) -> str:
+        mode = await get_server_mode(guild_id)
+        if mode == "mode_default":
+            responses = HEADPAT_RESPONSES if interaction_type == "pat" else HUG_RESPONSES
+            return responses["mode_default"][0]
+
+        allowed, reason = await check_interaction_limit(guild_id, user_id, interaction_type)
+        if not allowed:
+            key = f"{interaction_type}_{reason}"
+            message = RATE_LIMIT_MESSAGES.get(mode, {}).get(key)
+            if message:
+                return message
+            return "Please wait before trying again."
+
+        delta = 1
+        if interaction_type == "pat" and mode == "mode_oneesan":
+            delta = -1
+
+        await update_mood(guild_id, 5)
+        await add_affection_to_mode(guild_id, user_id, mode, delta)
+        await record_interaction(guild_id, user_id, interaction_type)
+
+        responses = HEADPAT_RESPONSES if interaction_type == "pat" else HUG_RESPONSES
+        response_list = responses.get(mode, responses.get("mode_femboy", []))
+        if not response_list:
+            return "..."
+        return random.choice(response_list)
     
     # ============================================
     # Commands
@@ -332,17 +385,7 @@ class Affection(commands.Cog):
         """Give Femmy headpats!"""
         if not ctx.guild:
             return
-        
-        mode = await get_server_mode(ctx.guild.id)
-        
-        # Update mood and affection
-        await update_mood(ctx.guild.id, 5)
-        if mode != "mode_default":
-            await add_affection_to_mode(ctx.guild.id, ctx.author.id, mode, 3)
-        
-        responses = HEADPAT_RESPONSES.get(mode, HEADPAT_RESPONSES["mode_femboy"])
-        response = random.choice(responses)
-        
+        response = await self._handle_interaction(ctx.guild.id, ctx.author.id, "pat")
         await ctx.send(response)
 
     @app_commands.command(name="headpat", description="Give a headpat.")
@@ -350,14 +393,7 @@ class Affection(commands.Cog):
         if not interaction.guild:
             await interaction.response.send_message("Use this command in a server.", ephemeral=True)
             return
-
-        mode = await get_server_mode(interaction.guild.id)
-        await update_mood(interaction.guild.id, 5)
-        if mode != "mode_default":
-            await add_affection_to_mode(interaction.guild.id, interaction.user.id, mode, 3)
-
-        responses = HEADPAT_RESPONSES.get(mode, HEADPAT_RESPONSES["mode_femboy"])
-        response = random.choice(responses)
+        response = await self._handle_interaction(interaction.guild.id, interaction.user.id, "pat")
         await interaction.response.send_message(response)
     
     @commands.command(name="hug", aliases=["hugs"])
@@ -365,17 +401,7 @@ class Affection(commands.Cog):
         """Give Femmy a hug!"""
         if not ctx.guild:
             return
-        
-        mode = await get_server_mode(ctx.guild.id)
-        
-        # Update mood and affection
-        await update_mood(ctx.guild.id, 5)
-        if mode != "mode_default":
-            await add_affection_to_mode(ctx.guild.id, ctx.author.id, mode, 3)
-        
-        responses = HUG_RESPONSES.get(mode, HUG_RESPONSES["mode_femboy"])
-        response = random.choice(responses)
-        
+        response = await self._handle_interaction(ctx.guild.id, ctx.author.id, "hug")
         await ctx.send(response)
 
     @app_commands.command(name="hug", description="Give a hug.")
@@ -383,14 +409,7 @@ class Affection(commands.Cog):
         if not interaction.guild:
             await interaction.response.send_message("Use this command in a server.", ephemeral=True)
             return
-
-        mode = await get_server_mode(interaction.guild.id)
-        await update_mood(interaction.guild.id, 5)
-        if mode != "mode_default":
-            await add_affection_to_mode(interaction.guild.id, interaction.user.id, mode, 3)
-
-        responses = HUG_RESPONSES.get(mode, HUG_RESPONSES["mode_femboy"])
-        response = random.choice(responses)
+        response = await self._handle_interaction(interaction.guild.id, interaction.user.id, "hug")
         await interaction.response.send_message(response)
     
     # ============================================

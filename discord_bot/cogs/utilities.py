@@ -37,41 +37,75 @@ from utils.logger import get_logger
 
 
 # ============================================
-# Command Categories for Help
+# Command Inventory for Help
 # ============================================
 
-COMMAND_CATEGORIES = {
-    "🧠 AI & Chat": {
-        "description": "Talk to me by mentioning me!",
-        "commands": ["describe", "tldr"]
+HELP_COMMANDS = {
+    "ai": {
+        "visibility": "public",
+        "prefix": ["!describe", "!tldr"],
+        "slash": ["/describe", "/tldr"],
     },
-    "💭 Memory": {
-        "description": "I can remember things about you~",
-        "commands": ["remember", "forget", "myinfo", "set_timezone", "birthday", "aboutuser", "aka", "aliases", "whois"]
+    "memory": {
+        "visibility": "public",
+        "prefix": ["!remember", "!forget", "!myinfo", "!set_timezone", "!birthday", "!aboutuser", "!aka", "!aliases", "!whois"],
+        "slash": ["/remember", "/forget", "/myinfo", "/timezone", "/birthday", "/aboutuser", "/aka", "/aliases", "/whois", "/analyze"],
     },
-    "💕 Affection": {
-        "description": "Build our relationship!",
-        "commands": ["affection", "mood", "headpat", "hug"]
+    "affection": {
+        "visibility": "public",
+        "prefix": ["!affection", "!mood", "!headpat", "!hug"],
+        "slash": ["/affection", "/mood", "/headpat", "/hug"],
     },
-    "🎭 Personality": {
-        "description": "Change my personality mode~",
-        "commands": ["mode", "modes", "currentmode"]
+    "personality": {
+        "visibility": "public",
+        "prefix": ["!modes", "!currentmode"],
+        "slash": ["/modes", "/currentmode"],
     },
-    "🛠️ Utility": {
-        "description": "Helpful tools and features",
-        "commands": ["help", "ping", "stats", "about", "translate", "remind", "reminders"]
+    "personality_admin": {
+        "visibility": "admin",
+        "prefix": ["!mode", "!evil"],
+        "slash": ["/mode", "/evil"],
     },
-    "🔧 Admin": {
-        "description": "Server management (requires permissions)",
-        "commands": ["reload", "setbump", "clearbump"]
-    }
+    "utility": {
+        "visibility": "public",
+        "prefix": ["!help", "!ping", "!stats", "!about", "!translate", "!remind", "!reminders"],
+        "slash": ["/help", "/ping", "/stats", "/about", "/translate", "/tldr", "/generate_embed", "/remind", "/reminders", "/remindcancel"],
+    },
+    "moderation": {
+        "visibility": "admin",
+        "prefix": ["!setbump", "!clearbump", "!sync"],
+        "slash": ["/bumpchannel", "/bumpstart", "/bumpstop", "/automod add", "/automod remove", "/automod list", "/automod spam", "/starboard setup", "/starboard toggle", "/starboard ignore", "/starboard unignore", "/starboard ignored"],
+    },
+    "config": {
+        "visibility": "admin",
+        "prefix": ["!admin", "!reload"],
+        "slash": ["/config auth", "/config password", "/config keys", "/config model", "/config env", "/config toggle", "/config staff", "/config modlog", "/config autorole", "/config welcome", "/admin reset", "/admin view", "/admin setfact", "/admin delfact", "/admin affection", "/admin model", "/admin clearglobal", "/admin clearguild", "/setgenderrole", "/avatar set", "/avatar mode", "/avatar reset"],
+    },
 }
 
 HELP_INTROS = {
-    "mode_femboy": "Here's everything I can do for you, Nii-chan~ ♡",
-    "mode_tsundere": "Fine, I'll tell you what I can do. It's not like I want to show off or anything!",
-    "mode_oneesan": "Ara ara~ Let me show you what I can help you with, dear~"
+    "mode_default": "Here are my available commands:",
+    "mode_femboy": "Here is everything I can do for you, Nii-chan~",
+    "mode_tsundere": "Fine, here is what I can do, baka.",
+    "mode_oneesan": "Let me show you what I can help you with, my dear.",
 }
+
+
+def build_help_lines(is_admin: bool) -> list[str]:
+    lines = []
+    for section, cmds in HELP_COMMANDS.items():
+        visibility = cmds.get("visibility", "public")
+        if visibility == "admin" and not is_admin:
+            continue
+        title = section.replace("_", " ").title()
+        prefix_cmds = " ".join(cmds.get("prefix", []))
+        slash_cmds = " ".join(cmds.get("slash", []))
+        if prefix_cmds:
+            lines.append(f"{title} (Prefix): {prefix_cmds}")
+        if slash_cmds:
+            lines.append(f"{title} (Slash): {slash_cmds}")
+    return lines
+
 
 logger = get_logger(__name__)
 
@@ -201,32 +235,25 @@ class Utilities(commands.Cog):
             return
         
         # Show all commands
-        intro = HELP_INTROS.get(mode, HELP_INTROS["mode_femboy"])
-        
+        is_admin = bool(
+            ctx.guild
+            and (ctx.author.guild_permissions.manage_guild or ctx.author.guild_permissions.administrator)
+        )
+        intro = HELP_INTROS.get(mode, HELP_INTROS["mode_default"])
+        lines = build_help_lines(is_admin)
+
         bot_name = self._get_bot_name(mode)
+        description = "\n".join([
+            intro,
+            *lines,
+            "Use !help <command> for more details on a specific command",
+        ])
         embed = discord.Embed(
-            title=f"📚 {bot_name}'s Commands",
-            description=intro,
+            title=f"???? {bot_name}'s Commands",
+            description=description,
             color=discord.Color.pink()
         )
-        
-        for category_name, category_data in COMMAND_CATEGORIES.items():
-            # Get commands that exist
-            valid_commands = []
-            for cmd_name in category_data["commands"]:
-                cmd = self.bot.get_command(cmd_name)
-                if cmd and not cmd.hidden:
-                    valid_commands.append(f"`!{cmd_name}`")
-            
-            if valid_commands:
-                embed.add_field(
-                    name=f"{category_name}",
-                    value=" ".join(valid_commands),
-                    inline=False
-                )
-        
-        embed.set_footer(text="Use !help <command> for more details on a specific command")
-        
+
         await ctx.send(embed=embed)
     
     # ============================================
@@ -585,29 +612,24 @@ Provide a clear, bulleted summary:
             await interaction.response.send_message(embed=embed)
             return
 
-        intro = HELP_INTROS.get(mode, HELP_INTROS["mode_femboy"])
+        is_admin = bool(
+            interaction.guild
+            and (interaction.user.guild_permissions.manage_guild or interaction.user.guild_permissions.administrator)
+        )
+        intro = HELP_INTROS.get(mode, HELP_INTROS["mode_default"])
+        lines = build_help_lines(is_admin)
         bot_name = self._get_bot_name(mode)
+        description = "\n".join([
+            intro,
+            *lines,
+            "Use !help <command> for more details on a specific command",
+        ])
         embed = discord.Embed(
-            title=f"📚 {bot_name}'s Commands",
-            description=intro,
+            title=f"???? {bot_name}'s Commands",
+            description=description,
             color=discord.Color.pink(),
         )
 
-        for category_name, category_data in COMMAND_CATEGORIES.items():
-            valid_commands = []
-            for cmd_name in category_data["commands"]:
-                cmd = self.bot.get_command(cmd_name)
-                if cmd and not cmd.hidden:
-                    valid_commands.append(f"`!{cmd_name}`")
-
-            if valid_commands:
-                embed.add_field(
-                    name=f"{category_name}",
-                    value=" ".join(valid_commands),
-                    inline=False,
-                )
-
-        embed.set_footer(text="Use !help <command> for more details on a specific command")
         await interaction.response.send_message(embed=embed)
 
     @app_commands.command(name="stats", description="Display bot statistics.")

@@ -1521,16 +1521,7 @@ Respond naturally in character. Keep responses concise.
                 except Exception as exc:
                     logger.warning("Failed to normalize emojis: %s", exc)
 
-            persona_manager = getattr(self.bot, "persona_manager", None)
-            if persona_manager:
-                sent = await persona_manager.send_as_mode(
-                    channel=message.channel,
-                    content=response,
-                    mode_id=mode,
-                    evil_mode=evil_mode_enabled,
-                )
-            else:
-                sent = await message.reply(response, mention_author=False)
+            sent = await message.reply(response, mention_author=False)
 
         # Manage conversation state
         if mentioned or has_trigger:

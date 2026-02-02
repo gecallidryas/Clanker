@@ -17,7 +17,7 @@ from dotenv import load_dotenv
 
 from utils.logger import get_logger, log_startup, log_error, log_command
 from utils.db_handler import increment_stat
-from modes import validate_mode_registry, resolve_mode_key, get_mode_profile
+from modes import validate_mode_registry, resolve_mode_key
 from utils.emoji_manager import EmojiManager
 
 BASE_DIR = Path(__file__).resolve().parent
@@ -92,8 +92,6 @@ class Femmy(commands.Bot):
             help_command=None  # Use custom help in utilities.py
         )
         self.add_check(self._guild_only_check)
-        from utils.persona_manager import PersonaManager
-        self.persona_manager = PersonaManager(self)
         self.emoji_manager = EmojiManager(self)
 
     async def _guild_only_check(self, ctx: commands.Context) -> bool:
@@ -163,23 +161,7 @@ class Femmy(commands.Bot):
         except Exception as exc:
             logger.warning("Failed to validate emojis: %s", exc)
         
-        # Set custom status based on the first guild's mode (global presence)
-        try:
-            from utils.db_handler import get_server_mode
-            if self.guilds:
-                mode = await get_server_mode(self.guilds[0].id)
-            else:
-                mode = "mode_femboy"
-            profile = get_mode_profile(mode)
-            activity_name = profile.activity_watching or "over you~ ♡"
-        except Exception as exc:
-            logger.warning("Failed to resolve activity mode: %s", exc)
-            activity_name = "over you~ ♡"
-
-        activity = discord.Activity(
-            type=discord.ActivityType.watching,
-            name=activity_name
-        )
+        activity = discord.Game(name="Clanking with humans")
         await self.change_presence(activity=activity)
 
     async def on_interaction(self, interaction: discord.Interaction):

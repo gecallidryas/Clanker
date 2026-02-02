@@ -19,11 +19,11 @@ Usage:
 import os
 import asyncio
 import random
-import threading
 from datetime import datetime, timedelta
 from dataclasses import dataclass
 from typing import Optional, List
-import google.generativeai as genai
+from google import genai
+from google.genai import types
 import aiohttp
 
 from utils.logger import get_logger
@@ -34,8 +34,6 @@ logger = get_logger(__name__)
 class UserInputError(RuntimeError):
     """Raised when the request fails due to user input or content policy."""
 
-
-_GENAI_CALL_LOCK = threading.Lock()  # genai.configure is global; serialize per call.
 
 _RATE_LIMIT_HINTS = (
     "rate limit",
@@ -206,18 +204,23 @@ def _generate_content_sync(api_key: str, model_name: str, prompt: str, image) ->
     # Maximum permissive safety settings - BLOCK_NONE
     # Note: Google may still block PROHIBITED_CONTENT regardless of settings
     safety_settings = [
-        {"category": "HARM_CATEGORY_HARASSMENT", "threshold": "BLOCK_NONE"},
-        {"category": "HARM_CATEGORY_HATE_SPEECH", "threshold": "BLOCK_NONE"},
-        {"category": "HARM_CATEGORY_SEXUALLY_EXPLICIT", "threshold": "BLOCK_NONE"},
-        {"category": "HARM_CATEGORY_DANGEROUS_CONTENT", "threshold": "BLOCK_NONE"},
+        types.SafetySetting(category="HARM_CATEGORY_HARASSMENT", threshold="BLOCK_NONE"),
+        types.SafetySetting(category="HARM_CATEGORY_HATE_SPEECH", threshold="BLOCK_NONE"),
+        types.SafetySetting(category="HARM_CATEGORY_SEXUALLY_EXPLICIT", threshold="BLOCK_NONE"),
+        types.SafetySetting(category="HARM_CATEGORY_DANGEROUS_CONTENT", threshold="BLOCK_NONE"),
     ]
 
-    with _GENAI_CALL_LOCK:
-        genai.configure(api_key=api_key)
-        model = genai.GenerativeModel(model_name)
-        if image is None:
-            return model.generate_content(prompt, safety_settings=safety_settings)
-        return model.generate_content([prompt, image], safety_settings=safety_settings)
+    client = genai.Client(api_key=api_key)
+    config = types.GenerateContentConfig(safety_settings=safety_settings)
+    if image is None:
+        contents = [prompt]
+    else:
+        contents = [prompt, image]
+    return client.models.generate_content(
+        model=model_name,
+        contents=contents,
+        config=config,
+    )
 
 
 async def generate_gemini_with_key(
