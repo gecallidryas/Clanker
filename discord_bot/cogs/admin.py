@@ -11,8 +11,6 @@ Commands (Admin Only):
     !admin view @user             - View complete user profile
 """
 
-from pathlib import Path
-
 import discord
 from discord import app_commands
 from discord.ext import commands
@@ -34,8 +32,6 @@ from utils.db_handler import (
 from modes import resolve_mode_key
 from utils.logger import get_logger
 from utils.server_avatar import (
-    MAX_AVATAR_BYTES,
-    set_custom_avatar,
     set_mode_avatar,
 )
 
@@ -79,14 +75,6 @@ class Admin(commands.Cog):
 
     async def cog_unload(self):
         pass
-
-    @staticmethod
-    def _is_valid_avatar_attachment(attachment: discord.Attachment) -> bool:
-        content_type = (attachment.content_type or "").lower().split(";")[0].strip()
-        if content_type.startswith("image/"):
-            return True
-        ext = Path(attachment.filename or "").suffix.lower()
-        return ext in {".png", ".jpg", ".jpeg", ".gif", ".webp"}
 
     @staticmethod
     def _avatar_error(reason: str) -> str:
@@ -378,43 +366,6 @@ class Admin(commands.Cog):
     # =========================
     # Avatar Commands (Slash)
     # =========================
-
-    @avatar_group.command(name="set", description="Set a custom server avatar for the bot.")
-    @app_commands.checks.has_permissions(manage_guild=True)
-    @app_commands.describe(image="Avatar image (png/jpg/webp/gif, max 500 KB)")
-    async def avatar_set(self, interaction: discord.Interaction, image: discord.Attachment):
-        if not interaction.guild:
-            await interaction.response.send_message("Use this command in a server.", ephemeral=True)
-            return
-
-        if not self._is_valid_avatar_attachment(image):
-            await interaction.response.send_message(
-                "Please upload a valid image file (png, jpg, gif, webp).",
-                ephemeral=True,
-            )
-            return
-
-        if image.size and image.size > MAX_AVATAR_BYTES:
-            await interaction.response.send_message(
-                "Avatar files must be 500 KB or smaller.",
-                ephemeral=True,
-            )
-            return
-
-        data = await image.read()
-        if len(data) > MAX_AVATAR_BYTES:
-            await interaction.response.send_message(
-                "Avatar files must be 500 KB or smaller.",
-                ephemeral=True,
-            )
-            return
-
-        success, reason = await set_custom_avatar(self.bot, interaction.guild.id, data)
-        if not success:
-            await interaction.response.send_message(self._avatar_error(reason), ephemeral=True)
-            return
-
-        await interaction.response.send_message("Custom server avatar updated.")
 
     @avatar_group.command(name="mode", description="Use the current mode's avatar.")
     @app_commands.checks.has_permissions(manage_guild=True)
