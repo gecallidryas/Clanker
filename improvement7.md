@@ -33,42 +33,51 @@ async def on_ready(self):
 - The greeting and tone must be based on mode.
 - Default mode (Clanker) must be plain and neutral.
 - Femboy uses "Nii-chan", Oneesan uses "my dear", Tsundere uses "baka".
+- Help output must be filtered by permission (admin-only vs user).
 
 ### [MODIFY] utilities.py
 
 #### A) Centralize command inventory
 Add a single source of truth so the command list is not missing items.
+Mark each section as public or admin-only.
 
 Example structure:
 ```python
 HELP_COMMANDS = {
     "ai": {
+        "visibility": "public",
         "prefix": ["!describe", "!tldr"],
         "slash": ["/describe", "/tldr"],
     },
     "memory": {
+        "visibility": "public",
         "prefix": ["!remember", "!forget", "!myinfo", "!set_timezone", "!birthday", "!aboutuser", "!aka", "!aliases", "!whois"],
         "slash": ["/remember", "/forget", "/myinfo", "/timezone", "/birthday", "/aboutuser", "/aka", "/aliases", "/whois", "/analyze"],
     },
     "affection": {
+        "visibility": "public",
         "prefix": ["!affection", "!mood", "!headpat", "!hug"],
         "slash": ["/affection", "/mood", "/headpat", "/hug"],
     },
     "personality": {
+        "visibility": "public",
         "prefix": ["!mode", "!modes", "!currentmode"],
         "slash": ["/mode", "/modes", "/currentmode", "/evil"],
     },
     "utility": {
+        "visibility": "public",
         "prefix": ["!help", "!ping", "!stats", "!about", "!translate", "!remind", "!reminders"],
         "slash": ["/help", "/ping", "/stats", "/about", "/translate", "/tldr", "/generate_embed"],
     },
     "moderation": {
+        "visibility": "admin",
         "prefix": ["!setbump", "!clearbump", "!sync"],
         "slash": ["/bumpchannel", "/bumpstart", "/bumpstop", "/automod add", "/automod remove", "/automod list", "/automod spam", "/starboard setup", "/starboard toggle", "/starboard ignore", "/starboard unignore", "/starboard ignored"],
     },
     "config": {
+        "visibility": "admin",
         "prefix": ["!admin", "!reload"],
-        "slash": ["/config auth", "/config password", "/config keys", "/config model", "/config env", "/config staff", "/config modlog", "/config autorole", "/config welcome", "/admin reset", "/admin view"],
+        "slash": ["/config auth", "/config password", "/config keys", "/config model", "/config env", "/config toggle", "/config staff", "/config modlog", "/config autorole", "/config welcome", "/admin reset", "/admin view", "/admin clearglobal", "/admin clearguild"],
     },
 }
 ```
@@ -77,9 +86,12 @@ HELP_COMMANDS = {
 Add a function that builds the output from `HELP_COMMANDS` so it cannot go out of date:
 
 ```python
-def build_help_lines() -> list[str]:
+def build_help_lines(is_admin: bool) -> list[str]:
     lines = []
     for section, cmds in HELP_COMMANDS.items():
+        visibility = cmds.get("visibility", "public")
+        if visibility == "admin" and not is_admin:
+            continue
         title = section.replace("_", " ").title()
         prefix_cmds = " ".join(cmds.get("prefix", []))
         slash_cmds = " ".join(cmds.get("slash", []))
@@ -106,6 +118,7 @@ When assembling the response:
 - Use `HELP_INTROS[mode]` as the first line.
 - Do NOT add extra cutesy text in `mode_default`.
 - Do NOT add Nii-chan/my dear/baka outside their modes.
+- Determine `is_admin` from the invoker's permissions and filter output.
 
 ---
 
@@ -149,19 +162,22 @@ CREATE TABLE IF NOT EXISTS interaction_cooldowns (
 )
 ```
 
+Use UTC for all hourly/daily resets.
+
 Add helper functions:
 ```python
 async def check_interaction_limit(guild_id, user_id, interaction_type) -> tuple[bool, str]:
     """Returns (can_interact, reason_if_blocked)
     reason_if_blocked is "hourly" or "daily".
     """
-    # if daily_reset != today: reset daily_count to 0
-    # if last_used within 1 hour: return (False, "hourly")
+    # use UTC date for daily_reset
+    # if daily_reset != today (UTC): reset daily_count to 0
+    # if last_used within 1 hour (UTC): return (False, "hourly")
     # if daily_count >= 3: return (False, "daily")
     # otherwise return (True, "ok")
 
 async def record_interaction(guild_id, user_id, interaction_type) -> None:
-    """Update last_used, daily_count, daily_reset."""
+    """Update last_used, daily_count, daily_reset (UTC)."""
 ```
 
 ### Response Dictionaries (ASCII only)
@@ -253,6 +269,7 @@ Also hard-block affection system and evil mode while in `mode_default` (Clanker)
 - Use Discord server profile avatars instead.
 - Mode changes auto-update avatars.
 - Admins can upload custom avatars (max 500 KB).
+- Do not update server avatar more than 2 times per hour.
 
 ### New Utility File
 
@@ -261,6 +278,7 @@ Also hard-block affection system and evil mode while in `mode_default` (Clanker)
 Same as previous, plus:
 - Reject files larger than 500 KB.
 - Support per-guild custom avatar override path.
+- Track avatar update timestamps and block if 2 updates already happened in the last hour.
 
 ### Avatar Storage and Persistence
 
@@ -277,13 +295,15 @@ discord_bot/data/avatars/custom/
 ```
 
 #### [MODIFY] db_handler.py
-Add a table to store per-guild avatar overrides:
+Add a table to store per-guild avatar overrides and rate limits:
 
 ```sql
 CREATE TABLE IF NOT EXISTS guild_avatar_config (
     guild_id INTEGER PRIMARY KEY,
     custom_avatar_path TEXT,
-    updated_at TIMESTAMP
+    last_updated TIMESTAMP,
+    hourly_count INTEGER DEFAULT 0,
+    hourly_reset TIMESTAMP
 )
 ```
 
@@ -291,6 +311,8 @@ Add helpers:
 ```python
 async def get_guild_avatar_path(guild_id: int) -> Optional[str]
 async def set_guild_avatar_path(guild_id: int, path: Optional[str]) -> None
+async def can_update_guild_avatar(guild_id: int) -> tuple[bool, str]
+async def record_guild_avatar_update(guild_id: int) -> None
 ```
 
 ### Admin Commands for Server Avatars
@@ -305,16 +327,19 @@ avatar_group = app_commands.Group(name="avatar", description="Manage bot server 
 async def avatar_set(self, interaction, image: discord.Attachment):
     # Validate file type
     # Validate size <= 500 KB
+    # Enforce rate limit: max 2 updates per hour
     # Save to discord_bot/data/avatars/custom/guild_<ID>.png
     # set_guild_avatar_path()
     # Call set_server_avatar()
 
 @avatar_group.command(name="mode")
 async def avatar_mode(self, interaction):
+    # Enforce rate limit: max 2 updates per hour
     # Set avatar based on current mode and clear custom override
 
 @avatar_group.command(name="reset")
 async def avatar_reset(self, interaction):
+    # Enforce rate limit: max 2 updates per hour
     # Clear custom override and reset to global default
 ```
 
@@ -334,7 +359,11 @@ If a custom avatar exists for the guild, do NOT override it unless the admin cal
 #### [REMOVE] persona_manager.py
 - Delete webhook creation and send_as_mode logic.
 - Replace usage in `ai_brain.py` with normal `message.reply()` or channel send.
-- Remove webhook config fields if any are stored.
+
+#### [MODIFY] ai_brain.py
+- Remove calls to `persona_manager.send_as_mode()`.
+- Replace with `message.reply()` or `channel.send()`.
+- Remove any webhook-specific fallbacks.
 
 ### Migration/cleanup
 - Remove any webhook IDs stored in data/config.
@@ -347,9 +376,11 @@ If a custom avatar exists for the guild, do NOT override it unless the admin cal
 ### Automated Tests
 1. Activity shows "Playing: Clanking with humans".
 2. Help output uses correct greeting per mode and includes full command list.
-3. Hug/pat rate limits: 1/hour and 3/day for non-default modes.
-4. Affection changes: default=0, femboy/tsundere=+1, oneesan pat=-1.
-5. Gemini key rotation still works with new config.
+3. Help output hides admin commands for non-admins.
+4. Hug/pat rate limits: 1/hour and 3/day for non-default modes (UTC).
+5. Affection changes: default=0, femboy/tsundere=+1, oneesan pat=-1.
+6. Server avatar updates blocked after 2 updates/hour.
+7. Gemini key rotation still works with new config.
 
 ### Manual Verification
 1. Run `!mode femboy` and verify avatar changes.
