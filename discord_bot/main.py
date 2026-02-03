@@ -164,6 +164,45 @@ class Femmy(commands.Bot):
         activity = discord.Game(name="Clanking with humans")
         await self.change_presence(activity=activity)
 
+    async def on_guild_join(self, guild: discord.Guild):
+        """Initialize new guild data and set the server avatar to the guild icon."""
+        from utils.db_handler import init_guild_db, get_guild_avatar_path
+        from utils.server_avatar import set_custom_avatar
+
+        try:
+            await init_guild_db(guild.id)
+        except Exception as exc:
+            logger.warning("Failed to init DB for guild %s on join: %s", guild.id, exc)
+
+        if not guild.icon:
+            return
+
+        try:
+            existing_path = await get_guild_avatar_path(guild.id)
+        except Exception as exc:
+            logger.warning("Failed to fetch avatar path for guild %s: %s", guild.id, exc)
+            existing_path = None
+
+        if existing_path:
+            logger.info("Skipping guild avatar update for %s: custom avatar already set.", guild.id)
+            return
+
+        try:
+            icon_asset = guild.icon.replace(size=128)
+            icon_bytes = await icon_asset.read()
+        except Exception as exc:
+            logger.warning("Failed to read guild icon for %s: %s", guild.id, exc)
+            return
+
+        try:
+            success, reason = await set_custom_avatar(self, guild.id, icon_bytes)
+        except Exception as exc:
+            logger.warning("Failed to set guild avatar for %s: %s", guild.id, exc)
+            return
+
+        if not success:
+            logger.warning("Guild avatar update failed for %s: %s", guild.id, reason)
+
     async def on_interaction(self, interaction: discord.Interaction):
         """Block application commands in DMs (works even without tree.check support)."""
         if interaction.type == discord.InteractionType.application_command and interaction.guild is None:

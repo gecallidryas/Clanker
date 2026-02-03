@@ -63,6 +63,7 @@ This document is the canonical, detailed feature inventory for this repository. 
   - Optional emoji prefix and activity string
 - Mode switching with permission checks; optional global lock via `BOT_MODE`.
 - Server-specific bot avatars are applied per guild; mode changes can auto-update the server avatar.
+- On joining a new guild, the bot sets its server avatar to the guild icon if no custom avatar override exists.
 - Admins can reset or revert to mode-based avatars via `/avatar` commands (rate-limited to 2 updates per hour).
 - Custom personas can be created per guild with their own bio, prompts, and avatar/banner URLs, then activated with `!mode` or `/mode`.
 - `!modes` and `/modes` include custom personas for the current guild.
