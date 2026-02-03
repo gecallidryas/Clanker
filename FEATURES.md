@@ -139,6 +139,7 @@ This document is the canonical, detailed feature inventory for this repository. 
   - OpenRouter
 - Model selection for Gemini and OpenRouter (with recommended lists).
 - Env upload and example delivery for guild-specific configuration.
+- `/config env example` sends the warning text plus a multi-part guild.env template when it exceeds message length.
 - Feature toggles (evil mode, autorole, welcome) via `/config toggle`.
 - Staff roles and permission levels via `/config staff`.
 - Mod log channel via `/config modlog`.

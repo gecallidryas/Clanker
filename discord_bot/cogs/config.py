@@ -583,27 +583,44 @@ class Config(commands.Cog):
             )
             return
         template_text = template_path.read_text(encoding="utf-8")
-        warning = (
+        message = (
             "Heads up: OpenRouter free keys are often rate-limited or unavailable unless you have very high "
-            "priority from OpenRouter. If you want reliable uncensored mode, use Gemini free keys and set an "
-            "OpenRouter credit limit to $1 in your OpenRouter settings. About $0.70 can yield ~1500-2500 "
-            "uncensored messages (varies by model and prompt size).\\n"
+            "priority from OpenRouter. If you want reliable uncensored mode, use premium OpenRouter keys. "
+            "For normal mode you can safely use Gemini free keys (add as many free keys as you can from "
+            "different accounts for smooth sailing, as long as there is not much image analysis (do vids "
+            "if you are really rich lol)). And set an OpenRouter credit limit to $1 in your OpenRouter "
+            "settings. About $0.70 can yield ~1500-2500 uncensored messages (varies by model and prompt size).\n"
             "Security note: API keys are stored encrypted and only admins can view them. "
-            "The bot creator does not access or use your keys."
+            "The bot creator does not access or use your keys.\n\n"
+            "How to upload: 1) Copy the template below into a file named `guild.env` (or any .env name). "
+            "2) Fill in your keys and models. 3) Upload it with `/config env upload`.\n"
+            "Change \"GEMINI_KEY_TYPE\" to paid if you are using paid keys. It's more reliable."
         )
-        instructions = (
-            "How to upload:\\n"
-            "1) Copy the template below into a file named `guild.env` (or any .env name).\\n"
-            "2) Fill in your keys and models.\\n"
-            "3) Upload it with `/config env upload`."
-        )
-        template_block = f"Guild env template (copy/paste):\\n```\\n{template_text.strip()}\\n```"
-        combined = f"{warning}\\n\\n{instructions}\\n\\n{template_block}"
-        if len(combined) <= 1900:
-            await interaction.response.send_message(combined, ephemeral=True)
-        else:
-            await interaction.response.send_message(f"{warning}\n\n{instructions}", ephemeral=True)
-            await interaction.followup.send(template_block, ephemeral=True)
+
+        await interaction.response.send_message(message, ephemeral=True)
+
+        lines = template_text.strip().splitlines()
+        chunks: list[str] = []
+        current: list[str] = []
+        current_len = 0
+        max_chunk_len = 1800
+        for line in lines:
+            line_len = len(line) + 1
+            if current and current_len + line_len > max_chunk_len:
+                chunks.append("\n".join(current))
+                current = [line]
+                current_len = line_len
+            else:
+                current.append(line)
+                current_len += line_len
+        if current:
+            chunks.append("\n".join(current))
+
+        total = len(chunks)
+        for idx, chunk in enumerate(chunks, start=1):
+            label = f"Guild env template (part {idx}/{total}):"
+            block = f"{label}\n```\n{chunk}\n```"
+            await interaction.followup.send(block, ephemeral=True)
 
     @env_group.command(name="upload", description="Upload a .env file for this guild.")
     @app_commands.checks.has_permissions(administrator=True)
