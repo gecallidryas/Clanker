@@ -79,7 +79,37 @@ HELP_COMMANDS = {
     "config": {
         "visibility": "admin",
         "prefix": ["!admin", "!reload"],
-        "slash": ["/config auth", "/config password", "/config keys", "/config model", "/config env", "/config toggle", "/config staff", "/config modlog", "/config autorole", "/config welcome", "/admin reset", "/admin view", "/admin setfact", "/admin delfact", "/admin affection", "/admin model", "/admin clearglobal", "/admin clearguild", "/setgenderrole", "/avatar mode", "/avatar reset"],
+        "slash": ["/config auth", "/config password", "/config keys", "/config model", "/config env", "/config toggle", "/admin reset", "/admin view", "/admin setfact", "/admin delfact", "/admin affection", "/admin model", "/admin clearglobal", "/admin clearguild", "/setgenderrole", "/avatar mode", "/avatar reset"],
+    },
+    "staff": {
+        "visibility": "admin",
+        "prefix": [],
+        "slash": ["/staff add", "/staff remove", "/staff list"],
+    },
+    "modlog": {
+        "visibility": "admin",
+        "prefix": [],
+        "slash": ["/modlog set", "/modlog clear", "/modlog view"],
+    },
+    "autorole": {
+        "visibility": "admin",
+        "prefix": [],
+        "slash": ["/autorole set", "/autorole clear", "/autorole view"],
+    },
+    "welcome": {
+        "visibility": "admin",
+        "prefix": [],
+        "slash": [
+            "/welcome channel",
+            "/welcome clear",
+            "/welcome test",
+            "/welcome set_message",
+            "/welcome view_message",
+            "/welcome clear_message",
+            "/welcome set_dm_message",
+            "/welcome clear_dm_message",
+            "/welcome toggle_dm",
+        ],
     },
     "persona": {
         "visibility": "admin",

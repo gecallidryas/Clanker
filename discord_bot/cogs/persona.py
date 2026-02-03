@@ -20,6 +20,7 @@ from utils.db_handler import (
     build_custom_mode_key,
     create_custom_persona,
     delete_custom_persona,
+    delete_persona_traits,
     get_custom_persona_by_name,
     get_guild_custom_personas,
     sanitize_persona_name,
@@ -28,7 +29,9 @@ from utils.db_handler import (
     set_server_mode,
     set_evil_mode,
     set_guild_avatar_path,
+    upsert_persona_traits,
 )
+from utils.affection_traits import extract_persona_traits
 from utils.image_downloader import (
     MAX_AVATAR_BYTES,
     MAX_BANNER_BYTES,
@@ -62,6 +65,8 @@ class PendingPersonaEdit:
     banner_url: Optional[str]
     current_avatar_path: Optional[str]
     current_banner_path: Optional[str]
+    current_normal_prompt: Optional[str]
+    current_evil_prompt: Optional[str]
     created_at: datetime
 
 
@@ -312,6 +317,16 @@ class PersonaPromptsModal(discord.ui.Modal):
             )
             return
 
+        traits = extract_persona_traits(
+            self.normal_prompt.value,
+            self.evil_prompt.value or None,
+        )
+        if traits:
+            try:
+                await upsert_persona_traits(self.guild_id, mode_key, traits)
+            except Exception as exc:
+                logger.warning("Failed to save persona traits: %s", exc)
+
         self.cog.record_creation(self.guild_id, self.user_id)
 
         await interaction.followup.send(
@@ -378,6 +393,8 @@ class PersonaEditModal(discord.ui.Modal):
             banner_url=banner_url,
             current_avatar_path=self.persona.get("avatar_path"),
             current_banner_path=self.persona.get("banner_path"),
+            current_normal_prompt=self.persona.get("normal_prompt"),
+            current_evil_prompt=self.persona.get("evil_prompt"),
             created_at=datetime.utcnow(),
         )
         self.cog.store_edit_pending(self.guild_id, self.user_id, pending)
@@ -489,6 +506,17 @@ class PersonaEditPromptsModal(discord.ui.Modal):
         if not updated:
             await interaction.followup.send("Failed to update persona.", ephemeral=True)
             return
+
+        if "normal_prompt" in updates or "evil_prompt" in updates:
+            normal_prompt = updates.get("normal_prompt") or pending.current_normal_prompt or ""
+            evil_prompt = updates.get("evil_prompt")
+            if evil_prompt is None and "evil_prompt" not in updates:
+                evil_prompt = pending.current_evil_prompt
+            traits = extract_persona_traits(normal_prompt, evil_prompt)
+            try:
+                await upsert_persona_traits(self.guild_id, pending.mode_key, traits)
+            except Exception as exc:
+                logger.warning("Failed to update persona traits: %s", exc)
 
         current_mode = await get_server_mode(self.guild_id)
         if current_mode == pending.mode_key and "avatar_path" in updates:
@@ -740,6 +768,11 @@ class Persona(commands.Cog):
         if not deleted:
             await interaction.response.send_message("Failed to delete persona.", ephemeral=True)
             return
+
+        try:
+            await delete_persona_traits(interaction.guild.id, mode_key)
+        except Exception as exc:
+            logger.warning("Failed to delete persona traits: %s", exc)
 
         for path_value in (persona.get("avatar_path"), persona.get("banner_path")):
             if not path_value:

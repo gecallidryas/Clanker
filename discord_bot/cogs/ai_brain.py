@@ -45,7 +45,6 @@ from utils.db_handler import (
     set_last_wellbeing_date,
     get_staff_roles,
     get_mod_log_channel_id,
-    AFFECTION_TRACKED_MODES,
 )
 from utils.api_manager import UserInputError
 from utils.app_emojis import (
@@ -93,6 +92,7 @@ SUPPORTED_VIDEO_EXTENSIONS = {".mp4", ".webm", ".mov", ".avi", ".mpeg", ".mpg", 
 # Conversation continuation settings
 ACTIVE_CONVO_MESSAGES = 3  # Stay engaged for N messages after trigger
 ACTIVE_CONVO_TIMEOUT = 300  # 5 minutes timeout
+
 
 logger = get_logger(__name__)
 
@@ -546,6 +546,7 @@ class AIBrain(commands.Cog):
 
         user = self.bot.get_user(user_id)
         return user_id, user.display_name if user else None
+
 
     def _is_active_conversation(self, channel_id: int, user_id: int) -> bool:
         """Check if the bot is in an active conversation with this user in this channel."""
@@ -1126,8 +1127,7 @@ class AIBrain(commands.Cog):
                     "total_interactions": 0,
                 }
             else:
-                affection_mode = mode if mode in AFFECTION_TRACKED_MODES else "mode_femboy"
-                affection_data = await get_affection_by_mode(guild_id, user_id, affection_mode)
+                affection_data = await get_affection_by_mode(guild_id, user_id, mode)
         affection_level = affection_data.get("affection_level", "stranger")
         affection_points = affection_data.get("affection_points", 0)
 
@@ -1203,7 +1203,6 @@ class AIBrain(commands.Cog):
 - Very intimate and devoted"""
         }
         affection_context = affection_prompts.get(affection_level, affection_prompts["stranger"])
-        
 
         # Command context for RAG-like help
         commands_help = """
@@ -1475,8 +1474,7 @@ Respond naturally in character. Keep responses concise.
                 "total_interactions": 0,
             }
         else:
-            affection_mode = mode if mode in AFFECTION_TRACKED_MODES else "mode_femboy"
-            affection_data = await get_affection_by_mode(message.guild.id, message.author.id, affection_mode)
+            affection_data = await get_affection_by_mode(message.guild.id, message.author.id, mode)
         affection_points = affection_data.get("affection_points", 0)
         allow_evil = affection_points >= 500
         if mode == "mode_default":
@@ -1492,15 +1490,16 @@ Respond naturally in character. Keep responses concise.
         reply_context = await self._get_reply_context(message)
         if reply_context:
             content_for_prompt = f"{reply_context}\n{content_for_prompt}"
-        
+
         # Show typing indicator
         async with message.channel.typing():
             # Build and send prompt
+            context_snapshot = context.get_context()
             prompt = await self.build_prompt(
                 message.guild.id,
                 message.author.id,
                 content_for_prompt,
-                context.get_context(),
+                context_snapshot,
                 member=message.author,
                 wellbeing_prompt=wellbeing_prompt,
                 affection_data=affection_data,

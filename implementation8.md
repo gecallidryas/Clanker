@@ -76,7 +76,7 @@ CREATE TABLE IF NOT EXISTS custom_personas (
     updated_at TIMESTAMP DEFAULT CURRENT_TIMESTAMP,
     is_active BOOLEAN DEFAULT 1,
     UNIQUE (mode_key),
-    UNIQUE (name)
+    UNIQUE (guild_id, name)
 )
 ```
 
@@ -118,8 +118,8 @@ def build_custom_mode_key(guild_id: int, name: str) -> str  # f"custom_{guild_id
 
 ### [NEW] utils/image_downloader.py
 
-Align avatar size checks with the existing `/avatar set` path (500 KB max).
-The server avatar update pipeline will reject anything larger.
+Align avatar size checks with the server avatar limit (500 KB max).
+All images are converted to WebP to save space.
 
 ```python
 import aiohttp
@@ -178,12 +178,22 @@ async def download_and_validate_image(
                         return False, "Image exceeds size limit"
 
         try:
-            Image.open(BytesIO(data)).verify()
+            image = Image.open(BytesIO(data))
+            image.load()
         except Exception:
             return False, "File is not a valid image"
 
+        if image.mode not in ("RGB", "RGBA"):
+            image = image.convert("RGBA")
+
+        output = BytesIO()
+        image.save(output, format="WEBP", quality=80, method=6)
+        converted = output.getvalue()
+        if len(converted) > max_size:
+            return False, "Image too large after conversion"
+
         save_path.parent.mkdir(parents=True, exist_ok=True)
-        save_path.write_bytes(bytes(data))
+        save_path.write_bytes(converted)
         return True, "ok"
 
     except aiohttp.ClientError as exc:
@@ -198,10 +208,9 @@ async def download_and_validate_image(
 
 Use ASCII-only paths and names:
 ```
-discord_bot/data/personas/
-  guild_<ID>/
-    <persona_slug>_avatar.png
-    <persona_slug>_banner.png
+discord_bot/data/avatars/custom/
+  guild_<ID>_<persona_slug>_avatar.webp
+  guild_<ID>_<persona_slug>_banner.webp
 ```
 
 ---
@@ -284,7 +293,7 @@ Modal handling (outline):
 
 1. Image Validation
    - Enforce http/https only.
-   - Enforce 500 KB max for avatar (match `/avatar set`).
+   - Enforce 500 KB max for avatar (server avatar limit).
    - Validate actual image bytes with PIL.
 2. Rate Limiting
    - Max 5 custom personas per guild.

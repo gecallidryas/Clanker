@@ -37,8 +37,10 @@ from utils.db_handler import (
     check_interaction_limit,
     record_interaction,
     AFFECTION_TRACKED_MODES,
+    record_trait_hit,
 )
 from utils.sentiment import analyze_sentiment, quick_sentiment_check
+from utils.affection_traits import get_or_seed_mode_traits
 from utils.logger import get_logger
 
 logger = get_logger(__name__)
@@ -218,7 +220,12 @@ class Affection(commands.Cog):
             color=discord.Color.from_rgb(255, 182, 193),
         )
 
-        for mode_key in AFFECTION_TRACKED_MODES:
+        mode_keys = list(AFFECTION_TRACKED_MODES)
+        for extra_key in sorted(data_by_mode.keys()):
+            if extra_key not in mode_keys:
+                mode_keys.append(extra_key)
+
+        for mode_key in mode_keys:
             mode_data = data_by_mode.get(mode_key, {})
             level = mode_data.get("affection_level", "stranger")
             points = mode_data.get("affection_points", 0)
@@ -261,6 +268,56 @@ class Affection(commands.Cog):
         embed.set_thumbnail(url=target.display_avatar.url)
         return embed
 
+    async def _apply_trait_affection(
+        self,
+        guild_id: int,
+        user_id: int,
+        mode: str,
+        message_text: str,
+        sentiment: str,
+    ) -> None:
+        if mode == "mode_default":
+            return
+        if sentiment not in ("positive", "very_positive", "negative", "very_negative", "hostile"):
+            return
+
+        traits = await get_or_seed_mode_traits(guild_id, mode)
+        if not traits:
+            return
+
+        content = (message_text or "").lower()
+        for trait in traits:
+            trait_key = trait.get("trait_key")
+            if not trait_key:
+                continue
+            points = int(trait.get("points_value") or 0)
+            if points == 0:
+                continue
+
+            if points > 0 and sentiment not in ("positive", "very_positive"):
+                continue
+            if points < 0 and sentiment not in ("negative", "very_negative", "hostile"):
+                continue
+
+            terms = trait.get("trigger_terms") or []
+            if not terms:
+                terms = [str(trait.get("trait_text") or "").strip()]
+
+            hit = False
+            for term in terms:
+                term_value = str(term or "").strip().lower()
+                if term_value and term_value in content:
+                    hit = True
+                    break
+            if not hit:
+                continue
+
+            record = await record_trait_hit(guild_id, user_id, mode, trait_key)
+            if trait.get("one_time") and not record.get("first_time"):
+                continue
+
+            await add_affection_to_mode(guild_id, user_id, mode, points)
+
     async def _handle_interaction(self, guild_id: int, user_id: int, interaction_type: str) -> str:
         mode = await get_server_mode(guild_id)
         if mode == "mode_default":
@@ -279,7 +336,7 @@ class Affection(commands.Cog):
         if interaction_type == "pat" and mode == "mode_oneesan":
             delta = -1
 
-        affection_mode = mode if mode in AFFECTION_TRACKED_MODES else "mode_femboy"
+        affection_mode = mode
 
         await update_mood(guild_id, 5)
         await add_affection_to_mode(guild_id, user_id, affection_mode, delta)
@@ -435,7 +492,7 @@ class Affection(commands.Cog):
         if self.bot.user in message.mentions:
             if mode == "mode_default":
                 return
-            affection_mode = mode if mode in AFFECTION_TRACKED_MODES else "mode_femboy"
+            affection_mode = mode
             # Get message content without the mention
             content = message.content
             content = content.replace(f"<@{self.bot.user.id}>", "").strip()
@@ -453,12 +510,23 @@ class Affection(commands.Cog):
                 
                 # Apply affection change (don't reply here - ai_brain handles responses)
                 await add_affection_to_mode(message.guild.id, message.author.id, affection_mode, delta)
+
+                try:
+                    await self._apply_trait_affection(
+                        message.guild.id,
+                        message.author.id,
+                        affection_mode,
+                        content,
+                        sentiment,
+                    )
+                except Exception as exc:
+                    logger.warning("Trait affection failed: %s", exc)
                 
                 if sentiment in ("negative", "very_negative", "hostile"):
                     logger.info(f"Negative interaction from {message.author}: {sentiment} ({delta} pts)")
             else:
-                # Default positive for short mentions
-                await add_affection_to_mode(message.guild.id, message.author.id, affection_mode, 1)
+                # Short mentions don't change affection
+                await add_affection_to_mode(message.guild.id, message.author.id, affection_mode, 0)
     
     # ============================================
     # Background Tasks

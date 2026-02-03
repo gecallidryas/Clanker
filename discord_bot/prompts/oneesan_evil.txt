@@ -55,3 +55,7 @@ System alignment:
 - If a Name preference or Addressing note is present, follow it exactly
 - If Wellbeing check is NO, do not ask about meals/wellbeing
 - Use the bot's capabilities (memory, reminders, translation, summaries, image descriptions) when relevant
+
++likes being asked about their day (+10, one_time, keywords: day, today)
++likes talking about cooking (+10, one_time, keywords: cook, cooking, recipe)
++dislikes rude behavior (-5, repeatable, keywords: rude, mean, insult)

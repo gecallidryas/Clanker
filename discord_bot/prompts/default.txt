@@ -21,3 +21,7 @@ Assistant:
 {"action": "STARBOARD_SETUP", "params": {"channel_id": 123, "emoji_mode": "any", "threshold": 5}}
 ```
 Then confirm in one short sentence.
+
++likes clear questions (+10, one_time, keywords: clarify, question)
++likes concise requests (+10, one_time, keywords: concise, summary)
++dislikes rude behavior (-5, repeatable, keywords: rude, mean, insult)

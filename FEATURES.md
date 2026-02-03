@@ -65,15 +65,18 @@ This document is the canonical, detailed feature inventory for this repository. 
 - Server-specific bot avatars are applied per guild; mode changes can auto-update the server avatar.
 - Admins can reset or revert to mode-based avatars via `/avatar` commands (rate-limited to 2 updates per hour).
 - Custom personas can be created per guild with their own bio, prompts, and avatar/banner URLs, then activated with `!mode` or `/mode`.
+- `!modes` and `/modes` include custom personas for the current guild.
 - Deleting an active custom persona reverts the guild back to `mode_default` and clears the server avatar override.
 - Evil mode can use separate avatar images per mode when available.
 
 ### Affection and mood (discord_bot/cogs/affection.py, discord_bot/utils/sentiment.py)
 - Per-mode affection tracking with levels and thresholds.
-- Affection changes from direct mentions (sentiment analysis) and explicit actions (headpat/hug), with mode-specific deltas and rate limits (1 per hour, 3 per day) outside default mode.
+- Affection changes from bot-directed messages (sentiment analysis) and explicit actions (headpat/hug), with mode-specific deltas and rate limits (1 per hour, 3 per day) outside default mode.
+- Neutral sentiment does not award affection points.
 - Default mode uses fixed hug/pat responses and does not change affection.
 - Mood system per guild with hourly decay and interaction-based boosts.
 - Sentiment analysis uses keyword heuristics and Gemini fallback.
+- One-time trait rewards are tracked per user and persona when keyword triggers are detected.
 
 ### Memory and personalization (discord_bot/cogs/memories.py)
 - User timezone storage (IANA names and common abbreviations).
@@ -169,6 +172,7 @@ This document is the canonical, detailed feature inventory for this repository. 
   - users and profiles: `users`, `user_profiles`
   - memory: `user_facts`, `user_aliases`, `pending_facts`
   - relationships: `user_affection_by_mode`, `bot_mood`, `wellbeing_checks`, `interaction_cooldowns`
+  - affection traits: `persona_traits`, `user_trait_history`
   - reminders: `reminders`
   - server settings: `server_config`, `guild_config`, `guild_avatar_config`
   - custom personas: `custom_personas`
@@ -187,7 +191,7 @@ This document is the canonical, detailed feature inventory for this repository. 
 - Logging to `discord_bot/logs/femmy.log` with rotation.
 
 ### Tests
-- Unit tests for API key manager, mode registry, image downloader, and persona DB helpers in `tests/`.
+- Unit tests for API key manager, mode registry, image downloader, persona DB helpers, and affection traits in `tests/`.
 
 ## Commands
 
@@ -283,6 +287,7 @@ This document is the canonical, detailed feature inventory for this repository. 
       tsundere.txt
       tsundere_evil.txt
     utils/
+      affection_traits.py
       admin_actions.py
       api_manager.py
       app_emojis.py
@@ -305,6 +310,8 @@ This document is the canonical, detailed feature inventory for this repository. 
   scripts/
     split_db.py
   tests/
+    test_affection_traits.py
+    test_affection_traits_db.py
     test_api_manager.py
     test_image_downloader.py
     test_mode_registry.py
@@ -312,14 +319,13 @@ This document is the canonical, detailed feature inventory for this repository. 
   AGENTS.md
   FEATURES.md
   emojilist.md
+  freeapisafety.md
   application.commands
-  implementation_plan.md
-  implementation_plan2.md
-  implementation4.md
-  implementation5.md
-  implementationfix1.md
+  implementation8.md
+  implementation9.md
   improvement.md
   Improvement3.md
+  improvement7.md
   plan.md
   apidbrefactor.md
   task.md

@@ -37,6 +37,7 @@ from utils.db_handler import (
     get_custom_persona_by_name,
     get_custom_persona_by_mode_key,
     get_guild_custom_personas,
+    sanitize_persona_name,
     set_guild_avatar_path,
 )
 from utils.guild_ai import generate_guild_gemini_text, GuildConfigError
@@ -65,6 +66,28 @@ class Social(commands.Cog):
     
     def __init__(self, bot: commands.Bot):
         self.bot = bot
+
+    async def _resolve_custom_persona(self, guild_id: int, mode_name: str) -> dict | None:
+        if not mode_name:
+            return None
+        persona = await get_custom_persona_by_name(guild_id, mode_name)
+        if persona:
+            return persona
+
+        slug = sanitize_persona_name(mode_name)
+        if not slug:
+            return None
+
+        try:
+            personas = await get_guild_custom_personas(guild_id)
+        except Exception:
+            return None
+
+        for candidate in personas:
+            name = candidate.get("name") or ""
+            if sanitize_persona_name(name) == slug:
+                return candidate
+        return None
 
     async def _get_app_emojis_by_prefix(self, prefix: str) -> list:
         emojis = await get_application_emojis(self.bot)
@@ -223,7 +246,7 @@ class Social(commands.Cog):
         custom_persona = None
 
         if not target_mode:
-            custom_persona = await get_custom_persona_by_name(ctx.guild.id, mode_name)
+            custom_persona = await self._resolve_custom_persona(ctx.guild.id, mode_name)
             if custom_persona:
                 target_mode = custom_persona.get("mode_key")
 
@@ -311,7 +334,7 @@ class Social(commands.Cog):
         custom_persona = None
 
         if not target_mode:
-            custom_persona = await get_custom_persona_by_name(interaction.guild.id, mode_name)
+            custom_persona = await self._resolve_custom_persona(interaction.guild.id, mode_name)
             if custom_persona:
                 target_mode = custom_persona.get("mode_key")
 
@@ -443,6 +466,31 @@ class Social(commands.Cog):
                 inline=False,
             )
 
+        try:
+            personas = await get_guild_custom_personas(ctx.guild.id)
+        except Exception:
+            personas = []
+
+        if personas:
+            lines = []
+            for persona in personas:
+                name = persona.get("name", "Custom Persona")
+                mode_key = persona.get("mode_key", "")
+                is_current = mode_key == current_mode
+                marker = " <- Current" if is_current else ""
+                bio = (persona.get("bio") or "Custom persona.").strip()
+                if len(bio) > 80:
+                    bio = bio[:77].rstrip() + "..."
+                lines.append(f"- {name}{marker}: {bio}")
+                if len(lines) >= 12:
+                    break
+
+            embed.add_field(
+                name="Custom Personas",
+                value="\n".join(lines),
+                inline=False,
+            )
+
         embed.set_footer(text="Manage Guild permission required to change modes")
         await ctx.send(embed=embed)
 
@@ -474,6 +522,31 @@ class Social(commands.Cog):
             embed.add_field(
                 name=f"{prefix}{profile.display_name}{marker}",
                 value=f"{profile.description}\nAliases: {', '.join(profile.aliases)}",
+                inline=False,
+            )
+
+        try:
+            personas = await get_guild_custom_personas(interaction.guild.id)
+        except Exception:
+            personas = []
+
+        if personas:
+            lines = []
+            for persona in personas:
+                name = persona.get("name", "Custom Persona")
+                mode_key = persona.get("mode_key", "")
+                is_current = mode_key == current_mode
+                marker = " <- Current" if is_current else ""
+                bio = (persona.get("bio") or "Custom persona.").strip()
+                if len(bio) > 80:
+                    bio = bio[:77].rstrip() + "..."
+                lines.append(f"- {name}{marker}: {bio}")
+                if len(lines) >= 12:
+                    break
+
+            embed.add_field(
+                name="Custom Personas",
+                value="\n".join(lines),
                 inline=False,
             )
 

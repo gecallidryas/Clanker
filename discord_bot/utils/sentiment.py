@@ -20,7 +20,7 @@ logger = get_logger(__name__)
 SENTIMENT_IMPACTS = {
     "very_positive": 5,
     "positive": 2,
-    "neutral": 1,
+    "neutral": 0,
     "negative": -3,
     "very_negative": -10,
     "hostile": -15

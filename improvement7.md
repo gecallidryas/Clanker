@@ -268,7 +268,8 @@ Also hard-block affection system and evil mode while in `mode_default` (Clanker)
 - Remove all webhook-based persona delivery.
 - Use Discord server profile avatars instead.
 - Mode changes auto-update avatars.
-- Admins can upload custom avatars (max 500 KB).
+- Default mode uses the application avatar (no mode_default file).
+- Admins can reset/reapply mode-based avatars (max 500 KB enforced by server avatar limits).
 - Do not update server avatar more than 2 times per hour.
 
 ### New Utility File
@@ -285,13 +286,15 @@ Same as previous, plus:
 #### Storage
 ```
 discord_bot/data/avatars/
-  mode_default.png
-  mode_femboy.png
-  mode_tsundere.png
-  mode_oneesan.png
+  mode_femboy.webp
+  mode_tsundere.webp
+  mode_oneesan.webp
+  mode_femboy_evil.webp
+  mode_tsundere_evil.webp
+  mode_oneesan_evil.webp
 
 discord_bot/data/avatars/custom/
-  guild_<GUILD_ID>.png
+  guild_<GUILD_ID>.webp
 ```
 
 #### [MODIFY] db_handler.py
@@ -318,19 +321,10 @@ async def record_guild_avatar_update(guild_id: int) -> None
 ### Admin Commands for Server Avatars
 
 #### [MODIFY] admin.py
-Add a new slash command group:
+Slash command group:
 
 ```python
 avatar_group = app_commands.Group(name="avatar", description="Manage bot server avatar")
-
-@avatar_group.command(name="set")
-async def avatar_set(self, interaction, image: discord.Attachment):
-    # Validate file type
-    # Validate size <= 500 KB
-    # Enforce rate limit: max 2 updates per hour
-    # Save to discord_bot/data/avatars/custom/guild_<ID>.png
-    # set_guild_avatar_path()
-    # Call set_server_avatar()
 
 @avatar_group.command(name="mode")
 async def avatar_mode(self, interaction):
@@ -340,7 +334,7 @@ async def avatar_mode(self, interaction):
 @avatar_group.command(name="reset")
 async def avatar_reset(self, interaction):
     # Enforce rate limit: max 2 updates per hour
-    # Clear custom override and reset to global default
+    # Clear custom override and reset to application avatar
 ```
 
 ### Auto-Update Avatar on Mode Change
@@ -386,5 +380,4 @@ If a custom avatar exists for the guild, do NOT override it unless the admin cal
 1. Run `!mode femboy` and verify avatar changes.
 2. Test `!pat` and `!hug` in each mode and verify response tone.
 3. Spam `!hug` to verify rate limits.
-4. Use `/avatar set` with < 500 KB image.
-5. Verify custom avatar persists and mode change does not override unless forced.
+4. Use `/avatar mode` and `/avatar reset` to verify the avatar updates and rate limits.

@@ -390,6 +390,36 @@ async def _init_guild_schema(db: aiosqlite.Connection) -> None:
         )
     """)
 
+    # Persona traits (custom affection logic)
+    await db.execute("""
+        CREATE TABLE IF NOT EXISTS persona_traits (
+            id INTEGER PRIMARY KEY AUTOINCREMENT,
+            guild_id INTEGER NOT NULL,
+            mode_key TEXT NOT NULL,
+            trait_key TEXT NOT NULL,
+            trait_text TEXT NOT NULL,
+            trigger_terms TEXT,
+            points_value INTEGER DEFAULT 0,
+            one_time INTEGER DEFAULT 1,
+            created_at TIMESTAMP DEFAULT CURRENT_TIMESTAMP,
+            updated_at TIMESTAMP DEFAULT CURRENT_TIMESTAMP,
+            UNIQUE (guild_id, mode_key, trait_key)
+        )
+    """)
+
+    await db.execute("""
+        CREATE TABLE IF NOT EXISTS user_trait_history (
+            guild_id INTEGER NOT NULL,
+            user_id INTEGER NOT NULL,
+            mode_key TEXT NOT NULL,
+            trait_key TEXT NOT NULL,
+            first_triggered_at TIMESTAMP,
+            last_triggered_at TIMESTAMP,
+            times_triggered INTEGER DEFAULT 1,
+            PRIMARY KEY (guild_id, user_id, mode_key, trait_key)
+        )
+    """)
+
     # Migrate legacy uniqueness (name-only) to guild-scoped uniqueness if needed.
     try:
         async with db.execute("PRAGMA index_list(custom_personas)") as cursor:
@@ -441,6 +471,7 @@ async def _init_guild_schema(db: aiosqlite.Connection) -> None:
             await db.execute("ALTER TABLE custom_personas_new RENAME TO custom_personas")
     except Exception:
         pass
+
 
     # Add birthday column if missing (migration)
     try:
@@ -1046,9 +1077,14 @@ def _calculate_level(points: int) -> str:
     return level
 
 
+def _is_custom_mode(mode: str) -> bool:
+    return bool(mode) and mode.startswith("custom_")
+
+
 def _validate_affection_mode(mode: str) -> None:
-    if mode not in AFFECTION_TRACKED_MODES:
-        raise ValueError(f"Invalid affection mode: {mode}")
+    if mode in AFFECTION_TRACKED_MODES or _is_custom_mode(mode):
+        return
+    raise ValueError(f"Invalid affection mode: {mode}")
 
 
 async def get_affection_by_mode(guild_id: int, user_id: int, mode: str) -> Dict[str, Any]:
@@ -2334,6 +2370,195 @@ async def delete_custom_persona(guild_id: int, mode_key: str) -> bool:
         )
         await db.commit()
         return cursor.rowcount > 0
+
+
+# ============================================
+# Custom Affection Traits
+# ============================================
+
+def _serialize_trigger_terms(terms: Optional[List[str]]) -> Optional[str]:
+    if not terms:
+        return None
+    cleaned = [t.strip() for t in terms if t and t.strip()]
+    if not cleaned:
+        return None
+    return json.dumps(cleaned, ensure_ascii=True)
+
+
+def _deserialize_trigger_terms(value: Optional[str]) -> List[str]:
+    if not value:
+        return []
+    try:
+        data = json.loads(value)
+    except json.JSONDecodeError:
+        return []
+    if not isinstance(data, list):
+        return []
+    cleaned = [str(item).strip() for item in data if str(item).strip()]
+    return cleaned
+
+
+async def upsert_persona_traits(
+    guild_id: int,
+    mode_key: str,
+    traits: List[Dict[str, Any]],
+) -> None:
+    """Replace persona traits for a mode key."""
+    async with guild_db(guild_id) as db:
+        await db.execute(
+            "DELETE FROM persona_traits WHERE guild_id = ? AND mode_key = ?",
+            (guild_id, mode_key),
+        )
+
+        if traits:
+            for trait in traits:
+                await db.execute(
+                    """
+                    INSERT INTO persona_traits
+                        (guild_id, mode_key, trait_key, trait_text, trigger_terms,
+                         points_value, one_time, updated_at)
+                    VALUES (?, ?, ?, ?, ?, ?, ?, ?)
+                    """,
+                    (
+                        guild_id,
+                        mode_key,
+                        trait.get("trait_key"),
+                        trait.get("trait_text"),
+                        _serialize_trigger_terms(trait.get("trigger_terms")),
+                        int(trait.get("points_value") or 0),
+                        1 if trait.get("one_time") else 0,
+                        datetime.now(),
+                    ),
+                )
+
+        # Remove history for traits that no longer exist (or all if none).
+        if traits:
+            await db.execute(
+                """
+                DELETE FROM user_trait_history
+                WHERE guild_id = ? AND mode_key = ?
+                  AND trait_key NOT IN (
+                      SELECT trait_key FROM persona_traits
+                      WHERE guild_id = ? AND mode_key = ?
+                  )
+                """,
+                (guild_id, mode_key, guild_id, mode_key),
+            )
+        else:
+            await db.execute(
+                "DELETE FROM user_trait_history WHERE guild_id = ? AND mode_key = ?",
+                (guild_id, mode_key),
+            )
+
+        await db.commit()
+
+
+async def delete_persona_traits(guild_id: int, mode_key: str) -> None:
+    """Delete traits and trait history for a mode key."""
+    async with guild_db(guild_id) as db:
+        await db.execute(
+            "DELETE FROM persona_traits WHERE guild_id = ? AND mode_key = ?",
+            (guild_id, mode_key),
+        )
+        await db.execute(
+            "DELETE FROM user_trait_history WHERE guild_id = ? AND mode_key = ?",
+            (guild_id, mode_key),
+        )
+        await db.commit()
+
+
+async def get_persona_traits(guild_id: int, mode_key: str) -> List[Dict[str, Any]]:
+    """Return traits for a persona mode."""
+    async with guild_db(guild_id) as db:
+        db.row_factory = aiosqlite.Row
+        async with db.execute(
+            """
+            SELECT * FROM persona_traits
+            WHERE guild_id = ? AND mode_key = ?
+            ORDER BY id ASC
+            """,
+            (guild_id, mode_key),
+        ) as cursor:
+            rows = await cursor.fetchall()
+            traits: List[Dict[str, Any]] = []
+            for row in rows:
+                item = dict(row)
+                item["trigger_terms"] = _deserialize_trigger_terms(item.get("trigger_terms"))
+                item["one_time"] = bool(item.get("one_time"))
+                traits.append(item)
+            return traits
+
+
+async def get_user_trait_history(
+    guild_id: int,
+    user_id: int,
+    mode_key: str,
+) -> List[Dict[str, Any]]:
+    """Return trait history for a user + mode key."""
+    async with guild_db(guild_id) as db:
+        db.row_factory = aiosqlite.Row
+        async with db.execute(
+            """
+            SELECT h.trait_key, h.first_triggered_at, h.last_triggered_at, h.times_triggered,
+                   t.trait_text
+            FROM user_trait_history h
+            LEFT JOIN persona_traits t
+              ON t.guild_id = h.guild_id AND t.mode_key = h.mode_key AND t.trait_key = h.trait_key
+            WHERE h.guild_id = ? AND h.user_id = ? AND h.mode_key = ?
+            ORDER BY h.last_triggered_at DESC
+            """,
+            (guild_id, user_id, mode_key),
+        ) as cursor:
+            rows = await cursor.fetchall()
+            return [dict(row) for row in rows]
+
+
+async def record_trait_hit(
+    guild_id: int,
+    user_id: int,
+    mode_key: str,
+    trait_key: str,
+    now: Optional[datetime] = None,
+) -> Dict[str, Any]:
+    """Record a trait hit; returns info about first-time vs repeat."""
+    now = now or _utcnow()
+    async with guild_db(guild_id) as db:
+        db.row_factory = aiosqlite.Row
+        async with db.execute(
+            """
+            SELECT times_triggered
+            FROM user_trait_history
+            WHERE guild_id = ? AND user_id = ? AND mode_key = ? AND trait_key = ?
+            """,
+            (guild_id, user_id, mode_key, trait_key),
+        ) as cursor:
+            row = await cursor.fetchone()
+
+        if row:
+            times = int(row["times_triggered"] or 0) + 1
+            await db.execute(
+                """
+                UPDATE user_trait_history
+                SET last_triggered_at = ?, times_triggered = ?
+                WHERE guild_id = ? AND user_id = ? AND mode_key = ? AND trait_key = ?
+                """,
+                (now.isoformat(), times, guild_id, user_id, mode_key, trait_key),
+            )
+            await db.commit()
+            return {"first_time": False, "times_triggered": times}
+
+        await db.execute(
+            """
+            INSERT INTO user_trait_history
+                (guild_id, user_id, mode_key, trait_key, first_triggered_at, last_triggered_at, times_triggered)
+            VALUES (?, ?, ?, ?, ?, ?, ?)
+            """,
+            (guild_id, user_id, mode_key, trait_key, now.isoformat(), now.isoformat(), 1),
+        )
+        await db.commit()
+        return {"first_time": True, "times_triggered": 1}
+
+
 
 
 # ============================================
