@@ -203,7 +203,7 @@ This document is the canonical, detailed feature inventory for this repository. 
   - Slash command sync and clearing
   - Gender role mapping
 - Server avatar management via `/avatar reset` (rate-limited to 2 updates per 5 minutes). Mode changes auto-apply mode avatars.
-- Custom persona management via `/create persona` and `/persona` subcommands (create, list, preview, edit, delete).
+- Custom persona management via `/persona` subcommands (create, list, preview, edit, delete).
 
 ### Emoji systems (discord_bot/utils/app_emojis.py, discord_bot/utils/emoji_manager.py)
 - Application emoji fetching and caching.
@@ -263,7 +263,7 @@ This document is the canonical, detailed feature inventory for this repository. 
 ### Slash commands
 - Admin: `/admin reset`, `/admin view`, `/admin setfact`, `/admin delfact`, `/admin affection`, `/admin model`, `/admin clearglobal`, `/admin clearguild`
 - Avatar: `/avatar reset`
-- Persona: `/create persona`, `/persona create`, `/persona list`, `/persona preview`, `/persona edit`, `/persona delete`
+- Persona: `/persona create`, `/persona list`, `/persona preview`, `/persona edit`, `/persona delete`
 - Affection: `/affection`, `/mood`, `/headpat`, `/hug`
 - Automod: `/automod add`, `/automod remove`, `/automod list`, `/automod spam`
 - Config: `/config auth`, `/config password set|change|reset`, `/config keys view|set|clear`, `/config model view|set`, `/config env example|upload`, `/config toggle evil|autorole|welcome|web_search|image_gen|stickers|emojis|pin_message|self_teaching|youtube|profile_peek|rag|gif_responses|url_safety`, `/config url_safety view|action|allowlist|blocklist|clear`, `/config ui`, `/config staff add|remove|list`, `/config modlog set|clear|view`, `/config autorole set|clear|view`, `/config welcome channel|clear|test|set_message|view_message|clear_message|set_dm_message|clear_dm_message|toggle_dm`, `/config custom_endpoint view|set`

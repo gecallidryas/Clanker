@@ -7,6 +7,7 @@ from __future__ import annotations
 from dataclasses import dataclass
 from datetime import datetime, timedelta
 from pathlib import Path
+import re
 from typing import Optional
 from urllib.parse import urlparse
 import sqlite3
@@ -53,6 +54,9 @@ class PendingPersona:
     bio: Optional[str]
     avatar_url: str
     banner_url: Optional[str]
+    aliases: list[str]
+    normal_prompt: Optional[str]
+    evil_prompt: Optional[str]
     created_at: datetime
 
 
@@ -70,7 +74,34 @@ class PendingPersonaEdit:
     created_at: datetime
 
 
-class ContinueToPromptsView(discord.ui.View):
+def _combine_prompt_parts(part1: Optional[str], part2: Optional[str]) -> str:
+    chunks = []
+    for part in (part1, part2):
+        text = (part or "").strip()
+        if text:
+            chunks.append(text)
+    return "\n".join(chunks).strip()
+
+
+def _parse_aliases_input(raw: str, persona_name: str) -> list[str]:
+    if not raw:
+        return []
+    tokens = re.split(r"[,\\n]+", raw)
+    cleaned: list[str] = []
+    name_lower = (persona_name or "").strip().lower()
+    for token in tokens:
+        value = token.strip().lower()
+        if not value:
+            continue
+        value = re.sub(r"\s+", " ", value)
+        if name_lower and value == name_lower:
+            continue
+        if value not in cleaned:
+            cleaned.append(value)
+    return cleaned
+
+
+class ContinueToNormalPromptsView(discord.ui.View):
     def __init__(self, cog: "Persona", guild_id: int, user_id: int):
         super().__init__(timeout=PENDING_TTL_SECONDS)
         self.cog = cog
@@ -92,13 +123,67 @@ class ContinueToPromptsView(discord.ui.View):
 
         if not self.cog.has_pending(self.guild_id, self.user_id):
             await interaction.response.send_message(
-                "This creation session expired. Please run /create persona again.",
+                "This creation session expired. Please run /persona create again.",
                 ephemeral=True,
             )
             return
 
-        modal = PersonaPromptsModal(self.cog, self.guild_id, self.user_id)
+        modal = PersonaNormalPromptModal(self.cog, self.guild_id, self.user_id)
         await interaction.response.send_modal(modal)
+
+
+class ContinueToEvilPromptsView(discord.ui.View):
+    def __init__(self, cog: "Persona", guild_id: int, user_id: int):
+        super().__init__(timeout=PENDING_TTL_SECONDS)
+        self.cog = cog
+        self.guild_id = guild_id
+        self.user_id = user_id
+
+    @discord.ui.button(label="Continue", style=discord.ButtonStyle.primary)
+    async def continue_button(
+        self,
+        interaction: discord.Interaction,
+        button: discord.ui.Button,
+    ) -> None:
+        if interaction.user.id != self.user_id:
+            await interaction.response.send_message(
+                "This prompt is not for you.",
+                ephemeral=True,
+            )
+            return
+
+        if not self.cog.has_pending(self.guild_id, self.user_id):
+            await interaction.response.send_message(
+                "This creation session expired. Please run /persona create again.",
+                ephemeral=True,
+            )
+            return
+
+        modal = PersonaEvilPromptModal(self.cog, self.guild_id, self.user_id)
+        await interaction.response.send_modal(modal)
+
+
+class ContinueToConfirmView(discord.ui.View):
+    def __init__(self, cog: "Persona", guild_id: int, user_id: int):
+        super().__init__(timeout=PENDING_TTL_SECONDS)
+        self.cog = cog
+        self.guild_id = guild_id
+        self.user_id = user_id
+
+    @discord.ui.button(label="Create Persona", style=discord.ButtonStyle.success)
+    async def confirm_button(
+        self,
+        interaction: discord.Interaction,
+        button: discord.ui.Button,
+    ) -> None:
+        if interaction.user.id != self.user_id:
+            await interaction.response.send_message(
+                "This prompt is not for you.",
+                ephemeral=True,
+            )
+            return
+
+        await self.cog.finalize_pending_persona(interaction, self.guild_id, self.user_id)
 
 
 class PersonaBasicModal(discord.ui.Modal):
@@ -130,17 +215,25 @@ class PersonaBasicModal(discord.ui.Modal):
             placeholder="https://example.com/banner.png",
             required=False,
         )
+        self.aliases_input = discord.ui.TextInput(
+            label="Bot Aliases (optional)",
+            placeholder="Names it responds to (comma or newline separated)",
+            max_length=500,
+            required=False,
+        )
 
         self.add_item(self.name_input)
         self.add_item(self.bio_input)
         self.add_item(self.avatar_url_input)
         self.add_item(self.banner_url_input)
+        self.add_item(self.aliases_input)
 
     async def on_submit(self, interaction: discord.Interaction) -> None:
         name = (self.name_input.value or "").strip()
         bio = (self.bio_input.value or "").strip() or None
         avatar_url = (self.avatar_url_input.value or "").strip()
         banner_url = (self.banner_url_input.value or "").strip() or None
+        aliases = _parse_aliases_input(self.aliases_input.value or "", name)
 
         if not name:
             await interaction.response.send_message("Name is required.", ephemeral=True)
@@ -196,141 +289,174 @@ class PersonaBasicModal(discord.ui.Modal):
             bio=bio,
             avatar_url=avatar_url,
             banner_url=banner_url,
+            aliases=aliases,
+            normal_prompt=None,
+            evil_prompt=None,
             created_at=datetime.utcnow(),
         )
         self.cog.store_pending(self.guild_id, self.user_id, pending)
 
-        view = ContinueToPromptsView(self.cog, self.guild_id, self.user_id)
+        view = ContinueToNormalPromptsView(self.cog, self.guild_id, self.user_id)
         await interaction.response.send_message(
-            "Step 1 saved. Click Continue to add prompts.",
+            "Step 1 saved. Click Continue to add the normal prompt.",
             view=view,
             ephemeral=True,
         )
 
 
-class PersonaPromptsModal(discord.ui.Modal):
+class PersonaNormalPromptModal(discord.ui.Modal):
     def __init__(self, cog: "Persona", guild_id: int, user_id: int):
         super().__init__(title="Create Persona (Step 2)")
         self.cog = cog
         self.guild_id = guild_id
         self.user_id = user_id
 
-        self.normal_prompt = discord.ui.TextInput(
-            label="Normal System Prompt",
+        self.part1 = discord.ui.TextInput(
+            label="Normal Prompt (Part 1)",
             style=discord.TextStyle.paragraph,
             max_length=2000,
             required=True,
         )
-        self.evil_prompt = discord.ui.TextInput(
-            label="Evil System Prompt (optional)",
+        self.part2 = discord.ui.TextInput(
+            label="Normal Prompt (Part 2, optional)",
+            style=discord.TextStyle.paragraph,
+            max_length=2000,
+            required=False,
+        )
+        self.part3 = discord.ui.TextInput(
+            label="Normal Prompt (Part 3, optional)",
+            style=discord.TextStyle.paragraph,
+            max_length=2000,
+            required=False,
+        )
+        self.part4 = discord.ui.TextInput(
+            label="Normal Prompt (Part 4, optional)",
+            style=discord.TextStyle.paragraph,
+            max_length=2000,
+            required=False,
+        )
+        self.part5 = discord.ui.TextInput(
+            label="Normal Prompt (Part 5, optional)",
             style=discord.TextStyle.paragraph,
             max_length=2000,
             required=False,
         )
 
-        self.add_item(self.normal_prompt)
-        self.add_item(self.evil_prompt)
+        self.add_item(self.part1)
+        self.add_item(self.part2)
+        self.add_item(self.part3)
+        self.add_item(self.part4)
+        self.add_item(self.part5)
 
     async def on_submit(self, interaction: discord.Interaction) -> None:
-        pending = self.cog.pop_pending(self.guild_id, self.user_id)
+        pending = self.cog.get_pending(self.guild_id, self.user_id)
         if not pending:
             await interaction.response.send_message(
-                "This creation session expired. Please run /create persona again.",
+                "This creation session expired. Please run /persona create again.",
                 ephemeral=True,
             )
             return
 
-        if self.cog.is_rate_limited(self.guild_id, self.user_id):
+        normal_prompt = "\n".join(
+            part.strip()
+            for part in [
+                self.part1.value,
+                self.part2.value,
+                self.part3.value,
+                self.part4.value,
+                self.part5.value,
+            ]
+            if (part or "").strip()
+        ).strip()
+
+        if not normal_prompt:
             await interaction.response.send_message(
-                "Persona creation is limited to 3 per hour per user.",
+                "Normal prompt is required.",
                 ephemeral=True,
             )
             return
 
-        mode_key = build_custom_mode_key(self.guild_id, pending.name)
-        if not mode_key:
+        pending.normal_prompt = normal_prompt
+
+        view = ContinueToEvilPromptsView(self.cog, self.guild_id, self.user_id)
+        await interaction.response.send_message(
+            "Step 2 saved. Click Continue to add the evil prompt.",
+            view=view,
+            ephemeral=True,
+        )
+
+
+class PersonaEvilPromptModal(discord.ui.Modal):
+    def __init__(self, cog: "Persona", guild_id: int, user_id: int):
+        super().__init__(title="Create Persona (Step 3)")
+        self.cog = cog
+        self.guild_id = guild_id
+        self.user_id = user_id
+
+        self.part1 = discord.ui.TextInput(
+            label="Evil Prompt (Part 1, optional)",
+            style=discord.TextStyle.paragraph,
+            max_length=2000,
+            required=False,
+        )
+        self.part2 = discord.ui.TextInput(
+            label="Evil Prompt (Part 2, optional)",
+            style=discord.TextStyle.paragraph,
+            max_length=2000,
+            required=False,
+        )
+        self.part3 = discord.ui.TextInput(
+            label="Evil Prompt (Part 3, optional)",
+            style=discord.TextStyle.paragraph,
+            max_length=2000,
+            required=False,
+        )
+        self.part4 = discord.ui.TextInput(
+            label="Evil Prompt (Part 4, optional)",
+            style=discord.TextStyle.paragraph,
+            max_length=2000,
+            required=False,
+        )
+        self.part5 = discord.ui.TextInput(
+            label="Evil Prompt (Part 5, optional)",
+            style=discord.TextStyle.paragraph,
+            max_length=2000,
+            required=False,
+        )
+
+        self.add_item(self.part1)
+        self.add_item(self.part2)
+        self.add_item(self.part3)
+        self.add_item(self.part4)
+        self.add_item(self.part5)
+
+    async def on_submit(self, interaction: discord.Interaction) -> None:
+        pending = self.cog.get_pending(self.guild_id, self.user_id)
+        if not pending:
             await interaction.response.send_message(
-                "Failed to build a mode key for that name.",
+                "This creation session expired. Please run /persona create again.",
                 ephemeral=True,
             )
             return
 
-        slug = sanitize_persona_name(pending.name)
-        base_dir = DATA_DIR / "avatars" / "custom"
-        avatar_path = base_dir / f"guild_{self.guild_id}_{slug}_avatar.webp"
-        banner_path = (
-            base_dir / f"guild_{self.guild_id}_{slug}_banner.webp"
-            if pending.banner_url
-            else None
-        )
+        evil_prompt = "\n".join(
+            part.strip()
+            for part in [
+                self.part1.value,
+                self.part2.value,
+                self.part3.value,
+                self.part4.value,
+                self.part5.value,
+            ]
+            if (part or "").strip()
+        ).strip()
 
-        await interaction.response.defer(ephemeral=True)
+        pending.evil_prompt = evil_prompt or None
 
-        success, message = await download_and_validate_image(
-            pending.avatar_url,
-            avatar_path,
-            MAX_AVATAR_BYTES,
-        )
-        if not success:
-            await interaction.followup.send(f"Avatar error: {message}", ephemeral=True)
-            return
-
-        if banner_path and pending.banner_url:
-            success, message = await download_and_validate_image(
-                pending.banner_url,
-                banner_path,
-                MAX_BANNER_BYTES,
-            )
-            if not success:
-                try:
-                    avatar_path.unlink(missing_ok=True)
-                except OSError:
-                    pass
-                await interaction.followup.send(f"Banner error: {message}", ephemeral=True)
-                return
-
-        try:
-            await create_custom_persona(
-                guild_id=self.guild_id,
-                name=pending.name,
-                mode_key=mode_key,
-                bio=pending.bio,
-                avatar_path=str(avatar_path),
-                banner_path=str(banner_path) if banner_path else None,
-                normal_prompt=self.normal_prompt.value,
-                evil_prompt=self.evil_prompt.value or None,
-                created_by=interaction.user.id,
-            )
-        except sqlite3.IntegrityError:
-            try:
-                avatar_path.unlink(missing_ok=True)
-            except OSError:
-                pass
-            if banner_path:
-                try:
-                    banner_path.unlink(missing_ok=True)
-                except OSError:
-                    pass
-            await interaction.followup.send(
-                "A custom persona with that name already exists.",
-                ephemeral=True,
-            )
-            return
-
-        traits = extract_persona_traits(
-            self.normal_prompt.value,
-            self.evil_prompt.value or None,
-        )
-        if traits:
-            try:
-                await upsert_persona_traits(self.guild_id, mode_key, traits)
-            except Exception as exc:
-                logger.warning("Failed to save persona traits: %s", exc)
-
-        self.cog.record_creation(self.guild_id, self.user_id)
-
-        await interaction.followup.send(
-            f"Custom persona **{pending.name}** created! Use `!mode {pending.name}` or `/mode {pending.name}`.",
+        view = ContinueToConfirmView(self.cog, self.guild_id, self.user_id)
+        await interaction.response.send_message(
+            "Step 3 saved. Click Create Persona to finalize.",
+            view=view,
             ephemeral=True,
         )
 
@@ -414,23 +540,39 @@ class PersonaEditPromptsModal(discord.ui.Modal):
         self.guild_id = guild_id
         self.user_id = user_id
 
-        self.normal_prompt = discord.ui.TextInput(
-            label="Normal Prompt (optional)",
+        self.normal_prompt_part1 = discord.ui.TextInput(
+            label="Normal Prompt (Part 1, optional)",
             style=discord.TextStyle.paragraph,
             max_length=2000,
             required=False,
             placeholder="Leave blank to keep current",
         )
-        self.evil_prompt = discord.ui.TextInput(
-            label="Evil Prompt (optional)",
+        self.normal_prompt_part2 = discord.ui.TextInput(
+            label="Normal Prompt (Part 2, optional)",
+            style=discord.TextStyle.paragraph,
+            max_length=2000,
+            required=False,
+            placeholder="Leave blank to keep current",
+        )
+        self.evil_prompt_part1 = discord.ui.TextInput(
+            label="Evil Prompt (Part 1, optional)",
+            style=discord.TextStyle.paragraph,
+            max_length=2000,
+            required=False,
+            placeholder="Leave blank to keep, or type 'clear' to remove",
+        )
+        self.evil_prompt_part2 = discord.ui.TextInput(
+            label="Evil Prompt (Part 2, optional)",
             style=discord.TextStyle.paragraph,
             max_length=2000,
             required=False,
             placeholder="Leave blank to keep, or type 'clear' to remove",
         )
 
-        self.add_item(self.normal_prompt)
-        self.add_item(self.evil_prompt)
+        self.add_item(self.normal_prompt_part1)
+        self.add_item(self.normal_prompt_part2)
+        self.add_item(self.evil_prompt_part1)
+        self.add_item(self.evil_prompt_part2)
 
     async def on_submit(self, interaction: discord.Interaction) -> None:
         pending = self.cog.pop_edit_pending(self.guild_id, self.user_id)
@@ -482,11 +624,17 @@ class PersonaEditPromptsModal(discord.ui.Modal):
                     return
                 updates["banner_path"] = str(banner_path)
 
-        normal_prompt = (self.normal_prompt.value or "").strip()
+        normal_prompt = _combine_prompt_parts(
+            self.normal_prompt_part1.value,
+            self.normal_prompt_part2.value,
+        )
         if normal_prompt:
             updates["normal_prompt"] = normal_prompt
 
-        evil_prompt = (self.evil_prompt.value or "").strip()
+        evil_prompt = _combine_prompt_parts(
+            self.evil_prompt_part1.value,
+            self.evil_prompt_part2.value,
+        )
         if evil_prompt:
             if evil_prompt.lower() == "clear":
                 updates["evil_prompt"] = None
@@ -563,7 +711,6 @@ class ContinueEditPromptsView(discord.ui.View):
 class Persona(commands.Cog):
     """Custom persona management."""
 
-    create_group = app_commands.Group(name="create", description="Create resources")
     persona_group = app_commands.Group(name="persona", description="Manage custom personas")
 
     def __init__(self, bot: commands.Bot):
@@ -584,6 +731,10 @@ class Persona(commands.Cog):
     def store_pending(self, guild_id: int, user_id: int, pending: PendingPersona) -> None:
         self._prune_pending()
         self._pending[(guild_id, user_id)] = pending
+
+    def get_pending(self, guild_id: int, user_id: int) -> Optional[PendingPersona]:
+        self._prune_pending()
+        return self._pending.get((guild_id, user_id))
 
     def pop_pending(self, guild_id: int, user_id: int) -> Optional[PendingPersona]:
         self._prune_pending()
@@ -640,10 +791,121 @@ class Persona(commands.Cog):
         modal = PersonaBasicModal(self, interaction.guild.id, interaction.user.id)
         await interaction.response.send_modal(modal)
 
-    @create_group.command(name="persona", description="Create a custom persona.")
-    @app_commands.checks.has_permissions(manage_guild=True)
-    async def create_persona(self, interaction: discord.Interaction):
-        await self._open_basic_modal(interaction)
+    async def finalize_pending_persona(
+        self,
+        interaction: discord.Interaction,
+        guild_id: int,
+        user_id: int,
+    ) -> None:
+        pending = self.pop_pending(guild_id, user_id)
+        if not pending:
+            await interaction.response.send_message(
+                "This creation session expired. Please run /persona create again.",
+                ephemeral=True,
+            )
+            return
+
+        if self.is_rate_limited(guild_id, user_id):
+            await interaction.response.send_message(
+                "Persona creation is limited to 3 per hour per user.",
+                ephemeral=True,
+            )
+            return
+
+        if not pending.normal_prompt:
+            await interaction.response.send_message(
+                "Normal prompt is required.",
+                ephemeral=True,
+            )
+            return
+
+        mode_key = build_custom_mode_key(guild_id, pending.name)
+        if not mode_key:
+            await interaction.response.send_message(
+                "Failed to build a mode key for that name.",
+                ephemeral=True,
+            )
+            return
+
+        slug = sanitize_persona_name(pending.name)
+        base_dir = DATA_DIR / "avatars" / "custom"
+        avatar_path = base_dir / f"guild_{guild_id}_{slug}_avatar.webp"
+        banner_path = (
+            base_dir / f"guild_{guild_id}_{slug}_banner.webp"
+            if pending.banner_url
+            else None
+        )
+
+        await interaction.response.defer(ephemeral=True)
+
+        success, message = await download_and_validate_image(
+            pending.avatar_url,
+            avatar_path,
+            MAX_AVATAR_BYTES,
+        )
+        if not success:
+            await interaction.followup.send(f"Avatar error: {message}", ephemeral=True)
+            return
+
+        if banner_path and pending.banner_url:
+            success, message = await download_and_validate_image(
+                pending.banner_url,
+                banner_path,
+                MAX_BANNER_BYTES,
+            )
+            if not success:
+                try:
+                    avatar_path.unlink(missing_ok=True)
+                except OSError:
+                    pass
+                await interaction.followup.send(f"Banner error: {message}", ephemeral=True)
+                return
+
+        try:
+            await create_custom_persona(
+                guild_id=guild_id,
+                name=pending.name,
+                mode_key=mode_key,
+                bio=pending.bio,
+                avatar_path=str(avatar_path),
+                banner_path=str(banner_path) if banner_path else None,
+                aliases=pending.aliases,
+                normal_prompt=pending.normal_prompt,
+                evil_prompt=pending.evil_prompt or None,
+                created_by=interaction.user.id,
+            )
+        except sqlite3.IntegrityError:
+            try:
+                avatar_path.unlink(missing_ok=True)
+            except OSError:
+                pass
+            if banner_path:
+                try:
+                    banner_path.unlink(missing_ok=True)
+                except OSError:
+                    pass
+            await interaction.followup.send(
+                "A custom persona with that name already exists.",
+                ephemeral=True,
+            )
+            return
+
+        traits = extract_persona_traits(
+            pending.normal_prompt,
+            pending.evil_prompt or None,
+        )
+        if traits:
+            try:
+                await upsert_persona_traits(guild_id, mode_key, traits)
+            except Exception as exc:
+                logger.warning("Failed to save persona traits: %s", exc)
+
+        self.record_creation(guild_id, user_id)
+
+        await interaction.followup.send(
+            f"Custom persona **{pending.name}** created! Use `!mode {pending.name}` or `/mode {pending.name}`.",
+            ephemeral=True,
+        )
 
     @persona_group.command(name="create", description="Create a custom persona.")
     @app_commands.checks.has_permissions(manage_guild=True)

@@ -18,7 +18,7 @@ Notes:
 
 ## Command Flow
 
-### `/create persona` (alias: `/persona create`) - Multi-step modal workflow
+### `/persona create` - Multi-step modal workflow
 
 Slash modals are limited to 5 inputs, so this must be multi-step.
 Do NOT open a modal directly from another modal submit.
@@ -39,7 +39,7 @@ Evil System Prompt: [paragraph input, max 2000 chars, optional]
 ```
 
 Flow:
-1. User runs `/create persona` (or `/persona create`).
+1. User runs `/persona create`.
 2. Step 1 modal submits:
    - Validate name (non-empty, unique per guild).
    - Validate URL format (http/https only) but do not download yet.
@@ -219,7 +219,7 @@ discord_bot/data/avatars/custom/
 
 ### [NEW] cogs/persona.py
 
-Provide `/create persona` as required, and keep `/persona create` as an alias.
+Provide `/persona create` as the primary command.
 Other management commands can live under `/persona`.
 
 ```python
@@ -237,7 +237,7 @@ class Persona(commands.Cog):
     @persona_group.command(name="create")
     @app_commands.checks.has_permissions(manage_guild=True)
     async def create_persona_alias(self, interaction: discord.Interaction):
-        # Call same handler as /create persona
+        # Call same handler as /persona create
 
     @persona_group.command(name="list")
     async def list_personas(self, interaction: discord.Interaction):
@@ -313,7 +313,7 @@ Modal handling (outline):
 4. Custom mode activates with the correct prompt and avatar.
 
 ### Manual Verification
-1. Create persona with all fields via `/create persona`.
+1. Create persona with all fields via `/persona create`.
 2. Activate with `!mode <name>` and `/mode <name>`.
 3. Verify avatar changes on mode switch (rate limit respected).
 4. Test evil mode prompt selection for custom persona.

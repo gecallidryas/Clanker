@@ -9,8 +9,6 @@ logger = get_logger(__name__)
 
 FEMMY_EMOJI_PREFIX = "femmy"
 YUMI_EMOJI_PREFIX = "yumi"
-BEAR_EMOJI_PREFIX = "bear"
-
 
 
 def clean_emoji_name(name: str) -> str:

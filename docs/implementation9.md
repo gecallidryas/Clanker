@@ -15,7 +15,7 @@ Add a structured affection scoring system that:
 - One-time trait points per user and persona.
 - No per-session conversation judging or quality scoring.
 - No dynamic SQL table creation; use shared tables for all personas.
-- Compatible with custom personas created via `/create persona`.
+- Compatible with custom personas created via `/persona create`.
 
 Non-goals:
 - Full LangChain/LangGraph orchestration.

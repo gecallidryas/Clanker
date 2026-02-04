@@ -49,6 +49,7 @@ from utils.db_handler import (
     get_server_memory,
     get_persona_attributes,
     get_sample_dialogues,
+    get_guild_custom_personas,
 )
 from utils.api_manager import UserInputError
 from utils.app_emojis import (
@@ -1030,11 +1031,38 @@ class AIBrain(commands.Cog):
                 return True
         return False
 
-    def _get_triggered_modes(self, content: str) -> set[str]:
+    def _parse_aliases_value(self, value: Optional[str]) -> list[str]:
+        if not value:
+            return []
+        try:
+            data = json.loads(value)
+        except json.JSONDecodeError:
+            data = value
+        if isinstance(data, list):
+            return [str(item).strip().lower() for item in data if str(item).strip()]
+        if isinstance(data, str):
+            return [token.strip().lower() for token in re.split(r"[,\\n]+", data) if token.strip()]
+        return []
+
+    async def _get_triggered_modes(self, guild_id: int, content: str) -> set[str]:
         triggered: set[str] = set()
         for profile in get_all_modes():
             if self._has_any_trigger(content, profile.triggers):
                 triggered.add(profile.key)
+        try:
+            personas = await get_guild_custom_personas(guild_id)
+        except Exception:
+            personas = []
+        for persona in personas:
+            name = (persona.get("name") or "").strip()
+            aliases = self._parse_aliases_value(persona.get("aliases"))
+            triggers = [name] + aliases if name else aliases
+            if not triggers:
+                continue
+            if self._has_any_trigger(content, tuple(triggers)):
+                mode_key = persona.get("mode_key")
+                if mode_key:
+                    triggered.add(mode_key)
         return triggered
 
     async def _get_wellbeing_prompt(
@@ -1519,7 +1547,7 @@ Respond naturally in character. Keep responses concise.
         mentioned = self.bot.user in message.mentions
         mode = await get_server_mode(message.guild.id)
 
-        triggered_modes = self._get_triggered_modes(message.content)
+        triggered_modes = await self._get_triggered_modes(message.guild.id, message.content)
         has_current_trigger = mode in triggered_modes
         has_other_trigger = bool(triggered_modes - {mode})
 

@@ -157,7 +157,7 @@ HELP_COMMANDS = {
     "persona": {
         "visibility": "admin",
         "prefix": [],
-        "slash": ["/create persona", "/persona create", "/persona list", "/persona preview", "/persona edit", "/persona delete"],
+        "slash": ["/persona create", "/persona list", "/persona preview", "/persona edit", "/persona delete"],
     },
 }
 

@@ -413,6 +413,7 @@ async def _init_guild_schema(db: aiosqlite.Connection) -> None:
             id INTEGER PRIMARY KEY AUTOINCREMENT,
             guild_id INTEGER NOT NULL,
             name TEXT NOT NULL,
+            aliases TEXT,
             mode_key TEXT NOT NULL,
             bio TEXT,
             avatar_path TEXT,
@@ -480,6 +481,7 @@ async def _init_guild_schema(db: aiosqlite.Connection) -> None:
                     id INTEGER PRIMARY KEY AUTOINCREMENT,
                     guild_id INTEGER NOT NULL,
                     name TEXT NOT NULL,
+                    aliases TEXT,
                     mode_key TEXT NOT NULL,
                     bio TEXT,
                     avatar_path TEXT,
@@ -497,16 +499,22 @@ async def _init_guild_schema(db: aiosqlite.Connection) -> None:
             await db.execute(
                 """
                 INSERT INTO custom_personas_new
-                    (id, guild_id, name, mode_key, bio, avatar_path, banner_path,
+                    (id, guild_id, name, aliases, mode_key, bio, avatar_path, banner_path,
                      normal_prompt, evil_prompt, created_by, created_at, updated_at, is_active)
                 SELECT
-                    id, guild_id, name, mode_key, bio, avatar_path, banner_path,
+                    id, guild_id, name, NULL, mode_key, bio, avatar_path, banner_path,
                     normal_prompt, evil_prompt, created_by, created_at, updated_at, is_active
                 FROM custom_personas
                 """
             )
             await db.execute("DROP TABLE custom_personas")
             await db.execute("ALTER TABLE custom_personas_new RENAME TO custom_personas")
+    except Exception:
+        pass
+
+    # Add aliases column to custom_personas if missing (migration)
+    try:
+        await db.execute("ALTER TABLE custom_personas ADD COLUMN aliases TEXT")
     except Exception:
         pass
 
@@ -2556,6 +2564,29 @@ def build_custom_mode_key(guild_id: int, name: str) -> str:
     return f"custom_{guild_id}_{slug}" if slug else ""
 
 
+def _serialize_aliases(aliases: Optional[List[str]]) -> Optional[str]:
+    if not aliases:
+        return None
+    cleaned = [a.strip().lower() for a in aliases if a and a.strip()]
+    if not cleaned:
+        return None
+    return json.dumps(cleaned, ensure_ascii=True)
+
+
+def _deserialize_aliases(value: Optional[str]) -> List[str]:
+    if not value:
+        return []
+    try:
+        data = json.loads(value)
+    except json.JSONDecodeError:
+        data = value
+    if isinstance(data, list):
+        return [str(item).strip().lower() for item in data if str(item).strip()]
+    if isinstance(data, str):
+        return [token.strip().lower() for token in re.split(r"[,\\n]+", data) if token.strip()]
+    return []
+
+
 async def create_custom_persona(
     guild_id: int,
     name: str,
@@ -2563,6 +2594,7 @@ async def create_custom_persona(
     bio: Optional[str],
     avatar_path: Optional[str],
     banner_path: Optional[str],
+    aliases: Optional[List[str]],
     normal_prompt: str,
     evil_prompt: Optional[str],
     created_by: int,
@@ -2572,13 +2604,14 @@ async def create_custom_persona(
         cursor = await db.execute(
             """
             INSERT INTO custom_personas
-                (guild_id, name, mode_key, bio, avatar_path, banner_path,
+                (guild_id, name, aliases, mode_key, bio, avatar_path, banner_path,
                  normal_prompt, evil_prompt, created_by)
-            VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?)
+            VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
             """,
             (
                 guild_id,
                 name,
+                _serialize_aliases(aliases),
                 mode_key,
                 bio,
                 avatar_path,
@@ -2649,6 +2682,7 @@ async def update_custom_persona(
 
     allowed = {
         "name",
+        "aliases",
         "bio",
         "avatar_path",
         "banner_path",

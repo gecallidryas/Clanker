@@ -43,8 +43,6 @@ def _load_modes() -> None:
     from . import femboy  # noqa: F401
     from . import tsundere  # noqa: F401
     from . import oneesan  # noqa: F401
-    from . import bear  # noqa: F401
-
     _LOADED = True
 
 
