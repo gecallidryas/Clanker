@@ -83,6 +83,7 @@ from utils.tool_registry import (
 from utils.tool_parser import extract_tool_call, strip_tool_call
 from utils.tool_context import ToolContext
 from utils.rag_store import get_rag_context
+from utils.text_splitter import split_message
 
 # Context window: stores last 20 messages within 30 minutes
 MAX_CONTEXT_SIZE = 20
@@ -547,6 +548,15 @@ class AIBrain(commands.Cog):
             self.contexts[channel_id] = ConversationContext()
         return self.contexts[channel_id]
 
+    async def _send_in_chunks(self, message: discord.Message, text: str) -> discord.Message:
+        parts = split_message(text)
+        if not parts:
+            return await message.reply("...", mention_author=False)
+        first = await message.reply(parts[0], mention_author=False)
+        for part in parts[1:]:
+            await message.channel.send(part)
+        return first
+
     def _track_message_id(self, message_id: int, user_id: int) -> None:
         """Track message attribution for chain memory."""
         if message_id in self.chain_memory:
@@ -831,7 +841,7 @@ class AIBrain(commands.Cog):
             return None
 
         try:
-            await increment_stat("images_analyzed")
+            await increment_stat("images_analyzed", guild_id=message.guild.id)
         except Exception as exc:
             logger.warning("Failed to increment images_analyzed: %s", exc)
 
@@ -947,7 +957,7 @@ class AIBrain(commands.Cog):
             return None
 
         try:
-            await increment_stat("images_analyzed")
+            await increment_stat("images_analyzed", guild_id=message.guild.id)
         except Exception as exc:
             logger.warning("Failed to increment images_analyzed: %s", exc)
 
@@ -1292,6 +1302,7 @@ You can explain these commands to the user if asked:
 - /teach attribute / /teach sampledialogue: Teach persona traits and dialogue
 - /teach document: Upload documents for RAG
 - /generate image: Generate an image from a prompt
+- /usage: Show usage dashboard
 - /tools status: Show enabled tool capabilities
 - /personal privacy: Opt out of personal memory
 - !stats / !ping: Bot status
@@ -1627,6 +1638,7 @@ Respond naturally in character. Keep responses concise.
 
         raw_response = response
         tool_call = extract_tool_call(raw_response)
+        sent = None
         if tool_call:
             guild_config = await get_guild_config(message.guild.id)
             tool_context = ToolContext(
@@ -1644,25 +1656,31 @@ Respond naturally in character. Keep responses concise.
                 tool_context,
             )
 
-            tool_message = f"{content_for_prompt}\n\n{result.to_prompt()}"
-            tool_prompt = await self.build_prompt(
-                message.guild.id,
-                message.author.id,
-                tool_message,
-                context_snapshot,
-                member=message.author,
-                wellbeing_prompt=wellbeing_prompt,
-                affection_data=affection_data,
-                allow_evil=allow_evil,
-                allow_tools=False,
-            )
-            response = await self.generate_response(
-                tool_prompt,
-                message.guild.id,
-                allow_evil=allow_evil,
-            )
-            raw_response = response
-        sent = await handle_agentic_actions(message, raw_response)
+            if result.skip_model:
+                reply_text = result.user_message or result.summary or "Done."
+                sent = await self._send_in_chunks(message, reply_text)
+                raw_response = ""
+            else:
+                tool_message = f"{content_for_prompt}\n\n{result.to_prompt()}"
+                tool_prompt = await self.build_prompt(
+                    message.guild.id,
+                    message.author.id,
+                    tool_message,
+                    context_snapshot,
+                    member=message.author,
+                    wellbeing_prompt=wellbeing_prompt,
+                    affection_data=affection_data,
+                    allow_evil=allow_evil,
+                    allow_tools=False,
+                )
+                response = await self.generate_response(
+                    tool_prompt,
+                    message.guild.id,
+                    allow_evil=allow_evil,
+                )
+                raw_response = response
+        if sent is None:
+            sent = await handle_agentic_actions(message, raw_response)
         if sent is None:
             sent = await handle_admin_actions(self, message, raw_response)
         if sent is None:
@@ -1687,7 +1705,7 @@ Respond naturally in character. Keep responses concise.
                 except Exception as exc:
                     logger.warning("Failed to normalize emojis: %s", exc)
 
-            sent = await message.reply(response, mention_author=False)
+            sent = await self._send_in_chunks(message, response)
 
         # Manage conversation state
         if mentioned or has_trigger:
@@ -1711,7 +1729,7 @@ Respond naturally in character. Keep responses concise.
         )
 
         try:
-            await increment_stat("messages_processed")
+            await increment_stat("messages_processed", guild_id=message.guild.id)
         except Exception as e:
             logger.warning("Failed to increment messages_processed: %s", e)
 

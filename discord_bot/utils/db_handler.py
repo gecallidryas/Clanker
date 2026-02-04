@@ -99,6 +99,15 @@ async def _ensure_global_db() -> None:
             )
         """)
         await db.execute("""
+            CREATE TABLE IF NOT EXISTS guild_stats (
+                guild_id INTEGER PRIMARY KEY,
+                messages_processed INTEGER DEFAULT 0,
+                commands_executed INTEGER DEFAULT 0,
+                images_analyzed INTEGER DEFAULT 0,
+                last_updated TIMESTAMP
+            )
+        """)
+        await db.execute("""
             INSERT OR IGNORE INTO bot_stats (id, start_time) VALUES (1, ?)
         """, (datetime.now(),))
         await db.commit()
@@ -249,6 +258,8 @@ async def _init_guild_schema(db: aiosqlite.Connection) -> None:
             mod_log_channel_id INTEGER,
             brave_api_key TEXT,
             replicate_api_key TEXT,
+            tenor_api_key TEXT,
+            tenor_client_key TEXT,
             image_provider TEXT,
             image_model TEXT,
             web_search_enabled INTEGER DEFAULT 1,
@@ -260,6 +271,11 @@ async def _init_guild_schema(db: aiosqlite.Connection) -> None:
             youtube_enabled INTEGER DEFAULT 1,
             profile_peek_enabled INTEGER DEFAULT 0,
             rag_enabled INTEGER DEFAULT 1,
+            gif_responses_enabled INTEGER DEFAULT 0,
+            url_safety_enabled INTEGER DEFAULT 0,
+            url_allowlist TEXT,
+            url_blocklist TEXT,
+            url_safety_action TEXT DEFAULT 'warn',
             custom_endpoint_url TEXT,
             custom_endpoint_api_key TEXT,
             custom_model_name TEXT,
@@ -546,6 +562,8 @@ async def _init_guild_schema(db: aiosqlite.Connection) -> None:
             ("mod_log_channel_id", "INTEGER", None),
             ("brave_api_key", "TEXT", None),
             ("replicate_api_key", "TEXT", None),
+            ("tenor_api_key", "TEXT", None),
+            ("tenor_client_key", "TEXT", None),
             ("image_provider", "TEXT", None),
             ("image_model", "TEXT", None),
             ("web_search_enabled", "INTEGER", 1),
@@ -557,6 +575,11 @@ async def _init_guild_schema(db: aiosqlite.Connection) -> None:
             ("youtube_enabled", "INTEGER", 1),
             ("profile_peek_enabled", "INTEGER", 0),
             ("rag_enabled", "INTEGER", 1),
+            ("gif_responses_enabled", "INTEGER", 0),
+            ("url_safety_enabled", "INTEGER", 0),
+            ("url_allowlist", "TEXT", None),
+            ("url_blocklist", "TEXT", None),
+            ("url_safety_action", "TEXT", "warn"),
             ("custom_endpoint_url", "TEXT", None),
             ("custom_endpoint_api_key", "TEXT", None),
             ("custom_model_name", "TEXT", None),
@@ -1653,17 +1676,83 @@ async def delete_reminder(reminder_id: int, user_id: int, guild_id: int) -> bool
 # Bot Stats Operations
 # ============================================
 
-async def increment_stat(stat_name: str, amount: int = 1) -> None:
-    """Increment a bot statistic."""
+async def increment_stat(stat_name: str, amount: int = 1, guild_id: Optional[int] = None) -> None:
+    """Increment a bot statistic and optionally track per-guild usage."""
     valid_stats = ["messages_processed", "commands_executed", "images_analyzed"]
     if stat_name not in valid_stats:
         return
-    
+
     async with global_db() as db:
-        await db.execute(f"""
-            UPDATE bot_stats SET {stat_name} = {stat_name} + ? WHERE id = 1
-        """, (amount,))
+        await db.execute(
+            f"UPDATE bot_stats SET {stat_name} = {stat_name} + ? WHERE id = 1",
+            (amount,),
+        )
         await db.commit()
+
+    if guild_id:
+        await increment_guild_stat(guild_id, stat_name, amount)
+
+
+async def increment_guild_stat(guild_id: int, stat_name: str, amount: int = 1) -> None:
+    """Increment a guild-specific statistic."""
+    valid_stats = ["messages_processed", "commands_executed", "images_analyzed"]
+    if stat_name not in valid_stats:
+        return
+
+    async with global_db() as db:
+        await db.execute(
+            "INSERT OR IGNORE INTO guild_stats (guild_id, last_updated) VALUES (?, ?)",
+            (guild_id, datetime.now()),
+        )
+        await db.execute(
+            f"""
+            UPDATE guild_stats
+               SET {stat_name} = {stat_name} + ?,
+                   last_updated = ?
+             WHERE guild_id = ?
+            """,
+            (amount, datetime.now(), guild_id),
+        )
+        await db.commit()
+
+
+async def get_guild_stats(guild_id: int) -> Dict[str, Any]:
+    """Get usage statistics for a guild."""
+    async with global_db() as db:
+        db.row_factory = aiosqlite.Row
+        async with db.execute(
+            "SELECT * FROM guild_stats WHERE guild_id = ?",
+            (guild_id,),
+        ) as cursor:
+            row = await cursor.fetchone()
+            if row:
+                return dict(row)
+    return {
+        "guild_id": guild_id,
+        "messages_processed": 0,
+        "commands_executed": 0,
+        "images_analyzed": 0,
+        "last_updated": None,
+    }
+
+
+async def get_top_guilds_by_stat(stat_name: str, limit: int = 5) -> List[Dict[str, Any]]:
+    """Get the top guilds by a specific stat."""
+    valid_stats = ["messages_processed", "commands_executed", "images_analyzed"]
+    if stat_name not in valid_stats:
+        return []
+    async with global_db() as db:
+        db.row_factory = aiosqlite.Row
+        async with db.execute(
+            f"""
+            SELECT * FROM guild_stats
+            ORDER BY {stat_name} DESC
+            LIMIT ?
+            """,
+            (limit,),
+        ) as cursor:
+            rows = await cursor.fetchall()
+            return [dict(row) for row in rows]
 
 
 async def get_stats() -> Dict[str, Any]:
@@ -2986,6 +3075,24 @@ async def set_spam_config(guild_id: int, updates: Dict[str, Any]) -> None:
     await update_guild_config(guild_id, updates)
 
 
+async def get_url_safety_config(guild_id: int) -> Dict[str, Any]:
+    """Get URL safety configuration for a guild."""
+    config = await get_guild_config(guild_id)
+    return {
+        "url_safety_enabled": bool(config.get("url_safety_enabled") or 0),
+        "url_allowlist": config.get("url_allowlist"),
+        "url_blocklist": config.get("url_blocklist"),
+        "url_safety_action": (config.get("url_safety_action") or "warn").lower(),
+    }
+
+
+async def set_url_safety_config(guild_id: int, updates: Dict[str, Any]) -> None:
+    """Update URL safety configuration fields."""
+    if not updates:
+        return
+    await update_guild_config(guild_id, updates)
+
+
 # ============================================
 # Guild API Config Operations
 # ============================================
@@ -3033,6 +3140,8 @@ GUILD_CONFIG_FIELDS: Set[str] = {
     "mod_log_channel_id",
     "brave_api_key",
     "replicate_api_key",
+    "tenor_api_key",
+    "tenor_client_key",
     "image_provider",
     "image_model",
     "web_search_enabled",
@@ -3044,6 +3153,11 @@ GUILD_CONFIG_FIELDS: Set[str] = {
     "youtube_enabled",
     "profile_peek_enabled",
     "rag_enabled",
+    "gif_responses_enabled",
+    "url_safety_enabled",
+    "url_allowlist",
+    "url_blocklist",
+    "url_safety_action",
     "custom_endpoint_url",
     "custom_endpoint_api_key",
     "custom_model_name",

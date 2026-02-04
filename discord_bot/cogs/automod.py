@@ -16,10 +16,12 @@ from utils.db_handler import (
     get_mod_log_channel_id,
     get_spam_config,
     get_staff_roles,
+    get_url_safety_config,
     remove_automod_rule,
     set_spam_config,
 )
 from utils.logger import get_logger
+from utils.url_safety import check_message_urls, describe_reason
 
 logger = get_logger(__name__)
 
@@ -77,6 +79,31 @@ class Automod(commands.Cog):
             embed.add_field(name="Duration", value=f"{duration_minutes} minutes", inline=True)
         await channel.send(embed=embed, allowed_mentions=discord.AllowedMentions.none())
 
+    async def _post_url_log(
+        self,
+        guild: discord.Guild,
+        target: discord.Member,
+        url: str,
+        reason: str,
+        action: str,
+    ) -> None:
+        channel_id = await get_mod_log_channel_id(guild.id)
+        if not channel_id:
+            return
+        channel = guild.get_channel(channel_id)
+        if not channel:
+            return
+        embed = discord.Embed(
+            title="URL Safety",
+            color=discord.Color.orange(),
+            timestamp=discord.utils.utcnow(),
+        )
+        embed.add_field(name="User", value=f"{target} ({target.id})", inline=True)
+        embed.add_field(name="Action", value=action, inline=True)
+        embed.add_field(name="Reason", value=reason, inline=False)
+        embed.add_field(name="URL", value=url, inline=False)
+        await channel.send(embed=embed, allowed_mentions=discord.AllowedMentions.none())
+
     async def _apply_punishment(
         self,
         message: discord.Message,
@@ -112,6 +139,9 @@ class Automod(commands.Cog):
             return False
 
         if await self._check_spam(message):
+            return True
+
+        if await self._check_url_safety(message):
             return True
 
         rules = await get_automod_rules(message.guild.id)
@@ -172,6 +202,54 @@ class Automod(commands.Cog):
             return True
 
         return False
+
+    async def _check_url_safety(self, message: discord.Message) -> bool:
+        if not message.content:
+            return False
+
+        config = await get_url_safety_config(message.guild.id)
+        if not config.get("url_safety_enabled"):
+            return False
+
+        matches = check_message_urls(
+            message.content,
+            config.get("url_allowlist"),
+            config.get("url_blocklist"),
+        )
+        if not matches:
+            return False
+
+        action = (config.get("url_safety_action") or "warn").lower()
+        first = matches[0]
+        reason_text = describe_reason(first.reason)
+
+        if action == "delete":
+            try:
+                await message.delete()
+            except Exception:
+                pass
+
+        warning = (
+            f"⚠️ **{message.author.mention}**, that link looks suspicious "
+            f"({reason_text}). Please be careful."
+        )
+        try:
+            await message.channel.send(warning, delete_after=15)
+        except discord.Forbidden:
+            pass
+
+        try:
+            await self._post_url_log(
+                message.guild,
+                message.author,
+                first.url,
+                reason_text,
+                action,
+            )
+        except Exception:
+            pass
+
+        return True
 
     async def _check_spam(self, message: discord.Message) -> bool:
         config = await get_spam_config(message.guild.id)

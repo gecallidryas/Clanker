@@ -85,8 +85,8 @@ HELP_COMMANDS = {
     },
     "utility": {
         "visibility": "public",
-        "prefix": ["!help", "!ping", "!stats", "!about", "!translate", "!remind", "!reminders"],
-        "slash": ["/help", "/ping", "/stats", "/about", "/translate", "/tldr", "/generate_embed", "/remind", "/reminders", "/remindcancel"],
+        "prefix": ["!help", "!ping", "!stats", "!usage", "!about", "!translate", "!remind", "!reminders"],
+        "slash": ["/help", "/ping", "/stats", "/about", "/translate", "/tldr", "/generate_embed", "/remind", "/reminders", "/remindcancel", "/usage"],
     },
     "moderation": {
         "visibility": "admin",
@@ -103,6 +103,8 @@ HELP_COMMANDS = {
             "/config model",
             "/config env",
             "/config toggle",
+            "/config url_safety",
+            "/config ui",
             "/config custom_endpoint",
             "/admin reset",
             "/admin view",
@@ -540,7 +542,7 @@ Text to translate:
         await ctx.send(embed=embed)
 
         try:
-            await increment_stat("messages_processed")
+            await increment_stat("messages_processed", guild_id=ctx.guild.id if ctx.guild else None)
         except Exception as e:
             logger.warning("Failed to increment messages_processed: %s", e)
     
@@ -612,7 +614,7 @@ Provide a clear, bulleted summary:
         await ctx.send(embed=embed)
 
         try:
-            await increment_stat("messages_processed")
+            await increment_stat("messages_processed", guild_id=ctx.guild.id if ctx.guild else None)
         except Exception as e:
             logger.warning("Failed to increment messages_processed: %s", e)
     
@@ -894,7 +896,10 @@ Text to translate:
         await interaction.followup.send(embed=embed)
 
         try:
-            await increment_stat("messages_processed")
+            await increment_stat(
+                "messages_processed",
+                guild_id=interaction.guild.id if interaction.guild else None,
+            )
         except Exception as e:
             logger.warning("Failed to increment messages_processed: %s", e)
 
@@ -995,7 +1000,10 @@ User request:
         await interaction.followup.send(embed=embed)
 
         try:
-            await increment_stat("messages_processed")
+            await increment_stat(
+                "messages_processed",
+                guild_id=interaction.guild.id if interaction.guild else None,
+            )
         except Exception as e:
             logger.warning("Failed to increment messages_processed: %s", e)
     @app_commands.command(name="tldr", description="Summarize the last N messages.")
@@ -1065,7 +1073,10 @@ Provide a clear, bulleted summary:
         await interaction.followup.send(embed=embed)
 
         try:
-            await increment_stat("messages_processed")
+            await increment_stat(
+                "messages_processed",
+                guild_id=interaction.guild.id if interaction.guild else None,
+            )
         except Exception as e:
             logger.warning("Failed to increment messages_processed: %s", e)
     @app_commands.command(name="ping", description="Check bot latency.")

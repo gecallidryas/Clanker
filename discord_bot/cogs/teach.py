@@ -17,7 +17,7 @@ from utils.db_handler import (
 )
 from utils.rag_documents import extract_text_from_bytes
 from utils.rag_store import store_document
-from utils.i18n import t
+from utils.i18n import get_locale_from_interaction, t
 
 
 class Teach(commands.Cog):
@@ -37,11 +37,14 @@ class Teach(commands.Cog):
         member: Optional[discord.Member] = None,
     ):
         if not interaction.guild:
-            await interaction.response.send_message("Use this in a server.", ephemeral=True)
+            await interaction.response.send_message(
+                t("common.server_only", get_locale_from_interaction(interaction)),
+                ephemeral=True,
+            )
             return
         target = member or interaction.user
         await add_fact(interaction.guild.id, target.id, fact, memory_type="personal")
-        locale = str(interaction.locale) if interaction.locale else "en"
+        locale = get_locale_from_interaction(interaction)
         await interaction.response.send_message(
             t("teach.memory.personal_saved", locale, user=target.display_name), ephemeral=True
         )
@@ -50,39 +53,48 @@ class Teach(commands.Cog):
     @app_commands.describe(fact="Server-wide memory entry")
     async def teach_memory_server(self, interaction: discord.Interaction, fact: str):
         if not interaction.guild:
-            await interaction.response.send_message("Use this in a server.", ephemeral=True)
+            await interaction.response.send_message(
+                t("common.server_only", get_locale_from_interaction(interaction)),
+                ephemeral=True,
+            )
             return
         if not interaction.user.guild_permissions.manage_guild:
             await interaction.response.send_message("You need Manage Server to add server memory.", ephemeral=True)
             return
         await add_server_memory(interaction.guild.id, fact, source="manual", learned_from_user_id=interaction.user.id)
-        locale = str(interaction.locale) if interaction.locale else "en"
+        locale = get_locale_from_interaction(interaction)
         await interaction.response.send_message(t("teach.memory.server_saved", locale), ephemeral=True)
 
     @teach_group.command(name="attribute", description="Teach a persona attribute.")
     @app_commands.describe(attribute="Attribute name", value="Attribute value")
     async def teach_attribute(self, interaction: discord.Interaction, attribute: str, value: str):
         if not interaction.guild:
-            await interaction.response.send_message("Use this in a server.", ephemeral=True)
+            await interaction.response.send_message(
+                t("common.server_only", get_locale_from_interaction(interaction)),
+                ephemeral=True,
+            )
             return
         if not interaction.user.guild_permissions.manage_guild:
             await interaction.response.send_message("You need Manage Server to add attributes.", ephemeral=True)
             return
         await add_persona_attribute(interaction.guild.id, attribute.strip(), value.strip(), interaction.user.id)
-        locale = str(interaction.locale) if interaction.locale else "en"
+        locale = get_locale_from_interaction(interaction)
         await interaction.response.send_message(t("teach.attribute.saved", locale), ephemeral=True)
 
     @teach_group.command(name="sampledialogue", description="Teach a sample dialogue line.")
     @app_commands.describe(speaker="Speaker name", dialogue="Dialogue line")
     async def teach_sampledialogue(self, interaction: discord.Interaction, speaker: str, dialogue: str):
         if not interaction.guild:
-            await interaction.response.send_message("Use this in a server.", ephemeral=True)
+            await interaction.response.send_message(
+                t("common.server_only", get_locale_from_interaction(interaction)),
+                ephemeral=True,
+            )
             return
         if not interaction.user.guild_permissions.manage_guild:
             await interaction.response.send_message("You need Manage Server to add sample dialogues.", ephemeral=True)
             return
         await add_sample_dialogue(interaction.guild.id, speaker.strip(), dialogue.strip(), interaction.user.id)
-        locale = str(interaction.locale) if interaction.locale else "en"
+        locale = get_locale_from_interaction(interaction)
         await interaction.response.send_message(t("teach.sampledialogue.saved", locale), ephemeral=True)
 
     @teach_group.command(name="document", description="Upload a document for RAG memory.")
@@ -94,7 +106,10 @@ class Teach(commands.Cog):
         title: Optional[str] = None,
     ):
         if not interaction.guild:
-            await interaction.response.send_message("Use this in a server.", ephemeral=True)
+            await interaction.response.send_message(
+                t("common.server_only", get_locale_from_interaction(interaction)),
+                ephemeral=True,
+            )
             return
         if not interaction.user.guild_permissions.manage_guild:
             await interaction.response.send_message("You need Manage Server to add documents.", ephemeral=True)
@@ -129,7 +144,7 @@ class Teach(commands.Cog):
             await interaction.followup.send(f"Failed to store document: {exc}", ephemeral=True)
             return
 
-        locale = str(interaction.locale) if interaction.locale else "en"
+        locale = get_locale_from_interaction(interaction)
         await interaction.followup.send(
             t("teach.document.saved", locale, doc_id=doc_id, chunks=chunk_count),
             ephemeral=True,
@@ -139,7 +154,10 @@ class Teach(commands.Cog):
     @app_commands.describe(state="on/off (on = opt out)")
     async def personal_privacy(self, interaction: discord.Interaction, state: Optional[str] = None):
         if not interaction.guild:
-            await interaction.response.send_message("Use this in a server.", ephemeral=True)
+            await interaction.response.send_message(
+                t("common.server_only", get_locale_from_interaction(interaction)),
+                ephemeral=True,
+            )
             return
         if not state:
             await interaction.response.send_message(
@@ -150,11 +168,11 @@ class Teach(commands.Cog):
         state_value = state.lower().strip()
         if state_value in {"on", "enable", "true", "yes"}:
             await set_personal_memory_opt_out(interaction.guild.id, interaction.user.id, True)
-            locale = str(interaction.locale) if interaction.locale else "en"
+            locale = get_locale_from_interaction(interaction)
             await interaction.response.send_message(t("personal.privacy.on", locale), ephemeral=True)
         elif state_value in {"off", "disable", "false", "no"}:
             await set_personal_memory_opt_out(interaction.guild.id, interaction.user.id, False)
-            locale = str(interaction.locale) if interaction.locale else "en"
+            locale = get_locale_from_interaction(interaction)
             await interaction.response.send_message(t("personal.privacy.off", locale), ephemeral=True)
         else:
             await interaction.response.send_message("Use `on` or `off`.", ephemeral=True)

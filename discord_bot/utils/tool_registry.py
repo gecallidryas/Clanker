@@ -166,6 +166,7 @@ def register_builtin_tools() -> None:
     )
     from utils.media_context import tool_increase_media_context
     from utils.gif_processor import tool_process_gif
+    from utils.gif_reply import tool_send_gif
     from utils.youtube import tool_process_youtube
     from utils.profile_peek import tool_peek_profile_picture
     from utils.self_teaching import (
@@ -185,6 +186,7 @@ def register_builtin_tools() -> None:
         tool_react_with_emoji,
         tool_increase_media_context,
         tool_process_gif,
+        tool_send_gif,
         tool_process_youtube,
         tool_pin_message,
         tool_peek_profile_picture,

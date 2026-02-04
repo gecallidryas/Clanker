@@ -42,6 +42,7 @@ from utils.db_handler import (
 from utils.sentiment import analyze_sentiment, quick_sentiment_check
 from utils.affection_traits import get_or_seed_mode_traits
 from utils.logger import get_logger
+from utils.i18n import get_locale_from_guild, get_locale_from_interaction, t
 
 logger = get_logger(__name__)
 
@@ -356,7 +357,7 @@ class Affection(commands.Cog):
     async def show_affection(self, ctx: commands.Context, member: discord.Member = None):
         """View your or another user's affection level."""
         if not ctx.guild:
-            await ctx.send("Affection is server-specific. Use this in a server.")
+            await ctx.send(t("affection.server_only", get_locale_from_guild(ctx.guild)))
             return
 
         target = member or ctx.author
@@ -368,7 +369,10 @@ class Affection(commands.Cog):
     @app_commands.describe(member="User to check (optional)")
     async def show_affection_slash(self, interaction: discord.Interaction, member: discord.Member = None):
         if not interaction.guild:
-            await interaction.response.send_message("Affection is server-specific. Use this in a server.", ephemeral=True)
+            await interaction.response.send_message(
+                t("affection.server_only", get_locale_from_interaction(interaction)),
+                ephemeral=True,
+            )
             return
 
         target = member or interaction.user
@@ -380,7 +384,7 @@ class Affection(commands.Cog):
     async def show_mood(self, ctx: commands.Context):
         """Check the bot's current mood."""
         if not ctx.guild:
-            await ctx.send("Moods are server-specific~ Use this in a server!")
+            await ctx.send(t("mood.server_only", get_locale_from_guild(ctx.guild)))
             return
         
         mood_data = await get_mood(ctx.guild.id)
@@ -415,7 +419,10 @@ class Affection(commands.Cog):
     @app_commands.command(name="mood", description="Check the bot's current mood.")
     async def show_mood_slash(self, interaction: discord.Interaction):
         if not interaction.guild:
-            await interaction.response.send_message("Moods are server-specific. Use this in a server.", ephemeral=True)
+            await interaction.response.send_message(
+                t("mood.server_only", get_locale_from_interaction(interaction)),
+                ephemeral=True,
+            )
             return
 
         mood_data = await get_mood(interaction.guild.id)

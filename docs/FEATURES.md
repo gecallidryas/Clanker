@@ -8,6 +8,7 @@ This document is the canonical, detailed feature inventory for this repository. 
 - Per-guild SQLite databases plus a global stats database.
 - Tool registry with per-guild feature-flag gating and a tool-call pipeline for AI actions.
 - Optional Postgres + pgvector for document RAG storage.
+- URL safety checks with allow/block lists and a usage dashboard for metrics.
 
 ## Feature catalog (by subsystem)
 
@@ -64,6 +65,7 @@ This document is the canonical, detailed feature inventory for this repository. 
   - Image generation via Replicate or OpenRouter image models.
   - Sticker selection and emoji reactions from guild assets.
   - Media context expansion from recent history.
+  - GIF replies via Tenor search (`send_gif`) when enabled.
   - Dev-only GIF inspection (frame counts/durations) gated by `GIF_ANALYSIS_ENABLED`.
 - Content tools:
   - YouTube metadata + transcript retrieval.
@@ -72,6 +74,7 @@ This document is the canonical, detailed feature inventory for this repository. 
 
 ### Internationalization (discord_bot/utils/i18n.py)
 - Locale JSON files in `discord_bot/locales/` with helper `t(key, locale, **vars)`.
+- Fallbacks to English when keys are missing; helpers for interaction/guild locale.
 - Used for selected tool/admin responses (English and Japanese provided).
 
 ### Personality, modes, and presentation
@@ -144,6 +147,7 @@ This document is the canonical, detailed feature inventory for this repository. 
 ### Moderation and safety
 - Automod keyword rules with configurable actions (delete, timeout, kick, ban) via `/automod`.
 - Spam detection with configurable thresholds and timeouts.
+- Optional URL safety checks with allow/block regex lists and warn/delete actions.
 - Mod log channel support for automod and agentic actions.
 - Timeout logging via `discord_bot/cogs/logger.py`.
 - Staff role permission levels for agentic actions (`/config staff`).
@@ -159,6 +163,7 @@ This document is the canonical, detailed feature inventory for this repository. 
 ### Utilities (discord_bot/cogs/utilities.py)
 - Help output is generated from a centralized command inventory, with mode-specific intros and admin filtering.
 - Bot stats (uptime, servers, users, memory usage, messages, images).
+- Usage dashboard (`/usage`) with global and per-guild metrics.
 - Cog reload (owner only).
 - Translation via Gemini (`!translate`, `/translate`).
 - Summarization of recent messages (`!tldr`, `/tldr`).
@@ -177,7 +182,9 @@ This document is the canonical, detailed feature inventory for this repository. 
 - `/config env example` sends the warning text plus a multi-part guild.env template when it exceeds message length.
 - Feature toggles via `/config toggle`:
   - evil, autorole, welcome
-  - web_search, image_gen, stickers, emojis, pin_message, self_teaching, youtube, profile_peek, rag
+  - web_search, image_gen, stickers, emojis, pin_message, self_teaching, youtube, profile_peek, rag, gif_responses, url_safety
+- Quick toggle UI panel via `/config ui`.
+- URL safety configuration via `/config url_safety` (view, action, allowlist, blocklist, clear).
 - Staff roles and permission levels via `/config staff`.
 - Mod log channel via `/config modlog`.
 - Auto-role configuration via `/config autorole`.
@@ -209,7 +216,7 @@ This document is the canonical, detailed feature inventory for this repository. 
 - Per-guild SQLite databases stored in `discord_bot/data/`.
 - Global SQLite database for stats and guild registry (`data/global.db` by default).
 - Tables (per-guild unless noted):
-  - global: `bot_stats`, `guild_registry`
+  - global: `bot_stats`, `guild_registry`, `guild_stats`
   - users and profiles: `users`, `user_profiles`
   - memory: `user_facts`, `user_aliases`, `pending_facts`, `persona_attributes`, `sample_dialogues`
   - relationships: `user_affection_by_mode`, `bot_mood`, `wellbeing_checks`, `interaction_cooldowns`
@@ -223,7 +230,7 @@ This document is the canonical, detailed feature inventory for this repository. 
 - `starboard_settings` fields include `channel_id`, `emoji_trigger`, `emoji_triggers`, `emoji_mode`, `threshold`, `allow_self_star`, `enabled`.
 - `guild_config` includes `gemini_profile_key` for profile analysis.
 - `guild_config` includes `gemini_key_type` for Gemini key rotation mode.
-- `guild_config` includes Brave/Replicate keys, image provider settings, tool feature flags, and custom endpoint fields.
+- `guild_config` includes Brave/Replicate/Tenor keys, image provider settings, tool feature flags, URL safety settings, and custom endpoint fields.
 - `user_facts` includes `source`, `learned_from_user_id`, and `memory_type` for memory tracking.
 - `user_profiles` includes `personal_memory_opt_out`.
 - Built-in migrations for new columns and tables.
@@ -237,7 +244,7 @@ This document is the canonical, detailed feature inventory for this repository. 
 - Logging to `discord_bot/logs/femmy.log` with rotation.
 
 ### Tests
-- Unit tests for API key manager, mode registry, image downloader, persona DB helpers, affection traits, and tool parsing/flags in `tests/`.
+- Unit tests for API key manager, mode registry, image downloader, persona DB helpers, affection traits, tool parsing/flags, web search/fetch, image generation, expression tools, YouTube tool, pin tool, profile peek, RAG helpers, and i18n in `tests/`.
 
 ## Commands
 
@@ -248,7 +255,7 @@ This document is the canonical, detailed feature inventory for this repository. 
 - Reminders: `!remind` (group: list, cancel), `!reminders`
 - Scheduler: `!setbump`, `!clearbump`
 - Social: `!mode`, `!modes`, `!currentmode`, `!evil`
-- Utilities: `!help`, `!stats`, `!reload`, `!translate`, `!tldr`, `!ping`, `!about`
+- Utilities: `!help`, `!stats`, `!usage`, `!reload`, `!translate`, `!tldr`, `!ping`, `!about`
 - Vision: `!describe`
 - Core: `!sync` (from main.py)
 
@@ -258,14 +265,14 @@ This document is the canonical, detailed feature inventory for this repository. 
 - Persona: `/create persona`, `/persona create`, `/persona list`, `/persona preview`, `/persona edit`, `/persona delete`
 - Affection: `/affection`, `/mood`, `/headpat`, `/hug`
 - Automod: `/automod add`, `/automod remove`, `/automod list`, `/automod spam`
-- Config: `/config auth`, `/config password set|change|reset`, `/config keys view|set|clear`, `/config model view|set`, `/config env example|upload`, `/config toggle evil|autorole|welcome|web_search|image_gen|stickers|emojis|pin_message|self_teaching|youtube|profile_peek|rag`, `/config staff add|remove|list`, `/config modlog set|clear|view`, `/config autorole set|clear|view`, `/config welcome channel|clear|test|set_message|view_message|clear_message|set_dm_message|clear_dm_message|toggle_dm`, `/config custom_endpoint view|set`
+- Config: `/config auth`, `/config password set|change|reset`, `/config keys view|set|clear`, `/config model view|set`, `/config env example|upload`, `/config toggle evil|autorole|welcome|web_search|image_gen|stickers|emojis|pin_message|self_teaching|youtube|profile_peek|rag|gif_responses|url_safety`, `/config url_safety view|action|allowlist|blocklist|clear`, `/config ui`, `/config staff add|remove|list`, `/config modlog set|clear|view`, `/config autorole set|clear|view`, `/config welcome channel|clear|test|set_message|view_message|clear_message|set_dm_message|clear_dm_message|toggle_dm`, `/config custom_endpoint view|set`
 - Memory: `/timezone`, `/remember`, `/forget`, `/myinfo`, `/aka`, `/aliases`, `/whois`, `/aboutuser`, `/birthday`, `/analyze`
 - Teach: `/teach memory personal`, `/teach memory server`, `/teach attribute`, `/teach sampledialogue`, `/teach document`, `/personal privacy`
 - Reminders: `/remind`, `/reminders`, `/remindcancel`
 - Scheduler: `/bumpchannel`, `/bumpstart`, `/bumpstop`
 - Social: `/evil`, `/mode`, `/modes`, `/currentmode`
 - Starboard: `/starboard setup`, `/starboard toggle`, `/starboard ignore`, `/starboard unignore`, `/starboard ignored`
-- Utilities: `/help`, `/stats`, `/reload`, `/translate`, `/generate_embed`, `/tldr`, `/ping`, `/about`
+- Utilities: `/help`, `/stats`, `/usage`, `/reload`, `/translate`, `/generate_embed`, `/tldr`, `/ping`, `/about`
 - Tools: `/tools status`
 - Media: `/generate image`
 - Vision: `/describe`
@@ -276,8 +283,8 @@ This document is the canonical, detailed feature inventory for this repository. 
 - Guild-level configuration: upload `discord_bot/guild.env.example` via `/config env upload`; `/config env example` replies with the text template (ephemeral).
 - Guild env keys include `GEMINI_PROFILE_KEY` for `/analyze` profile summaries.
 - Guild env supports `GEMINI_KEY_TYPE` to control Gemini key rotation (`free` rotates every request, `paid` sticks unless a key fails).
-- Guild env supports optional `BRAVE_API_KEY`, `REPLICATE_API_KEY`, `IMAGE_PROVIDER`, `IMAGE_MODEL`, and `CUSTOM_ENDPOINT_*` settings.
-- Bot env supports Postgres RAG settings (`ACTIVATE_LOCAL_RAG`, `POSTGRES_*`, `RAG_*`) and dev flags (`GIF_ANALYSIS_ENABLED`).
+- Guild env supports optional `BRAVE_API_KEY`, `REPLICATE_API_KEY`, `TENOR_API_KEY`, `TENOR_CLIENT_KEY`, `IMAGE_PROVIDER`, `IMAGE_MODEL`, and `CUSTOM_ENDPOINT_*` settings.
+- Bot env supports Postgres RAG settings (`ACTIVATE_LOCAL_RAG`, `POSTGRES_*`, `RAG_*`), Tenor GIF keys, and dev flags (`GIF_ANALYSIS_ENABLED`).
 - Per-guild API keys are stored encrypted using `ENCRYPTION_KEY`.
 
 ## Folder skeleton (top level)
@@ -311,6 +318,7 @@ This document is the canonical, detailed feature inventory for this repository. 
       teach.py
       tools_admin.py
       utilities.py
+      usage.py
       vision.py
       __init__.py
     locales/
@@ -354,6 +362,7 @@ This document is the canonical, detailed feature inventory for this repository. 
       encryption.py
       expression_picker.py
       expression_tools.py
+      gif_reply.py
       gif_processor.py
       guild_ai.py
       i18n.py
@@ -376,6 +385,7 @@ This document is the canonical, detailed feature inventory for this repository. 
       tool_flags.py
       tool_parser.py
       tool_registry.py
+      url_safety.py
       url_fetcher.py
       web_search.py
       __init__.py
@@ -404,11 +414,20 @@ This document is the canonical, detailed feature inventory for this repository. 
     test_affection_traits.py
     test_affection_traits_db.py
     test_api_manager.py
+    test_expression_tools.py
+    test_i18n.py
+    test_image_generation.py
     test_image_downloader.py
     test_mode_registry.py
     test_persona_db.py
+    test_pin_tool.py
+    test_profile_peek.py
+    test_rag_documents.py
+    test_rag_store.py
     test_tool_parser.py
     test_tool_registry.py
+    test_web_search.py
+    test_youtube_tool.py
   tomoribot_reference/
 ```
 

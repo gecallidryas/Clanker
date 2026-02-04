@@ -116,7 +116,7 @@ Analyze the image and respond in character. Be helpful and engaging.
             try:
                 response_text, _ = await generate_guild_gemini_vision(guild_id, full_prompt, image)
                 try:
-                    await increment_stat("images_analyzed")
+                    await increment_stat("images_analyzed", guild_id=message.guild.id)
                 except Exception as e:
                     logger.warning("Failed to increment images_analyzed: %s", e)
                 return response_text

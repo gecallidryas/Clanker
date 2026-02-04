@@ -9,7 +9,7 @@ from discord.ext import commands
 from utils.db_handler import get_guild_config
 from utils.tool_flags import DEFAULT_FLAG_VALUES, get_tool_flag
 from utils.tool_registry import get_available_tools, list_tools, register_builtin_tools
-from utils.i18n import t
+from utils.i18n import get_locale_from_interaction, t
 
 
 class ToolsAdmin(commands.Cog):
@@ -22,7 +22,10 @@ class ToolsAdmin(commands.Cog):
     @tools_group.command(name="status", description="Show tool availability for this server.")
     async def tools_status(self, interaction: discord.Interaction):
         if not interaction.guild:
-            await interaction.response.send_message("Use this command in a server.", ephemeral=True)
+            await interaction.response.send_message(
+                t("common.server_only", get_locale_from_interaction(interaction)),
+                ephemeral=True,
+            )
             return
 
         config = await get_guild_config(interaction.guild.id)
@@ -30,7 +33,7 @@ class ToolsAdmin(commands.Cog):
         enabled_tools = get_available_tools(config)
         enabled_names = {tool.name for tool in enabled_tools}
 
-        locale = str(interaction.locale) if interaction.locale else "en"
+        locale = get_locale_from_interaction(interaction)
         embed = discord.Embed(title=t("tools.status.title", locale), color=discord.Color.blue())
         embed.add_field(
             name=t("tools.status.enabled", locale),

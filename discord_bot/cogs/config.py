@@ -44,6 +44,8 @@ from utils.db_handler import (
     set_dm_welcome_message,
     set_dm_welcome_enabled,
     get_dm_welcome_enabled,
+    get_url_safety_config,
+    set_url_safety_config,
 )
 from utils.encryption import get_encryption
 from utils.guild_ai import (
@@ -53,6 +55,7 @@ from utils.guild_ai import (
 from utils.api_manager import normalize_openrouter_model, normalize_gemini_model, OPENROUTER_MODELS
 from utils.rate_limiter import RateLimiter
 from utils.logger import get_logger
+from utils.i18n import get_locale_from_interaction, t
 
 logger = get_logger(__name__)
 
@@ -84,6 +87,8 @@ ENV_TO_DB = {
     "OPENROUTER_FALLBACK_MODELS": "openrouter_fallback_models",
     "BRAVE_API_KEY": "brave_api_key",
     "REPLICATE_API_KEY": "replicate_api_key",
+    "TENOR_API_KEY": "tenor_api_key",
+    "TENOR_CLIENT_KEY": "tenor_client_key",
     "IMAGE_PROVIDER": "image_provider",
     "IMAGE_MODEL": "image_model",
     "CUSTOM_ENDPOINT_URL": "custom_endpoint_url",
@@ -133,6 +138,73 @@ CATEGORY_FIELDS = {
     ],
 }
 
+CONFIG_TOGGLE_OPTIONS = [
+    ("web_search_enabled", "Web search"),
+    ("image_gen_enabled", "Image generation"),
+    ("sticker_usage_enabled", "Sticker usage"),
+    ("emoji_usage_enabled", "Emoji usage"),
+    ("pin_message_enabled", "Pin message"),
+    ("self_teaching_enabled", "Self teaching"),
+    ("youtube_enabled", "YouTube processing"),
+    ("profile_peek_enabled", "Profile peek"),
+    ("rag_enabled", "RAG retrieval"),
+    ("gif_responses_enabled", "GIF responses"),
+    ("url_safety_enabled", "URL safety"),
+]
+
+
+class ConfigToggleView(discord.ui.View):
+    def __init__(self, guild_id: int, user_id: int):
+        super().__init__(timeout=180)
+        self.guild_id = guild_id
+        self.user_id = user_id
+
+    async def interaction_check(self, interaction: discord.Interaction) -> bool:
+        if interaction.user.id != self.user_id:
+            await interaction.response.send_message(
+                "Only the command invoker can use this panel.",
+                ephemeral=True,
+            )
+            return False
+        return True
+
+    async def build_embed(self) -> discord.Embed:
+        config = await get_guild_config(self.guild_id)
+        lines = []
+        for key, label in CONFIG_TOGGLE_OPTIONS:
+            enabled = bool(config.get(key) or 0)
+            state = "ON" if enabled else "OFF"
+            lines.append(f"{label}: **{state}**")
+        embed = discord.Embed(
+            title="Config Toggles",
+            description="\n".join(lines) if lines else "No toggles available.",
+            color=discord.Color.blue(),
+        )
+        embed.set_footer(text="Select a toggle to switch it on or off.")
+        return embed
+
+    @discord.ui.select(
+        placeholder="Toggle a feature",
+        min_values=1,
+        max_values=1,
+        options=[
+            discord.SelectOption(label=label, value=key)
+            for key, label in CONFIG_TOGGLE_OPTIONS
+        ],
+    )
+    async def toggle_select(
+        self,
+        interaction: discord.Interaction,
+        select: discord.ui.Select,
+    ):
+        key = select.values[0]
+        config = await get_guild_config(self.guild_id)
+        enabled = bool(config.get(key) or 0)
+        await update_guild_config(self.guild_id, {key: 0 if enabled else 1})
+        await add_guild_config_audit(self.guild_id, interaction.user.id, f"{key}_ui")
+        embed = await self.build_embed()
+        await interaction.response.edit_message(embed=embed, view=self)
+
 
 class Config(commands.Cog):
     # Main config group
@@ -144,6 +216,11 @@ class Config(commands.Cog):
     model_group = app_commands.Group(name="model", description="View or set models", parent=config)
     env_group = app_commands.Group(name="env", description="Upload or retrieve guild env template", parent=config)
     toggle_group = app_commands.Group(name="toggle", description="Toggle guild features", parent=config)
+    url_safety_group = app_commands.Group(
+        name="url_safety",
+        description="Configure URL safety checks",
+        parent=config,
+    )
     custom_endpoint_group = app_commands.Group(
         name="custom_endpoint",
         description="Configure custom OpenAI-compatible endpoint",
@@ -168,7 +245,7 @@ class Config(commands.Cog):
     async def _require_guild(self, interaction: discord.Interaction) -> bool:
         if interaction.guild is None:
             await interaction.response.send_message(
-                "Use this command in a server.",
+                t("common.server_only", get_locale_from_interaction(interaction)),
                 ephemeral=True,
             )
             return False
@@ -177,7 +254,7 @@ class Config(commands.Cog):
     async def _require_auth(self, interaction: discord.Interaction) -> bool:
         if not await is_authenticated(interaction.guild.id, interaction.user.id):
             await interaction.response.send_message(
-                "Please authenticate first with `/config auth`.",
+                t("config.auth.required", get_locale_from_interaction(interaction)),
                 ephemeral=True,
             )
             return False
@@ -974,6 +1051,133 @@ class Config(commands.Cog):
     @app_commands.describe(state="on/off (leave empty to view)")
     async def toggle_rag(self, interaction: discord.Interaction, state: Optional[str] = None):
         await self._toggle_feature_flag(interaction, "rag_enabled", "RAG retrieval", state)
+
+    @toggle_group.command(name="gif_responses", description="Enable or disable GIF replies.")
+    @app_commands.checks.has_permissions(administrator=True)
+    @app_commands.describe(state="on/off (leave empty to view)")
+    async def toggle_gif_responses(self, interaction: discord.Interaction, state: Optional[str] = None):
+        await self._toggle_feature_flag(interaction, "gif_responses_enabled", "GIF responses", state)
+
+    @toggle_group.command(name="url_safety", description="Enable or disable URL safety checks.")
+    @app_commands.checks.has_permissions(administrator=True)
+    @app_commands.describe(state="on/off (leave empty to view)")
+    async def toggle_url_safety(self, interaction: discord.Interaction, state: Optional[str] = None):
+        await self._toggle_feature_flag(interaction, "url_safety_enabled", "URL safety", state)
+
+    @config.command(name="ui", description="Open a quick toggle UI panel.")
+    @app_commands.checks.has_permissions(administrator=True)
+    async def config_ui(self, interaction: discord.Interaction):
+        if not await self._require_guild(interaction):
+            return
+        if not await self._require_auth(interaction):
+            return
+        view = ConfigToggleView(interaction.guild.id, interaction.user.id)
+        embed = await view.build_embed()
+        await interaction.response.send_message(embed=embed, view=view, ephemeral=True)
+
+    # =========================
+    # URL Safety
+    # =========================
+
+    @url_safety_group.command(name="view", description="View URL safety settings.")
+    @app_commands.checks.has_permissions(administrator=True)
+    async def url_safety_view(self, interaction: discord.Interaction):
+        if not await self._require_guild(interaction):
+            return
+        if not await self._require_auth(interaction):
+            return
+        config = await get_url_safety_config(interaction.guild.id)
+
+        def format_list(raw: Optional[str]) -> str:
+            if not raw:
+                return "Not set"
+            lines = [line.strip() for line in raw.splitlines() if line.strip()]
+            if len(lines) > 6:
+                return "\n".join(lines[:6]) + "\n..."
+            return "\n".join(lines)
+
+        embed = discord.Embed(title="URL Safety Settings", color=discord.Color.blue())
+        embed.add_field(
+            name="Enabled",
+            value="Yes" if config.get("url_safety_enabled") else "No",
+            inline=False,
+        )
+        embed.add_field(
+            name="Action",
+            value=config.get("url_safety_action") or "warn",
+            inline=False,
+        )
+        embed.add_field(
+            name="Allowlist (regex)",
+            value=format_list(config.get("url_allowlist")),
+            inline=False,
+        )
+        embed.add_field(
+            name="Blocklist (regex)",
+            value=format_list(config.get("url_blocklist")),
+            inline=False,
+        )
+        await interaction.response.send_message(embed=embed, ephemeral=True)
+
+    @url_safety_group.command(name="action", description="Set URL safety action (warn/delete).")
+    @app_commands.checks.has_permissions(administrator=True)
+    @app_commands.describe(action="warn or delete")
+    async def url_safety_action(self, interaction: discord.Interaction, action: str):
+        if not await self._require_guild(interaction):
+            return
+        if not await self._require_auth(interaction):
+            return
+        action_value = (action or "").strip().lower()
+        if action_value not in {"warn", "delete"}:
+            await interaction.response.send_message("Action must be `warn` or `delete`.", ephemeral=True)
+            return
+        await set_url_safety_config(interaction.guild.id, {"url_safety_action": action_value})
+        await add_guild_config_audit(interaction.guild.id, interaction.user.id, "url_safety_action")
+        await interaction.response.send_message(
+            f"URL safety action set to **{action_value}**.",
+            ephemeral=True,
+        )
+
+    @url_safety_group.command(name="allowlist", description="Set URL allowlist regex patterns.")
+    @app_commands.checks.has_permissions(administrator=True)
+    @app_commands.describe(patterns="One pattern per line or comma-separated")
+    async def url_safety_allowlist(self, interaction: discord.Interaction, patterns: str):
+        if not await self._require_guild(interaction):
+            return
+        if not await self._require_auth(interaction):
+            return
+        await set_url_safety_config(interaction.guild.id, {"url_allowlist": patterns.strip()})
+        await add_guild_config_audit(interaction.guild.id, interaction.user.id, "url_safety_allowlist")
+        await interaction.response.send_message("URL allowlist updated.", ephemeral=True)
+
+    @url_safety_group.command(name="blocklist", description="Set URL blocklist regex patterns.")
+    @app_commands.checks.has_permissions(administrator=True)
+    @app_commands.describe(patterns="One pattern per line or comma-separated")
+    async def url_safety_blocklist(self, interaction: discord.Interaction, patterns: str):
+        if not await self._require_guild(interaction):
+            return
+        if not await self._require_auth(interaction):
+            return
+        await set_url_safety_config(interaction.guild.id, {"url_blocklist": patterns.strip()})
+        await add_guild_config_audit(interaction.guild.id, interaction.user.id, "url_safety_blocklist")
+        await interaction.response.send_message("URL blocklist updated.", ephemeral=True)
+
+    @url_safety_group.command(name="clear", description="Clear URL allowlist or blocklist.")
+    @app_commands.checks.has_permissions(administrator=True)
+    @app_commands.describe(target="allowlist or blocklist")
+    async def url_safety_clear(self, interaction: discord.Interaction, target: str):
+        if not await self._require_guild(interaction):
+            return
+        if not await self._require_auth(interaction):
+            return
+        target_value = (target or "").strip().lower()
+        if target_value not in {"allowlist", "blocklist"}:
+            await interaction.response.send_message("Target must be `allowlist` or `blocklist`.", ephemeral=True)
+            return
+        field = "url_allowlist" if target_value == "allowlist" else "url_blocklist"
+        await set_url_safety_config(interaction.guild.id, {field: None})
+        await add_guild_config_audit(interaction.guild.id, interaction.user.id, f"url_safety_clear_{target_value}")
+        await interaction.response.send_message(f"Cleared URL {target_value}.", ephemeral=True)
 
     def _parse_env(self, content: str) -> Tuple[Dict[str, str], List[str], List[str], List[str]]:
         parsed: Dict[str, str] = {}

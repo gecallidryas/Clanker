@@ -13,6 +13,7 @@ TOOL_FLAG_MAP: dict[str, str | None] = {
     "peek_profile_picture": "profile_peek_enabled",
     "increase_media_context": None,
     "process_gif": None,
+    "send_gif": "gif_responses_enabled",
     "remember_this_fact": "self_teaching_enabled",
     "update_short_term_memory": "self_teaching_enabled",
     "update_long_term_memory": "self_teaching_enabled",
@@ -29,6 +30,7 @@ DEFAULT_FLAG_VALUES: dict[str, int] = {
     "youtube_enabled": 1,
     "profile_peek_enabled": 0,
     "rag_enabled": 1,
+    "gif_responses_enabled": 0,
 }
 
 

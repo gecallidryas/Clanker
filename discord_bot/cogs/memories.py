@@ -33,6 +33,7 @@ from utils.db_handler import (
 )
 from utils.api_manager import get_gemini_summarize_manager, UserInputError
 from utils.logger import get_logger
+from utils.i18n import get_locale_from_guild, get_locale_from_interaction, t
 
 logger = get_logger(__name__)
 
@@ -212,7 +213,7 @@ class Memories(commands.Cog):
 
     async def _remember_fact_for(self, ctx: commands.Context, target: discord.Member, fact: str) -> None:
         if not ctx.guild:
-            await ctx.send("Facts are server-specific. Use this in a server.")
+            await ctx.send(t("facts.server_only", get_locale_from_guild(ctx.guild)))
             return
 
         if len(fact) > 500:
@@ -255,7 +256,7 @@ class Memories(commands.Cog):
             - [ ] Add confirmation for sensitive info
         """
         if not ctx.guild:
-            await ctx.send("Facts are server-specific. Use this in a server.")
+            await ctx.send(t("facts.server_only", get_locale_from_guild(ctx.guild)))
             return
 
         target, fact_text = self._extract_remember_target(ctx, fact)
@@ -275,7 +276,7 @@ class Memories(commands.Cog):
             - [ ] Allow deleting specific facts by ID
         """
         if not ctx.guild:
-            await ctx.send("Facts are server-specific. Use this in a server.")
+            await ctx.send(t("facts.server_only", get_locale_from_guild(ctx.guild)))
             return
         scope_value = (scope or "").lower().strip()
         memory_types = ["personal"]
@@ -311,7 +312,7 @@ class Memories(commands.Cog):
             - [ ] Show fact creation dates
         """
         if not ctx.guild:
-            await ctx.send("Profiles are server-specific. Use this in a server.")
+            await ctx.send(t("profiles.server_only", get_locale_from_guild(ctx.guild)))
             return
 
         user = await get_user(ctx.guild.id, ctx.author.id)
@@ -688,7 +689,7 @@ class Memories(commands.Cog):
     async def remember_fact_slash(self, interaction: discord.Interaction, fact: str, member: discord.Member = None):
         if not interaction.guild:
             await interaction.response.send_message(
-                "Facts are server-specific. Use this in a server.",
+                t("facts.server_only", get_locale_from_interaction(interaction)),
                 ephemeral=True,
             )
             return
@@ -739,7 +740,7 @@ class Memories(commands.Cog):
     ):
         if not interaction.guild:
             await interaction.response.send_message(
-                "Facts are server-specific. Use this in a server.",
+                t("facts.server_only", get_locale_from_interaction(interaction)),
                 ephemeral=True,
             )
             return
@@ -794,7 +795,7 @@ class Memories(commands.Cog):
     async def show_user_info_slash(self, interaction: discord.Interaction):
         if not interaction.guild:
             await interaction.response.send_message(
-                "Profiles are server-specific. Use this in a server.",
+                t("profiles.server_only", get_locale_from_interaction(interaction)),
                 ephemeral=True,
             )
             return

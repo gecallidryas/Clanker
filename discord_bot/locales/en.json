@@ -1,4 +1,12 @@
-{
+﻿{
+  "common.server_only": "Use this in a server.",
+  "config.auth.required": "Please authenticate first with `/config auth`.",
+  "imagegen.disabled": "Image generation is disabled for this server.",
+  "imagegen.generated": "Image generated.",
+  "affection.server_only": "Affection is server-specific. Use this in a server.",
+  "mood.server_only": "Moods are server-specific. Use this in a server.",
+  "facts.server_only": "Facts are server-specific. Use this in a server.",
+  "profiles.server_only": "Profiles are server-specific. Use this in a server.",
   "tools.status.title": "Tool Status",
   "tools.status.enabled": "Enabled Tools",
   "tools.status.disabled": "Disabled Tools",
@@ -9,5 +17,12 @@
   "teach.sampledialogue.saved": "Sample dialogue stored.",
   "teach.document.saved": "Document stored (id {doc_id}) with {chunks} chunks.",
   "personal.privacy.on": "Personal memory opt-out enabled.",
-  "personal.privacy.off": "Personal memory opt-out disabled."
+  "personal.privacy.off": "Personal memory opt-out disabled.",
+  "usage.dashboard.title": "Usage Dashboard",
+  "usage.dashboard.global": "Global",
+  "usage.dashboard.guild": "This Guild",
+  "usage.dashboard.messages": "Messages",
+  "usage.dashboard.commands": "Commands",
+  "usage.dashboard.images": "Images",
+  "usage.dashboard.top_guilds": "Top Guilds"
 }

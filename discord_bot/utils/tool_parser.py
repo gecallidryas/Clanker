@@ -5,8 +5,8 @@ import re
 from typing import Any, Optional
 
 
-TOOL_BLOCK_PATTERN = re.compile(r"```tool\\s*(\\{.*?\\})\\s*```", re.DOTALL | re.IGNORECASE)
-JSON_BLOCK_PATTERN = re.compile(r"```json\\s*(\\{.*?\\})\\s*```", re.DOTALL | re.IGNORECASE)
+TOOL_BLOCK_PATTERN = re.compile(r"```tool\s*(\{.*?\})\s*```", re.DOTALL | re.IGNORECASE)
+JSON_BLOCK_PATTERN = re.compile(r"```json\s*(\{.*?\})\s*```", re.DOTALL | re.IGNORECASE)
 
 
 def extract_tool_call(text: str) -> Optional[dict[str, Any]]:

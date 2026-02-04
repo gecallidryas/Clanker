@@ -15,9 +15,9 @@ logger = get_logger(__name__)
 
 
 YOUTUBE_ID_PATTERNS = [
-    re.compile(r"v=([\\w-]{11})"),
-    re.compile(r"youtu\\.be/([\\w-]{11})"),
-    re.compile(r"youtube\\.com/shorts/([\\w-]{11})"),
+    re.compile(r"v=([\w-]{11})"),
+    re.compile(r"youtu\.be/([\w-]{11})"),
+    re.compile(r"youtube\.com/shorts/([\w-]{11})"),
 ]
 
 
