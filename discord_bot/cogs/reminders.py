@@ -61,6 +61,11 @@ TIME_MULTIPLIERS = {
 # ============================================
 
 REMINDER_MESSAGES = {
+    "mode_default": [
+        "⏰ Reminder: **{message}**",
+        "⏰ Scheduled reminder: **{message}**",
+        "⏰ Time's up. **{message}**"
+    ],
     "mode_femboy": [
         "⏰ Nii-chan! You asked me to remind you: **{message}**",
         "⏰ *tugs sleeve* Don't forget! **{message}** ♡",
@@ -282,12 +287,12 @@ class Reminders(commands.Cog):
                     continue
                 
                 # Get mode for personality
-                mode = "mode_femboy"
+                mode = "mode_default"
                 if reminder["guild_id"]:
                     mode = await get_server_mode(reminder["guild_id"])
                 
                 # Format message
-                messages = REMINDER_MESSAGES.get(mode, REMINDER_MESSAGES["mode_femboy"])
+                messages = REMINDER_MESSAGES.get(mode, REMINDER_MESSAGES["mode_default"])
                 msg = random.choice(messages).format(message=reminder["message"])
                 
                 # Send reminder

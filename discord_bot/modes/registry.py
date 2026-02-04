@@ -20,6 +20,8 @@ class ModeProfile:
     persona_fallback: str
     mention_reactions: Tuple[str, ...]
     switch_message: str
+    bio: str
+    banner_file: Optional[str] = None
     emoji_prefix: Optional[str] = None
     activity_watching: Optional[str] = None
 
@@ -41,6 +43,8 @@ def _load_modes() -> None:
     from . import femboy  # noqa: F401
     from . import tsundere  # noqa: F401
     from . import oneesan  # noqa: F401
+    from . import bear  # noqa: F401
+
     _LOADED = True
 
 
@@ -87,6 +91,10 @@ def validate_mode_registry() -> List[str]:
             issues.append(f"{profile.key} missing prompt_file.")
         if not profile.evil_prompt_file:
             issues.append(f"{profile.key} missing evil_prompt_file.")
+        if not profile.bio:
+            issues.append(f"{profile.key} missing bio.")
+        if not profile.banner_file:
+            issues.append(f"{profile.key} missing banner_file.")
     if issues:
         logger.warning("Mode registry validation issues: %s", "; ".join(issues))
     return issues

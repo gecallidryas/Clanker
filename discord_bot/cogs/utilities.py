@@ -26,6 +26,7 @@ from discord import app_commands
 from discord.ext import commands
 
 from utils.db_handler import get_server_mode, get_stats, increment_stat
+from modes import get_mode_profile
 from utils.guild_ai import (
     generate_guild_gemini_text,
     generate_guild_gemini_translate_text,
@@ -115,7 +116,6 @@ HELP_COMMANDS = {
             "/admin clearglobal",
             "/admin clearguild",
             "/setgenderrole",
-            "/avatar mode",
             "/avatar reset",
         ],
     },
@@ -268,8 +268,8 @@ class Utilities(commands.Cog):
     def _get_bot_name(self, mode: str) -> str:
         if mode == "mode_oneesan":
             return "Yumi"
-        if self.bot.user:
-            return self.bot.user.display_name
+        if mode == "mode_default":
+            return "Clanker"
         return "Femmy"
     
     # ============================================
@@ -281,7 +281,7 @@ class Utilities(commands.Cog):
         """
         Show help for all commands or a specific command.
         """
-        mode = await get_server_mode(ctx.guild.id) if ctx.guild else "mode_femboy"
+        mode = await get_server_mode(ctx.guild.id) if ctx.guild else "mode_default"
         
         if command_name:
             # Show help for specific command
@@ -500,7 +500,7 @@ class Utilities(commands.Cog):
             await ctx.send("❌ Please provide both text and target language!")
             return
 
-        mode = await get_server_mode(ctx.guild.id) if ctx.guild else "mode_femboy"
+        mode = await get_server_mode(ctx.guild.id) if ctx.guild else "mode_default"
         if not await ai_limiter.acquire(ctx.author.id):
             retry_after = ai_limiter.get_retry_after(ctx.author.id)
             await ctx.send(get_rate_limit_message(mode, retry_after))
@@ -561,7 +561,7 @@ Text to translate:
         if count > 100:
             count = 100
 
-        mode = await get_server_mode(ctx.guild.id) if ctx.guild else "mode_femboy"
+        mode = await get_server_mode(ctx.guild.id) if ctx.guild else "mode_default"
         if not await ai_limiter.acquire(ctx.author.id):
             retry_after = ai_limiter.get_retry_after(ctx.author.id)
             await ctx.send(get_rate_limit_message(mode, retry_after))
@@ -629,11 +629,17 @@ Provide a clear, bulleted summary:
     @commands.command(name="about", aliases=["info", "botinfo"])
     async def about(self, ctx: commands.Context):
         """Display information about the bot."""
-        mode = await get_server_mode(ctx.guild.id) if ctx.guild else "mode_femboy"
+        mode = await get_server_mode(ctx.guild.id) if ctx.guild else "mode_default"
         bot_name = self._get_bot_name(mode)
+        bio = None
+        if ctx.guild:
+            bios = getattr(self.bot, "mode_bio_by_guild", None) or {}
+            bio = bios.get(ctx.guild.id)
+        if not bio:
+            bio = get_mode_profile(mode).bio
         embed = discord.Embed(
             title=f"🤖 About {bot_name}",
-            description="An advanced AI Discord bot with multiple personalities!",
+            description=f"{bio}\n\nAn advanced AI Discord bot with multiple personalities!",
             color=discord.Color.pink()
         )
         
@@ -658,7 +664,7 @@ Provide a clear, bulleted summary:
     @app_commands.command(name="help", description="Show help for commands.")
     @app_commands.describe(command_name="Specific command to show help for")
     async def custom_help_slash(self, interaction: discord.Interaction, command_name: str = None):
-        mode = await get_server_mode(interaction.guild.id) if interaction.guild else "mode_femboy"
+        mode = await get_server_mode(interaction.guild.id) if interaction.guild else "mode_default"
 
         if command_name:
             cmd = self.bot.get_command(command_name)
@@ -843,7 +849,7 @@ Provide a clear, bulleted summary:
             )
             return
 
-        mode = await get_server_mode(interaction.guild.id) if interaction.guild else "mode_femboy"
+        mode = await get_server_mode(interaction.guild.id) if interaction.guild else "mode_default"
         if not await ai_limiter.acquire(interaction.user.id):
             retry_after = ai_limiter.get_retry_after(interaction.user.id)
             await interaction.response.send_message(
@@ -1015,7 +1021,7 @@ User request:
         if count > 100:
             count = 100
 
-        mode = await get_server_mode(interaction.guild.id) if interaction.guild else "mode_femboy"
+        mode = await get_server_mode(interaction.guild.id) if interaction.guild else "mode_default"
         if not await ai_limiter.acquire(interaction.user.id):
             retry_after = ai_limiter.get_retry_after(interaction.user.id)
             await interaction.response.send_message(get_rate_limit_message(mode, retry_after), ephemeral=True)
@@ -1087,11 +1093,17 @@ Provide a clear, bulleted summary:
 
     @app_commands.command(name="about", description="Display information about the bot.")
     async def about_slash(self, interaction: discord.Interaction):
-        mode = await get_server_mode(interaction.guild.id) if interaction.guild else "mode_femboy"
+        mode = await get_server_mode(interaction.guild.id) if interaction.guild else "mode_default"
         bot_name = self._get_bot_name(mode)
+        bio = None
+        if interaction.guild:
+            bios = getattr(self.bot, "mode_bio_by_guild", None) or {}
+            bio = bios.get(interaction.guild.id)
+        if not bio:
+            bio = get_mode_profile(mode).bio
         embed = discord.Embed(
             title=f"🤖 About {bot_name}",
-            description="An advanced AI Discord bot with multiple personalities!",
+            description=f"{bio}\n\nAn advanced AI Discord bot with multiple personalities!",
             color=discord.Color.pink(),
         )
 

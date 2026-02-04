@@ -205,7 +205,7 @@ async def _init_guild_schema(db: aiosqlite.Connection) -> None:
     await db.execute("""
         CREATE TABLE IF NOT EXISTS server_config (
             guild_id INTEGER PRIMARY KEY,
-            persona_mode TEXT DEFAULT 'mode_femboy',
+            persona_mode TEXT DEFAULT 'mode_default',
             bump_channel_id INTEGER,
             evil_mode INTEGER DEFAULT 0,
             updated_at TIMESTAMP DEFAULT CURRENT_TIMESTAMP
@@ -1095,11 +1095,17 @@ async def get_server_mode(guild_id: int) -> str:
         guild_id: Discord guild/server ID
         
     Returns:
-        Persona mode string (default: "mode_femboy")
+        Persona mode string (default: "mode_default")
     """
     # Check for locked mode from environment
     locked_mode = os.getenv("BOT_MODE", "").lower()
-    mode_map = {"femboy": "mode_femboy", "tsundere": "mode_tsundere", "oneesan": "mode_oneesan"}
+    mode_map = {
+        "default": "mode_default",
+        "clanker": "mode_default",
+        "femboy": "mode_femboy",
+        "tsundere": "mode_tsundere",
+        "oneesan": "mode_oneesan",
+    }
     if locked_mode in mode_map:
         return mode_map[locked_mode]
     
@@ -1110,7 +1116,7 @@ async def get_server_mode(guild_id: int) -> str:
             (guild_id,)
         ) as cursor:
             row = await cursor.fetchone()
-            return row[0] if row else "mode_femboy"
+            return row[0] if row else "mode_default"
 
 
 async def set_server_mode(guild_id: int, mode: str) -> None:
@@ -2456,8 +2462,9 @@ async def set_guild_avatar_path(guild_id: int, path: Optional[str]) -> None:
 
 
 async def can_update_guild_avatar(guild_id: int) -> tuple[bool, str]:
-    """Return (can_update, reason). reason is 'hourly' when blocked."""
+    """Return (can_update, reason). reason is 'hourly' when blocked (5-minute window)."""
     now = _utcnow()
+    window = timedelta(minutes=5)
 
     async with guild_db(guild_id) as db:
         db.row_factory = aiosqlite.Row
@@ -2470,7 +2477,7 @@ async def can_update_guild_avatar(guild_id: int) -> tuple[bool, str]:
         if row:
             hourly_count = int(row["hourly_count"] or 0)
             hourly_reset = _parse_timestamp(row["hourly_reset"])
-            if hourly_reset is None or (now - hourly_reset) >= timedelta(hours=1):
+            if hourly_reset is None or (now - hourly_reset) >= window:
                 hourly_count = 0
                 hourly_reset = now
                 await db.execute(
@@ -2496,6 +2503,7 @@ async def can_update_guild_avatar(guild_id: int) -> tuple[bool, str]:
 async def record_guild_avatar_update(guild_id: int) -> None:
     """Record a successful avatar update and increment the hourly count."""
     now = _utcnow()
+    window = timedelta(minutes=5)
 
     async with guild_db(guild_id) as db:
         db.row_factory = aiosqlite.Row
@@ -2508,7 +2516,7 @@ async def record_guild_avatar_update(guild_id: int) -> None:
         if row:
             hourly_count = int(row["hourly_count"] or 0)
             hourly_reset = _parse_timestamp(row["hourly_reset"])
-            if hourly_reset is None or (now - hourly_reset) >= timedelta(hours=1):
+            if hourly_reset is None or (now - hourly_reset) >= window:
                 hourly_count = 0
                 hourly_reset = now
             hourly_count += 1

@@ -24,8 +24,6 @@ from utils.db_handler import (
     add_fact_with_source,
     delete_fact_by_id,
     get_facts_detailed,
-    get_server_mode,
-    get_evil_mode,
     set_guild_avatar_path,
     AFFECTION_TRACKED_MODES,
 )
@@ -79,7 +77,7 @@ class Admin(commands.Cog):
     @staticmethod
     def _avatar_error(reason: str) -> str:
         if reason == "hourly":
-            return "Avatar updates are limited to 2 per hour. Try again later."
+            return "Avatar updates are limited to 2 per 5 minutes. Try again later."
         if reason == "size":
             return "Avatar files must be 500 KB or smaller."
         if reason == "forbidden":
@@ -366,29 +364,6 @@ class Admin(commands.Cog):
     # =========================
     # Avatar Commands (Slash)
     # =========================
-
-    @avatar_group.command(name="mode", description="Use the current mode's avatar.")
-    @app_commands.checks.has_permissions(manage_guild=True)
-    async def avatar_mode(self, interaction: discord.Interaction):
-        if not interaction.guild:
-            await interaction.response.send_message("Use this command in a server.", ephemeral=True)
-            return
-
-        mode = await get_server_mode(interaction.guild.id)
-        evil_mode = await get_evil_mode(interaction.guild.id)
-        success, reason = await set_mode_avatar(
-            self.bot,
-            interaction.guild.id,
-            mode,
-            evil_mode=evil_mode,
-            force=True,
-        )
-        if not success:
-            await interaction.response.send_message(self._avatar_error(reason), ephemeral=True)
-            return
-
-        await set_guild_avatar_path(interaction.guild.id, None)
-        await interaction.response.send_message("Server avatar set to the current mode.")
 
     @avatar_group.command(name="reset", description="Reset to the default server avatar.")
     @app_commands.checks.has_permissions(manage_guild=True)

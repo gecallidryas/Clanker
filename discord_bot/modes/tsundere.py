@@ -25,8 +25,10 @@ PROFILE = ModeProfile(
         "Don't just ping me for no reason... say what you need.",
     ),
     switch_message="F-fine! I switched modes... It's not like I wanted to or anything!",
+    bio="All sharp edges and soft intentions, she will help you while pretending she does not care.",
+    banner_file="mode_tsundere.webp",
     emoji_prefix=None,
-    activity_watching="you stumble",
+    activity_watching="you make a mess",
 )
 
 register_mode(PROFILE)

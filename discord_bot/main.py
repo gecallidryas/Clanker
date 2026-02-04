@@ -19,6 +19,7 @@ from utils.logger import get_logger, log_startup, log_error, log_command
 from utils.db_handler import increment_stat
 from modes import validate_mode_registry, resolve_mode_key
 from utils.emoji_manager import EmojiManager
+from utils.activity_rotator import ActivityRotator, is_activity_rotator_enabled
 
 BASE_DIR = Path(__file__).resolve().parent
 ENV_PATH = BASE_DIR / ".env"
@@ -93,6 +94,8 @@ class Femmy(commands.Bot):
         )
         self.add_check(self._guild_only_check)
         self.emoji_manager = EmojiManager(self)
+        self._activity_task: asyncio.Task | None = None
+        self._activity_rotator: ActivityRotator | None = None
 
     async def _guild_only_check(self, ctx: commands.Context) -> bool:
         if ctx.guild is None:
@@ -167,8 +170,25 @@ class Femmy(commands.Bot):
         except Exception as exc:
             logger.warning("Failed to validate emojis: %s", exc)
         
-        activity = discord.Game(name="Clanking with humans")
-        await self.change_presence(activity=activity)
+        if is_activity_rotator_enabled():
+            if not self._activity_task or self._activity_task.done():
+                self._activity_task = asyncio.create_task(self._run_activity_rotator())
+        else:
+            activity = discord.Game(name="Clanking with humans")
+            await self.change_presence(activity=activity)
+
+    async def _run_activity_rotator(self) -> None:
+        if not self._activity_rotator:
+            self._activity_rotator = ActivityRotator(self)
+        await self._activity_rotator.refresh_pool(force=True)
+        while not self.is_closed():
+            try:
+                activity = await self._activity_rotator.next_activity()
+                if activity:
+                    await self.change_presence(activity=activity)
+            except Exception as exc:
+                logger.warning("Activity rotator failed to update presence: %s", exc)
+            await asyncio.sleep(self._activity_rotator.interval_seconds)
 
     async def on_guild_join(self, guild: discord.Guild):
         """Initialize new guild data and set the server avatar to the guild icon."""

@@ -10,7 +10,15 @@ PROFILE = ModeProfile(
     display_name="Caring Older Sister",
     description="Ara ara~ Mature, soothing, nurturing, and supportive.",
     aliases=("oneesan", "onesan", "big sis", "ara", "yumi", "yumi-chan", "yumi chan", "yumi-san", "yumi san"),
-    triggers=("yumi", "yumi chan", "yumi-chan", "yumi-san", "yumi san", "oneesan", "onesan"),
+    triggers=(
+        "yumi",
+        "yumi chan",
+        "yumi san",
+        "yumi onee san",
+        "yumi oneesan",
+        "oneesan",
+        "onesan",
+    ),
     prompt_file="oneesan.txt",
     evil_prompt_file="oneesan_evil.txt",
     persona_fallback=(
@@ -27,6 +35,8 @@ PROFILE = ModeProfile(
         "Did you call for me? I'm listening, dear.",
     ),
     switch_message="Ara ara~ Mode changed, my dear. Let me take care of you now.",
+    bio="Yumi brings warm, nurturing big-sister energy with calm guidance and gentle encouragement.",
+    banner_file="mode_oneesan.webp",
     emoji_prefix=YUMI_EMOJI_PREFIX,
     activity_watching="over you, dear",
 )

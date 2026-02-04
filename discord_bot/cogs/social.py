@@ -42,6 +42,7 @@ from utils.db_handler import (
 )
 from utils.guild_ai import generate_guild_gemini_text, GuildConfigError
 from utils.logger import get_logger
+from utils.server_profile import set_custom_profile, set_mode_profile, set_member_nickname
 from modes import get_mode_profile, get_all_modes, resolve_mode_key
 
 logger = get_logger(__name__)
@@ -106,9 +107,108 @@ class Social(commands.Cog):
 
         return ""
 
-    async def _set_presence_for_mode(self, mode_key: str) -> None:
-        activity = discord.Game(name="Clanking with humans")
-        await self.bot.change_presence(activity=activity)
+    def _set_mode_bio(self, guild_id: int, mode_key: str, custom_persona: dict | None = None) -> None:
+        if custom_persona:
+            bio = (custom_persona.get("bio") or f"Custom persona: {custom_persona.get('name', 'Unknown')}.").strip()
+        else:
+            bio = get_mode_profile(mode_key).bio
+        bios = getattr(self.bot, "mode_bio_by_guild", None)
+        if bios is None:
+            bios = {}
+            setattr(self.bot, "mode_bio_by_guild", bios)
+        bios[guild_id] = bio
+
+    def _get_mode_nickname(self, mode_key: str, custom_persona: dict | None = None) -> str:
+        if custom_persona and custom_persona.get("name"):
+            return str(custom_persona.get("name")).strip()
+        if mode_key == "mode_oneesan":
+            return "Yumi"
+        if mode_key == "mode_default":
+            return "Clanker"
+        return "Femmy"
+
+    async def _apply_mode_profile_updates(
+        self,
+        guild_id: int,
+        mode_key: str,
+        custom_persona: dict | None = None,
+    ) -> None:
+        self._set_mode_bio(guild_id, mode_key, custom_persona=custom_persona)
+
+        try:
+            if custom_persona:
+                custom_bio = (custom_persona.get("bio") or f"Custom persona: {custom_persona.get('name', 'custom')}.").strip()
+                banner_path = custom_persona.get("banner_path")
+                if banner_path:
+                    banner_file = Path(banner_path)
+                    if banner_file.exists():
+                        banner_bytes = banner_file.read_bytes()
+                        success, reason = await set_custom_profile(
+                            self.bot,
+                            guild_id,
+                            banner_bytes=banner_bytes,
+                            bio=custom_bio,
+                        )
+                    else:
+                        banner_path = None
+                if not banner_path:
+                    default_profile = get_mode_profile("mode_default")
+                    success, reason = await set_mode_profile(
+                        self.bot,
+                        guild_id,
+                        "mode_default",
+                        bio=custom_bio,
+                        banner_file=default_profile.banner_file,
+                    )
+            else:
+                profile = get_mode_profile(mode_key)
+                success, reason = await set_mode_profile(
+                    self.bot,
+                    guild_id,
+                    mode_key,
+                    bio=profile.bio,
+                    banner_file=profile.banner_file,
+                )
+            if not success:
+                logger.warning("Failed to update guild profile for %s: %s", mode_key, reason)
+        except Exception as exc:
+            logger.warning("Failed to update guild profile for %s: %s", mode_key, exc)
+
+        try:
+            nickname = self._get_mode_nickname(mode_key, custom_persona=custom_persona)
+            nickname = nickname[:32].strip() if nickname else None
+            if nickname == "":
+                nickname = None
+            success, reason = await set_member_nickname(self.bot, guild_id, nickname)
+            if not success and reason != "forbidden":
+                logger.warning("Failed to update guild nickname for %s: %s", mode_key, reason)
+        except Exception as exc:
+            logger.warning("Failed to update guild nickname for %s: %s", mode_key, exc)
+
+        try:
+            if custom_persona and custom_persona.get("avatar_path"):
+                avatar_path = custom_persona.get("avatar_path")
+                avatar_bytes = Path(avatar_path).read_bytes()
+                from utils.server_avatar import set_custom_avatar
+                success, reason = await set_custom_avatar(self.bot, guild_id, avatar_bytes)
+                if not success:
+                    logger.warning("Failed to update server avatar for %s: %s", mode_key, reason)
+            else:
+                await set_guild_avatar_path(guild_id, None)
+                from utils.server_avatar import set_mode_avatar
+                evil_mode_enabled = await get_evil_mode(guild_id)
+                target_avatar_mode = mode_key if not custom_persona else "mode_default"
+                success, reason = await set_mode_avatar(
+                    self.bot,
+                    guild_id,
+                    target_avatar_mode,
+                    evil_mode=evil_mode_enabled,
+                    force=True,
+                )
+                if not success and reason != "custom":
+                    logger.warning("Failed to update server avatar for %s: %s", mode_key, reason)
+        except Exception as exc:
+            logger.warning("Failed to update server avatar for %s: %s", mode_key, exc)
 
     def _is_mention_only(self, message: discord.Message) -> bool:
         """Return True when the message only mentions the bot."""
@@ -285,32 +385,7 @@ class Social(commands.Cog):
             mode_icon = await self._get_mode_icon(target_mode)
             prefix = f"{mode_icon} " if mode_icon else ""
             await ctx.send(f"{prefix}{profile.switch_message}")
-        try:
-            await self._set_presence_for_mode(target_mode)
-        except Exception as exc:
-            logger.warning("Failed to update presence for %s: %s", target_mode, exc)
-        try:
-            if custom_persona:
-                avatar_path = custom_persona.get("avatar_path")
-                if avatar_path:
-                    from utils.server_avatar import set_custom_avatar
-                    avatar_bytes = Path(avatar_path).read_bytes()
-                    success, reason = await set_custom_avatar(self.bot, ctx.guild.id, avatar_bytes)
-                    if not success:
-                        logger.warning("Failed to update server avatar for %s: %s", target_mode, reason)
-            else:
-                from utils.server_avatar import set_mode_avatar
-                evil_mode_enabled = await get_evil_mode(ctx.guild.id)
-                success, reason = await set_mode_avatar(
-                    self.bot,
-                    ctx.guild.id,
-                    target_mode,
-                    evil_mode=evil_mode_enabled,
-                )
-                if not success and reason != "custom":
-                    logger.warning("Failed to update server avatar for %s: %s", target_mode, reason)
-        except Exception as exc:
-            logger.warning("Failed to update server avatar for %s: %s", target_mode, exc)
+        await self._apply_mode_profile_updates(ctx.guild.id, target_mode, custom_persona)
 
     @app_commands.command(name="mode", description="Switch the bot's personality mode.")
     @app_commands.checks.has_permissions(manage_guild=True)
@@ -377,32 +452,7 @@ class Social(commands.Cog):
             mode_icon = await self._get_mode_icon(target_mode)
             prefix = f"{mode_icon} " if mode_icon else ""
             await interaction.response.send_message(f"{prefix}{profile.switch_message}")
-        try:
-            await self._set_presence_for_mode(target_mode)
-        except Exception as exc:
-            logger.warning("Failed to update presence for %s: %s", target_mode, exc)
-        try:
-            if custom_persona:
-                avatar_path = custom_persona.get("avatar_path")
-                if avatar_path:
-                    from utils.server_avatar import set_custom_avatar
-                    avatar_bytes = Path(avatar_path).read_bytes()
-                    success, reason = await set_custom_avatar(self.bot, interaction.guild.id, avatar_bytes)
-                    if not success:
-                        logger.warning("Failed to update server avatar for %s: %s", target_mode, reason)
-            else:
-                from utils.server_avatar import set_mode_avatar
-                evil_mode_enabled = await get_evil_mode(interaction.guild.id)
-                success, reason = await set_mode_avatar(
-                    self.bot,
-                    interaction.guild.id,
-                    target_mode,
-                    evil_mode=evil_mode_enabled,
-                )
-                if not success and reason != "custom":
-                    logger.warning("Failed to update server avatar for %s: %s", target_mode, reason)
-        except Exception as exc:
-            logger.warning("Failed to update server avatar for %s: %s", target_mode, exc)
+        await self._apply_mode_profile_updates(interaction.guild.id, target_mode, custom_persona)
 
     @switch_mode_slash.autocomplete("mode")
     async def mode_autocomplete(
@@ -577,7 +627,7 @@ class Social(commands.Cog):
 
         await ctx.send(
             f"{prefix}Currently in **{profile.display_name}** mode!{evil_text}\n"
-            f"*{profile.description}*"
+            f"*{profile.bio}*"
         )
 
     @app_commands.command(name="currentmode", description="Show the current personality mode.")
@@ -607,7 +657,7 @@ class Social(commands.Cog):
 
         await interaction.response.send_message(
             f"{prefix}Currently in **{profile.display_name}** mode!{evil_text}\n"
-            f"*{profile.description}*"
+            f"*{profile.bio}*"
         )
 
     @commands.Cog.listener()
@@ -649,6 +699,7 @@ class Social(commands.Cog):
                 )
 
                 fallback_messages = {
+                    "mode_default": f"Welcome to the server, {member.mention}.",
                     "mode_femboy": f"Welcome to the server, {member.mention}! I hope we can be great friends~",
                     "mode_tsundere": f"Oh, {member.mention} joined... I guess you can stay. ...Welcome.",
                     "mode_oneesan": f"Ara ara~ Welcome, {member.mention}! Make yourself at home, my dear~",
@@ -664,7 +715,7 @@ class Social(commands.Cog):
                     welcome_text = ""
 
                 if not welcome_text:
-                    welcome_text = fallback_messages.get(mode, fallback_messages["mode_femboy"])
+                    welcome_text = fallback_messages.get(mode, fallback_messages["mode_default"])
                 else:
                     if member.mention not in welcome_text:
                         welcome_text = f"{welcome_text} {member.mention}"

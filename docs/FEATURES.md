@@ -91,11 +91,12 @@ This document is the canonical, detailed feature inventory for this repository. 
   - Prompt file and evil prompt file
   - Mention reactions
   - Switch message
+  - Bio text and banner file
   - Optional emoji prefix and activity string
 - Mode switching with permission checks; optional global lock via `BOT_MODE`.
 - Server-specific bot avatars are applied per guild; mode changes can auto-update the server avatar.
 - On joining a new guild, the bot sets its server avatar to the guild icon if no custom avatar override exists.
-- Admins can reset or revert to mode-based avatars via `/avatar` commands (rate-limited to 2 updates per hour).
+- Admins can reset avatars via `/avatar reset` (rate-limited to 2 updates per 5 minutes). Mode changes auto-apply mode avatars.
 - Custom personas can be created per guild with their own bio, prompts, and avatar/banner URLs, then activated with `!mode` or `/mode`.
 - `!modes` and `/modes` include custom personas for the current guild.
 - Deleting an active custom persona reverts the guild back to `mode_default` and clears the server avatar override.
@@ -201,7 +202,7 @@ This document is the canonical, detailed feature inventory for this repository. 
   - Set affection points by mode
   - Slash command sync and clearing
   - Gender role mapping
-- Server avatar management via `/avatar mode` and `/avatar reset` (rate-limited to 2 updates per hour).
+- Server avatar management via `/avatar reset` (rate-limited to 2 updates per 5 minutes). Mode changes auto-apply mode avatars.
 - Custom persona management via `/create persona` and `/persona` subcommands (create, list, preview, edit, delete).
 
 ### Emoji systems (discord_bot/utils/app_emojis.py, discord_bot/utils/emoji_manager.py)
@@ -261,7 +262,7 @@ This document is the canonical, detailed feature inventory for this repository. 
 
 ### Slash commands
 - Admin: `/admin reset`, `/admin view`, `/admin setfact`, `/admin delfact`, `/admin affection`, `/admin model`, `/admin clearglobal`, `/admin clearguild`
-- Avatar: `/avatar mode`, `/avatar reset`
+- Avatar: `/avatar reset`
 - Persona: `/create persona`, `/persona create`, `/persona list`, `/persona preview`, `/persona edit`, `/persona delete`
 - Affection: `/affection`, `/mood`, `/headpat`, `/hug`
 - Automod: `/automod add`, `/automod remove`, `/automod list`, `/automod spam`
@@ -283,7 +284,7 @@ This document is the canonical, detailed feature inventory for this repository. 
 - Guild-level configuration: upload `discord_bot/guild.env.example` via `/config env upload`; `/config env example` replies with the text template (ephemeral).
 - Guild env keys include `GEMINI_PROFILE_KEY` for `/analyze` profile summaries.
 - Guild env supports `GEMINI_KEY_TYPE` to control Gemini key rotation (`free` rotates every request, `paid` sticks unless a key fails).
-- Guild env supports optional `BRAVE_API_KEY`, `REPLICATE_API_KEY`, `TENOR_API_KEY`, `TENOR_CLIENT_KEY`, `IMAGE_PROVIDER`, `IMAGE_MODEL`, and `CUSTOM_ENDPOINT_*` settings.
+- Guild env supports optional `BRAVE_API_KEY`, `REPLICATE_API_KEY`, `IMAGE_PROVIDER`, `IMAGE_MODEL`, and `CUSTOM_ENDPOINT_*` settings.
 - Bot env supports Postgres RAG settings (`ACTIVATE_LOCAL_RAG`, `POSTGRES_*`, `RAG_*`), Tenor GIF keys, and dev flags (`GIF_ANALYSIS_ENABLED`).
 - Per-guild API keys are stored encrypted using `ENCRYPTION_KEY`.
 

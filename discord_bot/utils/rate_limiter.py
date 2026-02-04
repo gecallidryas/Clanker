@@ -172,6 +172,11 @@ class RateLimiter:
 # ============================================
 
 RATE_LIMIT_MESSAGES = {
+    "mode_default": [
+        "I'm rate-limited for {seconds}s. Try again shortly.",
+        "Please wait {seconds}s before retrying.",
+        "Hold on {seconds}s and try again."
+    ],
     "mode_femboy": [
         "S-sorry, Nii-chan! I need a little break~ Try again in {seconds}s! ♡",
         "Ehehe, I'm a bit tired... Wait {seconds}s for me? ✨",
@@ -203,7 +208,7 @@ def get_rate_limit_message(mode: str, retry_after: float) -> str:
     """
     import random
     
-    messages = RATE_LIMIT_MESSAGES.get(mode, RATE_LIMIT_MESSAGES["mode_femboy"])
+    messages = RATE_LIMIT_MESSAGES.get(mode, RATE_LIMIT_MESSAGES["mode_default"])
     message = random.choice(messages)
     
     return message.format(seconds=int(retry_after) + 1)

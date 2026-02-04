@@ -753,16 +753,23 @@ class Persona(commands.Cog):
             await set_server_mode(interaction.guild.id, "mode_default")
             await set_evil_mode(interaction.guild.id, False)
             await set_guild_avatar_path(interaction.guild.id, None)
-            try:
-                await set_mode_avatar(
-                    self.bot,
-                    interaction.guild.id,
-                    "mode_default",
-                    evil_mode=False,
-                    force=True,
-                )
-            except Exception as exc:
-                logger.warning("Failed to reset avatar on persona delete: %s", exc)
+            social = self.bot.get_cog("Social")
+            if social and hasattr(social, "_apply_mode_profile_updates"):
+                try:
+                    await social._apply_mode_profile_updates(interaction.guild.id, "mode_default", None)
+                except Exception as exc:
+                    logger.warning("Failed to reset mode profile on persona delete: %s", exc)
+            else:
+                try:
+                    await set_mode_avatar(
+                        self.bot,
+                        interaction.guild.id,
+                        "mode_default",
+                        evil_mode=False,
+                        force=True,
+                    )
+                except Exception as exc:
+                    logger.warning("Failed to reset avatar on persona delete: %s", exc)
 
         deleted = await delete_custom_persona(interaction.guild.id, mode_key)
         if not deleted:

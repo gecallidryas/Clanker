@@ -149,6 +149,7 @@ async def execute_admin_action(
     params: Dict[str, Any],
     guild: discord.Guild,
     executor: discord.Member,
+    bot: Optional[discord.Client] = None,
 ) -> Dict[str, Any]:
     if not action:
         return {"success": False, "error": "Missing action."}
@@ -165,6 +166,8 @@ async def execute_admin_action(
     if not handler:
         return {"success": False, "error": "Action handler missing."}
 
+    if handler_name == "execute_config_mode":
+        return await handler(params or {}, guild, executor, bot=bot)
     return await handler(params or {}, guild, executor)
 
 
@@ -386,12 +389,16 @@ async def execute_config_mode(
     params: Dict[str, Any],
     guild: discord.Guild,
     executor: discord.Member,
+    bot: Optional[discord.Client] = None,
 ) -> Dict[str, Any]:
     mode = (params.get("mode") or params.get("mode_name") or "").strip().lower()
     mode_map = {
+        "default": "mode_default",
+        "clanker": "mode_default",
         "femboy": "mode_femboy",
         "tsundere": "mode_tsundere",
         "oneesan": "mode_oneesan",
+        "mode_default": "mode_default",
         "mode_femboy": "mode_femboy",
         "mode_tsundere": "mode_tsundere",
         "mode_oneesan": "mode_oneesan",
@@ -407,6 +414,13 @@ async def execute_config_mode(
         }
 
     await set_server_mode(guild.id, resolved)
+    if bot:
+        social = bot.get_cog("Social")
+        if social and hasattr(social, "_apply_mode_profile_updates"):
+            try:
+                await social._apply_mode_profile_updates(guild.id, resolved, None)
+            except Exception:
+                pass
     return {"success": True, "message": f"Mode switched to {resolved}."}
 
 

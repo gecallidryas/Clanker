@@ -23,8 +23,10 @@ PROFILE = ModeProfile(
         "I'm here. What do you need?",
     ),
     switch_message="Mode switched. Clanker is online.",
+    bio="Clanker is a precise, no-nonsense assistant focused on clear answers and calm guidance.",
+    banner_file="mode_default.webp",
     emoji_prefix=None,
-    activity_watching="the channel",
+    activity_watching="the channel for requests",
 )
 
 register_mode(PROFILE)

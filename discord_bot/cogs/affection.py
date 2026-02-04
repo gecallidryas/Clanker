@@ -118,6 +118,12 @@ MOOD_DISPLAY = {
 }
 
 MOOD_MESSAGES = {
+    "mode_default": {
+        "happy": "All systems nominal.",
+        "neutral": "Operational and ready.",
+        "sad": "Systems are stable, though subdued.",
+        "neglected": "No recent interactions detected."
+    },
     "mode_femboy": {
         "happy": "I'm super happy, Nii-chan! Everything is wonderful~ ♡",
         "neutral": "I'm doing okay! How can I help you today?",
@@ -344,7 +350,7 @@ class Affection(commands.Cog):
         await record_interaction(guild_id, user_id, interaction_type)
 
         responses = HEADPAT_RESPONSES if interaction_type == "pat" else HUG_RESPONSES
-        response_list = responses.get(mode, responses.get("mode_femboy", []))
+        response_list = responses.get(mode, responses.get("mode_default", []))
         if not response_list:
             return "..."
         return random.choice(response_list)
@@ -394,7 +400,7 @@ class Affection(commands.Cog):
         value = mood_data["mood_value"]
         display = MOOD_DISPLAY.get(mood, MOOD_DISPLAY["neutral"])
         
-        message = MOOD_MESSAGES.get(mode, MOOD_MESSAGES["mode_femboy"]).get(mood, "I'm okay~")
+        message = MOOD_MESSAGES.get(mode, MOOD_MESSAGES["mode_default"]).get(mood, "I'm okay~")
         
         # Build mood bar
         filled = int(value // 10)
@@ -432,7 +438,7 @@ class Affection(commands.Cog):
         value = mood_data["mood_value"]
         display = MOOD_DISPLAY.get(mood, MOOD_DISPLAY["neutral"])
 
-        message = MOOD_MESSAGES.get(mode, MOOD_MESSAGES["mode_femboy"]).get(mood, "I'm okay~")
+        message = MOOD_MESSAGES.get(mode, MOOD_MESSAGES["mode_default"]).get(mood, "I'm okay~")
 
         filled = int(value // 10)
         bar = "💖" * filled + "🖤" * (10 - filled)

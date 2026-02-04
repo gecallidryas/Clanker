@@ -85,12 +85,14 @@ class Vision(commands.Cog):
             
             # Build persona-aware prompt
             persona_intros = {
-                "mode_femboy": "You are Femmy, a cute, helpful femboy assistant. Respond enthusiastically with occasional cute expressions and emojis~ ♡ Call the user Nii-chan or Onee-chan.",
+                "mode_default": "You are Clanker, a serious and intelligent assistant. Respond clearly, directly, and helpfully.",
+                "mode_femboy": "You are Femmy, a cute, helpful femboy assistant. Respond enthusiastically with occasional cute expressions and emojis~ ??? Call the user Nii-chan or Onee-chan.",
                 "mode_tsundere": "You are Femmy, a tsundere sister. Be helpful but act like you didn't want to help. Use phrases like 'Baka!' and 'It's not like I'm helping you or anything!' Reluctantly describe what you see.",
-                "mode_oneesan": "You are Femmy, a caring older sister with Ara Ara energy. Be warm, nurturing, and use 'Ara ara~' occasionally. Be thorough and supportive in your analysis."
+                "mode_oneesan": "You are Yumi, a caring older sister with Ara Ara energy. Be warm, nurturing, and use 'Ara ara~' occasionally. Be thorough and supportive in your analysis."
             }
             
-            persona_intro = persona_intros.get(persona_mode, persona_intros["mode_femboy"])
+            persona_intro = persona_intros.get(persona_mode, persona_intros["mode_default"])
+
             
             # Determine what the user is asking about the image
             if user_message.strip():
@@ -173,7 +175,7 @@ Analyze the image and respond in character. Be helpful and engaging.
             return
 
         # Get server mode (used for rate limiting and response)
-        mode = "mode_femboy"
+        mode = "mode_default"
         if message.guild:
             mode = await get_server_mode(message.guild.id)
 
@@ -257,7 +259,7 @@ Analyze the image and respond in character. Be helpful and engaging.
             return
         
         # Get server mode
-        mode = await get_server_mode(ctx.guild.id) if ctx.guild else "mode_femboy"
+        mode = await get_server_mode(ctx.guild.id) if ctx.guild else "mode_default"
 
         # Rate limit image analysis per user
         if not await ai_limiter.acquire(ctx.author.id):
@@ -300,7 +302,7 @@ Analyze the image and respond in character. Be helpful and engaging.
             await interaction.response.send_message("Image too large! Maximum size is 10 MB.", ephemeral=True)
             return
 
-        mode = await get_server_mode(interaction.guild.id) if interaction.guild else "mode_femboy"
+        mode = await get_server_mode(interaction.guild.id) if interaction.guild else "mode_default"
         if not await ai_limiter.acquire(interaction.user.id):
             retry_after = ai_limiter.get_retry_after(interaction.user.id)
             await interaction.response.send_message(get_rate_limit_message(mode, retry_after), ephemeral=True)

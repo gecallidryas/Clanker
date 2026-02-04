@@ -71,7 +71,7 @@ from utils.guild_ai import (
     GuildConfigError,
 )
 from utils.admin_actions import execute_admin_action
-from modes import get_mode_profile
+from modes import get_mode_profile, get_all_modes
 from utils.rate_limiter import ai_limiter, get_rate_limit_message
 from utils.logger import get_logger
 from utils.tool_registry import (
@@ -423,7 +423,7 @@ async def handle_admin_actions(
     action = data.get("action")
     params = data.get("params") or {}
 
-    result = await execute_admin_action(action, params, message.guild, message.author)
+    result = await execute_admin_action(action, params, message.guild, message.author, bot=brain.bot)
 
     if result.get("needs_confirmation"):
         brain._store_pending_admin_action(message.channel.id, message.author.id, action, params, result)
@@ -692,7 +692,7 @@ class AIBrain(commands.Cog):
         if "channel" in missing and not params.get("channel_id"):
             return await message.reply("Please provide the channel to use.", mention_author=False)
 
-        follow_up = await execute_admin_action(action, params, message.guild, message.author)
+        follow_up = await execute_admin_action(action, params, message.guild, message.author, bot=self.bot)
         if follow_up.get("needs_confirmation"):
             self._store_pending_admin_action(
                 message.channel.id,
@@ -1009,12 +1009,33 @@ class AIBrain(commands.Cog):
     def _has_trigger_word(self, content: str, mode: str) -> bool:
         """Return True if the content contains a trigger word for the mode."""
         profile = get_mode_profile(mode)
-        triggers = profile.triggers
+        return self._has_any_trigger(content, profile.triggers)
+
+    def _normalize_trigger_text(self, text: str) -> str:
+        normalized = (text or "").lower()
+        normalized = normalized.replace("-", " ").replace("_", " ")
+        normalized = re.sub(r"\s+", " ", normalized).strip()
+        return normalized
+
+    def _has_any_trigger(self, content: str, triggers: tuple[str, ...]) -> bool:
+        normalized = self._normalize_trigger_text(content)
+        if not normalized:
+            return False
         for trigger in triggers:
-            pattern = r"\b" + re.escape(trigger) + r"\b"
-            if re.search(pattern, content, flags=re.IGNORECASE):
+            token = self._normalize_trigger_text(trigger)
+            if not token:
+                continue
+            pattern = r"\b" + re.escape(token) + r"\b"
+            if re.search(pattern, normalized, flags=re.IGNORECASE):
                 return True
         return False
+
+    def _get_triggered_modes(self, content: str) -> set[str]:
+        triggered: set[str] = set()
+        for profile in get_all_modes():
+            if self._has_any_trigger(content, profile.triggers):
+                triggered.add(profile.key)
+        return triggered
 
     async def _get_wellbeing_prompt(
         self,
@@ -1496,15 +1517,14 @@ Respond naturally in character. Keep responses concise.
             ]
 
         mentioned = self.bot.user in message.mentions
-        content_lower = message.content.lower()
         mode = await get_server_mode(message.guild.id)
 
-        # Check if we're in an active conversation with this user
-        is_active = self._is_active_conversation(message.channel.id, message.author.id)
-        has_trigger = self._has_trigger_word(content_lower, mode)
+        triggered_modes = self._get_triggered_modes(message.content)
+        has_current_trigger = mode in triggered_modes
+        has_other_trigger = bool(triggered_modes - {mode})
 
         # Determine if we should respond
-        should_respond = mentioned or has_trigger or is_active
+        should_respond = (mentioned or has_current_trigger) and not (has_other_trigger and not has_current_trigger)
 
         if not should_respond:
             _, reply_to_username = self._resolve_reply_to(message)

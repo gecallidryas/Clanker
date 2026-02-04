@@ -270,7 +270,7 @@ Also hard-block affection system and evil mode while in `mode_default` (Clanker)
 - Mode changes auto-update avatars.
 - Default mode uses the application avatar (no mode_default file).
 - Admins can reset/reapply mode-based avatars (max 500 KB enforced by server avatar limits).
-- Do not update server avatar more than 2 times per hour.
+- Do not update server avatar more than 2 times per 5 minutes.
 
 ### New Utility File
 
@@ -279,7 +279,7 @@ Also hard-block affection system and evil mode while in `mode_default` (Clanker)
 Same as previous, plus:
 - Reject files larger than 500 KB.
 - Support per-guild custom avatar override path.
-- Track avatar update timestamps and block if 2 updates already happened in the last hour.
+- Track avatar update timestamps and block if 2 updates already happened in the last 5 minutes.
 
 ### Avatar Storage and Persistence
 
@@ -328,12 +328,12 @@ avatar_group = app_commands.Group(name="avatar", description="Manage bot server 
 
 @avatar_group.command(name="mode")
 async def avatar_mode(self, interaction):
-    # Enforce rate limit: max 2 updates per hour
+    # Enforce rate limit: max 2 updates per 5 minutes
     # Set avatar based on current mode and clear custom override
 
 @avatar_group.command(name="reset")
 async def avatar_reset(self, interaction):
-    # Enforce rate limit: max 2 updates per hour
+    # Enforce rate limit: max 2 updates per 5 minutes
     # Clear custom override and reset to application avatar
 ```
 
@@ -346,7 +346,7 @@ from utils.server_avatar import set_mode_avatar
 await set_mode_avatar(self.bot, ctx.guild.id, new_mode)
 ```
 
-If a custom avatar exists for the guild, do NOT override it unless the admin calls `/avatar mode` or `/avatar reset`.
+Mode changes should automatically apply the current mode avatar and clear any custom override.
 
 ### Remove Webhook System Completely
 
@@ -373,11 +373,11 @@ If a custom avatar exists for the guild, do NOT override it unless the admin cal
 3. Help output hides admin commands for non-admins.
 4. Hug/pat rate limits: 1/hour and 3/day for non-default modes (UTC).
 5. Affection changes: default=0, femboy/tsundere=+1, oneesan pat=-1.
-6. Server avatar updates blocked after 2 updates/hour.
+6. Server avatar updates blocked after 2 updates/5 minutes.
 7. Gemini key rotation still works with new config.
 
 ### Manual Verification
 1. Run `!mode femboy` and verify avatar changes.
 2. Test `!pat` and `!hug` in each mode and verify response tone.
 3. Spam `!hug` to verify rate limits.
-4. Use `/avatar mode` and `/avatar reset` to verify the avatar updates and rate limits.
+4. Use `/avatar reset` to verify the avatar updates and rate limits.
