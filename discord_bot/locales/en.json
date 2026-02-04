@@ -1,0 +1,13 @@
+{
+  "tools.status.title": "Tool Status",
+  "tools.status.enabled": "Enabled Tools",
+  "tools.status.disabled": "Disabled Tools",
+  "tools.status.flags": "Feature Flags",
+  "teach.memory.personal_saved": "Stored personal memory for {user}.",
+  "teach.memory.server_saved": "Stored server memory.",
+  "teach.attribute.saved": "Persona attribute stored.",
+  "teach.sampledialogue.saved": "Sample dialogue stored.",
+  "teach.document.saved": "Document stored (id {doc_id}) with {chunks} chunks.",
+  "personal.privacy.on": "Personal memory opt-out enabled.",
+  "personal.privacy.off": "Personal memory opt-out disabled."
+}

@@ -82,6 +82,15 @@ ENV_TO_DB = {
     "GEMINI_MODEL": "gemini_model",
     "OPENROUTER_MODEL": "openrouter_model",
     "OPENROUTER_FALLBACK_MODELS": "openrouter_fallback_models",
+    "BRAVE_API_KEY": "brave_api_key",
+    "REPLICATE_API_KEY": "replicate_api_key",
+    "IMAGE_PROVIDER": "image_provider",
+    "IMAGE_MODEL": "image_model",
+    "CUSTOM_ENDPOINT_URL": "custom_endpoint_url",
+    "CUSTOM_ENDPOINT_API_KEY": "custom_endpoint_api_key",
+    "CUSTOM_MODEL_NAME": "custom_model_name",
+    "CUSTOM_MODEL_CAPABILITIES": "custom_model_capabilities",
+    "CUSTOM_ENDPOINT_ENABLED": "custom_endpoint_enabled",
 }
 
 ALLOWED_ENV_KEYS = set(ENV_TO_DB.keys())
@@ -135,6 +144,11 @@ class Config(commands.Cog):
     model_group = app_commands.Group(name="model", description="View or set models", parent=config)
     env_group = app_commands.Group(name="env", description="Upload or retrieve guild env template", parent=config)
     toggle_group = app_commands.Group(name="toggle", description="Toggle guild features", parent=config)
+    custom_endpoint_group = app_commands.Group(
+        name="custom_endpoint",
+        description="Configure custom OpenAI-compatible endpoint",
+        parent=config,
+    )
     
     # Standalone top-level groups
     staff_group = app_commands.Group(name="staff", description="Manage bot staff roles")
@@ -708,6 +722,45 @@ class Config(commands.Cog):
                 f"OPENROUTER_FALLBACK_MODELS={updates['openrouter_fallback_models'] or 'CLEARED'}"
             )
 
+        if "IMAGE_PROVIDER" in parsed:
+            provider = (parsed["IMAGE_PROVIDER"] or "").strip().lower()
+            updates["image_provider"] = provider or None
+            summary.append(f"IMAGE_PROVIDER={updates['image_provider'] or 'CLEARED'}")
+
+        if "IMAGE_MODEL" in parsed:
+            model = (parsed["IMAGE_MODEL"] or "").strip()
+            updates["image_model"] = model or None
+            summary.append(f"IMAGE_MODEL={updates['image_model'] or 'CLEARED'}")
+
+        if "CUSTOM_ENDPOINT_URL" in parsed:
+            url = (parsed["CUSTOM_ENDPOINT_URL"] or "").strip()
+            updates["custom_endpoint_url"] = url or None
+            summary.append(f"CUSTOM_ENDPOINT_URL={updates['custom_endpoint_url'] or 'CLEARED'}")
+
+        if "CUSTOM_MODEL_NAME" in parsed:
+            model = (parsed["CUSTOM_MODEL_NAME"] or "").strip()
+            updates["custom_model_name"] = model or None
+            summary.append(f"CUSTOM_MODEL_NAME={updates['custom_model_name'] or 'CLEARED'}")
+
+        if "CUSTOM_MODEL_CAPABILITIES" in parsed:
+            caps = (parsed["CUSTOM_MODEL_CAPABILITIES"] or "").strip()
+            updates["custom_model_capabilities"] = caps or None
+            summary.append(f"CUSTOM_MODEL_CAPABILITIES={updates['custom_model_capabilities'] or 'CLEARED'}")
+
+        if "CUSTOM_ENDPOINT_ENABLED" in parsed:
+            enabled_raw = (parsed["CUSTOM_ENDPOINT_ENABLED"] or "").strip().lower()
+            if not enabled_raw:
+                updates["custom_endpoint_enabled"] = None
+            elif enabled_raw in {"1", "true", "yes", "on", "enable"}:
+                updates["custom_endpoint_enabled"] = 1
+            elif enabled_raw in {"0", "false", "no", "off", "disable"}:
+                updates["custom_endpoint_enabled"] = 0
+            else:
+                warnings.append("CUSTOM_ENDPOINT_ENABLED should be true/false.")
+            summary.append(
+                f"CUSTOM_ENDPOINT_ENABLED={updates.get('custom_endpoint_enabled', 'CLEARED')}"
+            )
+
         # API keys
         for key, value in parsed.items():
             if key not in KEY_ENV_KEYS:
@@ -836,6 +889,92 @@ class Config(commands.Cog):
         else:
             await interaction.response.send_message("Usage: `/config toggle welcome on|off`", ephemeral=True)
 
+    async def _toggle_feature_flag(
+        self,
+        interaction: discord.Interaction,
+        flag_name: str,
+        label: str,
+        state: Optional[str],
+    ) -> None:
+        if not await self._require_guild(interaction):
+            return
+        if not state:
+            config = await get_guild_config(interaction.guild.id)
+            enabled = bool(config.get(flag_name) or 0)
+            status = "ENABLED" if enabled else "DISABLED"
+            await interaction.response.send_message(
+                f"{label} is currently **{status}**.",
+                ephemeral=True,
+            )
+            return
+        if not await self._require_auth(interaction):
+            return
+        state_value = state.lower().strip()
+        if state_value in {"on", "enable", "true", "yes"}:
+            await update_guild_config(interaction.guild.id, {flag_name: 1})
+            await add_guild_config_audit(interaction.guild.id, interaction.user.id, f"{flag_name}_on")
+            await interaction.response.send_message(f"{label} enabled.", ephemeral=True)
+        elif state_value in {"off", "disable", "false", "no"}:
+            await update_guild_config(interaction.guild.id, {flag_name: 0})
+            await add_guild_config_audit(interaction.guild.id, interaction.user.id, f"{flag_name}_off")
+            await interaction.response.send_message(f"{label} disabled.", ephemeral=True)
+        else:
+            await interaction.response.send_message("Usage: `on` or `off`.", ephemeral=True)
+
+    @toggle_group.command(name="web_search", description="Enable or disable web search tools.")
+    @app_commands.checks.has_permissions(administrator=True)
+    @app_commands.describe(state="on/off (leave empty to view)")
+    async def toggle_web_search(self, interaction: discord.Interaction, state: Optional[str] = None):
+        await self._toggle_feature_flag(interaction, "web_search_enabled", "Web search", state)
+
+    @toggle_group.command(name="image_gen", description="Enable or disable image generation.")
+    @app_commands.checks.has_permissions(administrator=True)
+    @app_commands.describe(state="on/off (leave empty to view)")
+    async def toggle_image_gen(self, interaction: discord.Interaction, state: Optional[str] = None):
+        await self._toggle_feature_flag(interaction, "image_gen_enabled", "Image generation", state)
+
+    @toggle_group.command(name="stickers", description="Enable or disable sticker usage.")
+    @app_commands.checks.has_permissions(administrator=True)
+    @app_commands.describe(state="on/off (leave empty to view)")
+    async def toggle_stickers(self, interaction: discord.Interaction, state: Optional[str] = None):
+        await self._toggle_feature_flag(interaction, "sticker_usage_enabled", "Sticker usage", state)
+
+    @toggle_group.command(name="emojis", description="Enable or disable emoji usage.")
+    @app_commands.checks.has_permissions(administrator=True)
+    @app_commands.describe(state="on/off (leave empty to view)")
+    async def toggle_emojis(self, interaction: discord.Interaction, state: Optional[str] = None):
+        await self._toggle_feature_flag(interaction, "emoji_usage_enabled", "Emoji usage", state)
+
+    @toggle_group.command(name="pin_message", description="Enable or disable AI pinning.")
+    @app_commands.checks.has_permissions(administrator=True)
+    @app_commands.describe(state="on/off (leave empty to view)")
+    async def toggle_pin_message(self, interaction: discord.Interaction, state: Optional[str] = None):
+        await self._toggle_feature_flag(interaction, "pin_message_enabled", "Pin message", state)
+
+    @toggle_group.command(name="self_teaching", description="Enable or disable self-teaching.")
+    @app_commands.checks.has_permissions(administrator=True)
+    @app_commands.describe(state="on/off (leave empty to view)")
+    async def toggle_self_teaching(self, interaction: discord.Interaction, state: Optional[str] = None):
+        await self._toggle_feature_flag(interaction, "self_teaching_enabled", "Self teaching", state)
+
+    @toggle_group.command(name="youtube", description="Enable or disable YouTube processing.")
+    @app_commands.checks.has_permissions(administrator=True)
+    @app_commands.describe(state="on/off (leave empty to view)")
+    async def toggle_youtube(self, interaction: discord.Interaction, state: Optional[str] = None):
+        await self._toggle_feature_flag(interaction, "youtube_enabled", "YouTube processing", state)
+
+    @toggle_group.command(name="profile_peek", description="Enable or disable profile picture analysis.")
+    @app_commands.checks.has_permissions(administrator=True)
+    @app_commands.describe(state="on/off (leave empty to view)")
+    async def toggle_profile_peek(self, interaction: discord.Interaction, state: Optional[str] = None):
+        await self._toggle_feature_flag(interaction, "profile_peek_enabled", "Profile peek", state)
+
+    @toggle_group.command(name="rag", description="Enable or disable local RAG retrieval.")
+    @app_commands.checks.has_permissions(administrator=True)
+    @app_commands.describe(state="on/off (leave empty to view)")
+    async def toggle_rag(self, interaction: discord.Interaction, state: Optional[str] = None):
+        await self._toggle_feature_flag(interaction, "rag_enabled", "RAG retrieval", state)
+
     def _parse_env(self, content: str) -> Tuple[Dict[str, str], List[str], List[str], List[str]]:
         parsed: Dict[str, str] = {}
         duplicates: List[str] = []
@@ -861,6 +1000,75 @@ class Config(commands.Cog):
             parsed[key] = value.strip()
 
         return parsed, duplicates, unknown, errors
+
+    # =========================
+    # Custom Endpoint
+    # =========================
+
+    @custom_endpoint_group.command(name="view", description="View custom endpoint settings.")
+    @app_commands.checks.has_permissions(administrator=True)
+    async def custom_endpoint_view(self, interaction: discord.Interaction):
+        if not await self._require_guild(interaction):
+            return
+        config = await get_guild_config(interaction.guild.id)
+        enabled = bool(config.get("custom_endpoint_enabled") or 0)
+        embed = discord.Embed(title="Custom Endpoint Settings", color=discord.Color.blue())
+        embed.add_field(name="Enabled", value=str(enabled), inline=False)
+        embed.add_field(name="Endpoint URL", value=config.get("custom_endpoint_url") or "Not set", inline=False)
+        embed.add_field(name="Model", value=config.get("custom_model_name") or "Not set", inline=False)
+        embed.add_field(
+            name="Capabilities",
+            value=config.get("custom_model_capabilities") or "Not set",
+            inline=False,
+        )
+        await interaction.response.send_message(embed=embed, ephemeral=True)
+
+    @custom_endpoint_group.command(name="set", description="Set custom endpoint values.")
+    @app_commands.checks.has_permissions(administrator=True)
+    @app_commands.describe(
+        url="Base URL for OpenAI-compatible endpoint",
+        model="Model name",
+        capabilities="Comma-separated capabilities (tools, vision, video)",
+        enabled="on/off",
+        api_key="API key (optional)",
+    )
+    async def custom_endpoint_set(
+        self,
+        interaction: discord.Interaction,
+        url: Optional[str] = None,
+        model: Optional[str] = None,
+        capabilities: Optional[str] = None,
+        enabled: Optional[str] = None,
+        api_key: Optional[str] = None,
+    ):
+        if not await self._require_guild(interaction):
+            return
+        if not await self._require_auth(interaction):
+            return
+
+        updates: Dict[str, Optional[str]] = {}
+        if url is not None:
+            updates["custom_endpoint_url"] = url.strip() if url.strip() else None
+        if model is not None:
+            updates["custom_model_name"] = model.strip() if model.strip() else None
+        if capabilities is not None:
+            updates["custom_model_capabilities"] = capabilities.strip() if capabilities.strip() else None
+        if enabled is not None:
+            enabled_value = enabled.lower().strip()
+            if enabled_value in {"on", "enable", "true", "yes"}:
+                updates["custom_endpoint_enabled"] = 1
+            elif enabled_value in {"off", "disable", "false", "no"}:
+                updates["custom_endpoint_enabled"] = 0
+        if api_key is not None:
+            updates["custom_endpoint_api_key"] = self.encryption.encrypt(api_key.strip()) if api_key.strip() else None
+
+        if not updates:
+            await interaction.response.send_message("No changes provided.", ephemeral=True)
+            return
+
+        await update_guild_config(interaction.guild.id, updates)
+        await add_guild_config_audit(interaction.guild.id, interaction.user.id, "custom_endpoint_set")
+        await interaction.response.send_message("Custom endpoint updated.", ephemeral=True)
 
     # =========================
     # Auto-role

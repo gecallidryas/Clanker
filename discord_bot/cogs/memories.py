@@ -266,7 +266,7 @@ class Memories(commands.Cog):
         await self._remember_fact_for(ctx, target, fact_text)
 
     @commands.command(name="forget")
-    async def forget_facts(self, ctx: commands.Context):
+    async def forget_facts(self, ctx: commands.Context, scope: str = None):
         """
         Delete all stored facts about yourself.
         
@@ -277,11 +277,27 @@ class Memories(commands.Cog):
         if not ctx.guild:
             await ctx.send("Facts are server-specific. Use this in a server.")
             return
+        scope_value = (scope or "").lower().strip()
+        memory_types = ["personal"]
+        target_id = ctx.author.id
 
-        count = await delete_facts(ctx.guild.id, ctx.author.id)
-        
+        if scope_value in {"short", "short_term"}:
+            memory_types = ["short_term"]
+        elif scope_value in {"long", "long_term"}:
+            memory_types = ["long_term"]
+        elif scope_value in {"all"}:
+            memory_types = ["personal", "short_term", "long_term"]
+        elif scope_value in {"server"}:
+            if not ctx.author.guild_permissions.manage_guild:
+                await ctx.send("You need Manage Server to clear server memory.")
+                return
+            memory_types = ["server"]
+            target_id = 0
+
+        count = await delete_facts(ctx.guild.id, target_id, memory_types=memory_types)
+
         if count == 0:
-            await ctx.send("🤔 I don't have any facts stored about you!")
+            await ctx.send("🤔 I don't have any facts stored for that scope.")
         else:
             await ctx.send(f"🗑️ Cleared {count} fact(s) from memory!")
     
@@ -705,19 +721,72 @@ class Memories(commands.Cog):
         target_text = f" for {target.display_name}" if target.id != interaction.user.id else ""
         await interaction.followup.send(f"Got it! I'll remember that{target_text}.")
 
-    @app_commands.command(name="forget", description="Clear your stored facts.")
-    async def forget_facts_slash(self, interaction: discord.Interaction):
+    @app_commands.command(name="forget", description="Clear stored memory.")
+    @app_commands.describe(scope="Memory scope to clear", document_id="Document ID (for scope=document)")
+    @app_commands.choices(scope=[
+        app_commands.Choice(name="personal", value="personal"),
+        app_commands.Choice(name="short_term", value="short_term"),
+        app_commands.Choice(name="long_term", value="long_term"),
+        app_commands.Choice(name="all", value="all"),
+        app_commands.Choice(name="server", value="server"),
+        app_commands.Choice(name="document", value="document"),
+    ])
+    async def forget_facts_slash(
+        self,
+        interaction: discord.Interaction,
+        scope: app_commands.Choice[str] = None,
+        document_id: int = None,
+    ):
         if not interaction.guild:
             await interaction.response.send_message(
                 "Facts are server-specific. Use this in a server.",
                 ephemeral=True,
             )
             return
+        scope_value = scope.value if scope else "personal"
+        memory_types = ["personal"]
+        target_id = interaction.user.id
 
-        count = await delete_facts(interaction.guild.id, interaction.user.id)
+        if scope_value == "short_term":
+            memory_types = ["short_term"]
+        elif scope_value == "long_term":
+            memory_types = ["long_term"]
+        elif scope_value == "all":
+            memory_types = ["personal", "short_term", "long_term"]
+        elif scope_value == "server":
+            if not interaction.user.guild_permissions.manage_guild:
+                await interaction.response.send_message(
+                    "You need Manage Server to clear server memory.",
+                    ephemeral=True,
+                )
+                return
+            memory_types = ["server"]
+            target_id = 0
+        elif scope_value == "document":
+            from utils.rag_store import delete_document
+            if not interaction.user.guild_permissions.manage_guild:
+                await interaction.response.send_message(
+                    "You need Manage Server to delete documents.",
+                    ephemeral=True,
+                )
+                return
+            if not document_id:
+                await interaction.response.send_message(
+                    "Provide a document ID to delete.",
+                    ephemeral=True,
+                )
+                return
+            deleted = await delete_document(interaction.guild.id, int(document_id))
+            if deleted:
+                await interaction.response.send_message("Document deleted.", ephemeral=True)
+            else:
+                await interaction.response.send_message("Document not found.", ephemeral=True)
+            return
+
+        count = await delete_facts(interaction.guild.id, target_id, memory_types=memory_types)
 
         if count == 0:
-            await interaction.response.send_message("🤔 I don't have any facts stored about you!")
+            await interaction.response.send_message("🤔 I don't have any facts stored for that scope!")
         else:
             await interaction.response.send_message(f"🗑️ Cleared {count} fact(s) from memory!")
 

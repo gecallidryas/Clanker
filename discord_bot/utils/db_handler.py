@@ -170,6 +170,7 @@ async def _init_guild_schema(db: aiosqlite.Connection) -> None:
             user_id INTEGER NOT NULL,
             timezone TEXT DEFAULT 'UTC',
             birthday TEXT,
+            personal_memory_opt_out INTEGER DEFAULT 0,
             created_at TIMESTAMP DEFAULT CURRENT_TIMESTAMP,
             PRIMARY KEY (guild_id, user_id),
             FOREIGN KEY (user_id) REFERENCES users(user_id)
@@ -183,6 +184,9 @@ async def _init_guild_schema(db: aiosqlite.Connection) -> None:
             guild_id INTEGER NOT NULL,
             user_id INTEGER NOT NULL,
             fact TEXT NOT NULL,
+            source TEXT DEFAULT 'manual',
+            learned_from_user_id INTEGER,
+            memory_type TEXT DEFAULT 'personal',
             created_at TIMESTAMP DEFAULT CURRENT_TIMESTAMP,
             FOREIGN KEY (user_id) REFERENCES users(user_id)
         )
@@ -243,6 +247,24 @@ async def _init_guild_schema(db: aiosqlite.Connection) -> None:
             spam_window_seconds INTEGER DEFAULT 10,
             spam_timeout_minutes INTEGER DEFAULT 5,
             mod_log_channel_id INTEGER,
+            brave_api_key TEXT,
+            replicate_api_key TEXT,
+            image_provider TEXT,
+            image_model TEXT,
+            web_search_enabled INTEGER DEFAULT 1,
+            image_gen_enabled INTEGER DEFAULT 1,
+            sticker_usage_enabled INTEGER DEFAULT 1,
+            emoji_usage_enabled INTEGER DEFAULT 1,
+            pin_message_enabled INTEGER DEFAULT 0,
+            self_teaching_enabled INTEGER DEFAULT 0,
+            youtube_enabled INTEGER DEFAULT 1,
+            profile_peek_enabled INTEGER DEFAULT 0,
+            rag_enabled INTEGER DEFAULT 1,
+            custom_endpoint_url TEXT,
+            custom_endpoint_api_key TEXT,
+            custom_model_name TEXT,
+            custom_model_capabilities TEXT,
+            custom_endpoint_enabled INTEGER DEFAULT 0,
             updated_at TIMESTAMP DEFAULT CURRENT_TIMESTAMP
         )
     """)
@@ -522,6 +544,24 @@ async def _init_guild_schema(db: aiosqlite.Connection) -> None:
             ("spam_window_seconds", "INTEGER", 10),
             ("spam_timeout_minutes", "INTEGER", 5),
             ("mod_log_channel_id", "INTEGER", None),
+            ("brave_api_key", "TEXT", None),
+            ("replicate_api_key", "TEXT", None),
+            ("image_provider", "TEXT", None),
+            ("image_model", "TEXT", None),
+            ("web_search_enabled", "INTEGER", 1),
+            ("image_gen_enabled", "INTEGER", 1),
+            ("sticker_usage_enabled", "INTEGER", 1),
+            ("emoji_usage_enabled", "INTEGER", 1),
+            ("pin_message_enabled", "INTEGER", 0),
+            ("self_teaching_enabled", "INTEGER", 0),
+            ("youtube_enabled", "INTEGER", 1),
+            ("profile_peek_enabled", "INTEGER", 0),
+            ("rag_enabled", "INTEGER", 1),
+            ("custom_endpoint_url", "TEXT", None),
+            ("custom_endpoint_api_key", "TEXT", None),
+            ("custom_model_name", "TEXT", None),
+            ("custom_model_capabilities", "TEXT", None),
+            ("custom_endpoint_enabled", "INTEGER", 0),
         ]:
             if column_name in columns:
                 continue
@@ -551,6 +591,16 @@ async def _init_guild_schema(db: aiosqlite.Connection) -> None:
         pass
     try:
         await db.execute("ALTER TABLE user_facts ADD COLUMN learned_from_user_id INTEGER")
+    except Exception:
+        pass
+    try:
+        await db.execute("ALTER TABLE user_facts ADD COLUMN memory_type TEXT DEFAULT 'personal'")
+    except Exception:
+        pass
+
+    # Add personal memory opt-out to user_profiles if missing (migration)
+    try:
+        await db.execute("ALTER TABLE user_profiles ADD COLUMN personal_memory_opt_out INTEGER DEFAULT 0")
     except Exception:
         pass
 
@@ -595,6 +645,30 @@ async def _init_guild_schema(db: aiosqlite.Connection) -> None:
             channel_id INTEGER NOT NULL,
             message_id INTEGER,
             expires_at TIMESTAMP NOT NULL,
+            created_at TIMESTAMP DEFAULT CURRENT_TIMESTAMP
+        )
+    """)
+
+    # Persona attributes
+    await db.execute("""
+        CREATE TABLE IF NOT EXISTS persona_attributes (
+            id INTEGER PRIMARY KEY AUTOINCREMENT,
+            guild_id INTEGER NOT NULL,
+            attribute TEXT NOT NULL,
+            value TEXT NOT NULL,
+            created_by INTEGER NOT NULL,
+            created_at TIMESTAMP DEFAULT CURRENT_TIMESTAMP
+        )
+    """)
+
+    # Sample dialogues
+    await db.execute("""
+        CREATE TABLE IF NOT EXISTS sample_dialogues (
+            id INTEGER PRIMARY KEY AUTOINCREMENT,
+            guild_id INTEGER NOT NULL,
+            speaker TEXT NOT NULL,
+            dialogue TEXT NOT NULL,
+            created_by INTEGER NOT NULL,
             created_at TIMESTAMP DEFAULT CURRENT_TIMESTAMP
         )
     """)
@@ -767,7 +841,12 @@ async def get_users_with_timezone(guild_id: int) -> List[Dict[str, Any]]:
 # Fact Operations (!remember)
 # ============================================
 
-async def add_fact(guild_id: int, user_id: int, fact: str) -> int:
+async def add_fact(
+    guild_id: int,
+    user_id: int,
+    fact: str,
+    memory_type: str = "personal",
+) -> int:
     """
     Store a fact about a user.
     
@@ -783,16 +862,21 @@ async def add_fact(guild_id: int, user_id: int, fact: str) -> int:
         - [ ] Limit facts per user (e.g., max 50)
         - [ ] Add duplicate detection
     """
-    async with guild_db(guild_id) as db:
-        cursor = await db.execute(
-            "INSERT INTO user_facts (guild_id, user_id, fact) VALUES (?, ?, ?)",
-            (guild_id, user_id, fact)
-        )
-        await db.commit()
-        return cursor.lastrowid
+    return await add_fact_with_source(
+        guild_id,
+        user_id,
+        fact,
+        source="manual",
+        learned_from_user_id=None,
+        memory_type=memory_type,
+    )
 
 
-async def get_facts(guild_id: int, user_id: int) -> List[str]:
+async def get_facts(
+    guild_id: int,
+    user_id: int,
+    memory_types: Optional[List[str]] = None,
+) -> List[str]:
     """
     Retrieve all facts stored about a user.
     
@@ -806,16 +890,24 @@ async def get_facts(guild_id: int, user_id: int) -> List[str]:
     TODO:
         - [ ] Add pagination for users with many facts
     """
+    types = memory_types or ["personal"]
+    placeholders = ", ".join("?" for _ in types)
     async with guild_db(guild_id) as db:
         async with db.execute(
-            "SELECT fact FROM user_facts WHERE guild_id = ? AND user_id = ? ORDER BY created_at DESC",
-            (guild_id, user_id)
+            f"""SELECT fact FROM user_facts
+                WHERE guild_id = ? AND user_id = ? AND memory_type IN ({placeholders})
+                ORDER BY created_at DESC""",
+            (guild_id, user_id, *types),
         ) as cursor:
             rows = await cursor.fetchall()
             return [row[0] for row in rows]
 
 
-async def delete_facts(guild_id: int, user_id: int) -> int:
+async def delete_facts(
+    guild_id: int,
+    user_id: int,
+    memory_types: Optional[List[str]] = None,
+) -> int:
     """
     Delete all facts for a user (!forget command).
     
@@ -829,13 +921,140 @@ async def delete_facts(guild_id: int, user_id: int) -> int:
     TODO:
         - [ ] Add confirmation before deletion
     """
+    types = memory_types or ["personal"]
+    placeholders = ", ".join("?" for _ in types)
     async with guild_db(guild_id) as db:
         cursor = await db.execute(
-            "DELETE FROM user_facts WHERE guild_id = ? AND user_id = ?",
-            (guild_id, user_id)
+            f"DELETE FROM user_facts WHERE guild_id = ? AND user_id = ? AND memory_type IN ({placeholders})",
+            (guild_id, user_id, *types),
         )
         await db.commit()
         return cursor.rowcount
+
+
+async def add_server_memory(
+    guild_id: int,
+    fact: str,
+    source: str = "manual",
+    learned_from_user_id: Optional[int] = None,
+) -> int:
+    """Store a server-scoped memory entry."""
+    return await add_fact_with_source(
+        guild_id,
+        user_id=0,
+        fact=fact,
+        source=source,
+        learned_from_user_id=learned_from_user_id,
+        memory_type="server",
+    )
+
+
+async def get_server_memory(guild_id: int) -> List[str]:
+    """Retrieve server-scoped memory entries."""
+    return await get_facts(guild_id, 0, memory_types=["server"])
+
+
+async def get_personal_memory_opt_out(guild_id: int, user_id: int) -> bool:
+    """Return whether a user opted out of personal memory."""
+    async with guild_db(guild_id) as db:
+        async with db.execute(
+            "SELECT personal_memory_opt_out FROM user_profiles WHERE guild_id = ? AND user_id = ?",
+            (guild_id, user_id),
+        ) as cursor:
+            row = await cursor.fetchone()
+            return bool(row[0]) if row and row[0] is not None else False
+
+
+async def set_personal_memory_opt_out(guild_id: int, user_id: int, enabled: bool) -> None:
+    """Set or clear personal memory opt-out for a user."""
+    async with guild_db(guild_id) as db:
+        await db.execute(
+            """INSERT INTO user_profiles (guild_id, user_id, personal_memory_opt_out)
+               VALUES (?, ?, ?)
+               ON CONFLICT(guild_id, user_id) DO UPDATE SET personal_memory_opt_out = ?""",
+            (guild_id, user_id, int(enabled), int(enabled)),
+        )
+        await db.commit()
+
+
+async def add_persona_attribute(
+    guild_id: int,
+    attribute: str,
+    value: str,
+    created_by: int,
+) -> int:
+    """Store a persona attribute for the guild."""
+    async with guild_db(guild_id) as db:
+        cursor = await db.execute(
+            """INSERT INTO persona_attributes (guild_id, attribute, value, created_by)
+               VALUES (?, ?, ?, ?)""",
+            (guild_id, attribute, value, created_by),
+        )
+        await db.commit()
+        return cursor.lastrowid
+
+
+async def get_persona_attributes(guild_id: int) -> List[Dict[str, Any]]:
+    """Get persona attributes for the guild."""
+    async with guild_db(guild_id) as db:
+        db.row_factory = aiosqlite.Row
+        async with db.execute(
+            "SELECT id, attribute, value, created_by, created_at FROM persona_attributes WHERE guild_id = ?",
+            (guild_id,),
+        ) as cursor:
+            rows = await cursor.fetchall()
+            return [dict(row) for row in rows]
+
+
+async def delete_persona_attribute(guild_id: int, attribute_id: int) -> bool:
+    """Delete a persona attribute by ID."""
+    async with guild_db(guild_id) as db:
+        cursor = await db.execute(
+            "DELETE FROM persona_attributes WHERE guild_id = ? AND id = ?",
+            (guild_id, attribute_id),
+        )
+        await db.commit()
+        return cursor.rowcount > 0
+
+
+async def add_sample_dialogue(
+    guild_id: int,
+    speaker: str,
+    dialogue: str,
+    created_by: int,
+) -> int:
+    """Store a sample dialogue line for the guild."""
+    async with guild_db(guild_id) as db:
+        cursor = await db.execute(
+            """INSERT INTO sample_dialogues (guild_id, speaker, dialogue, created_by)
+               VALUES (?, ?, ?, ?)""",
+            (guild_id, speaker, dialogue, created_by),
+        )
+        await db.commit()
+        return cursor.lastrowid
+
+
+async def get_sample_dialogues(guild_id: int) -> List[Dict[str, Any]]:
+    """Get sample dialogues for the guild."""
+    async with guild_db(guild_id) as db:
+        db.row_factory = aiosqlite.Row
+        async with db.execute(
+            "SELECT id, speaker, dialogue, created_by, created_at FROM sample_dialogues WHERE guild_id = ?",
+            (guild_id,),
+        ) as cursor:
+            rows = await cursor.fetchall()
+            return [dict(row) for row in rows]
+
+
+async def delete_sample_dialogue(guild_id: int, dialogue_id: int) -> bool:
+    """Delete a sample dialogue by ID."""
+    async with guild_db(guild_id) as db:
+        cursor = await db.execute(
+            "DELETE FROM sample_dialogues WHERE guild_id = ? AND id = ?",
+            (guild_id, dialogue_id),
+        )
+        await db.commit()
+        return cursor.rowcount > 0
 
 
 # ============================================
@@ -1874,14 +2093,15 @@ async def add_fact_with_source(
     user_id: int,
     fact: str,
     source: str = "manual",
-    learned_from_user_id: Optional[int] = None
+    learned_from_user_id: Optional[int] = None,
+    memory_type: str = "personal",
 ) -> int:
     """Store a fact about a user with source tracking."""
     async with guild_db(guild_id) as db:
         cursor = await db.execute(
-            """INSERT INTO user_facts (guild_id, user_id, fact, source, learned_from_user_id) 
-               VALUES (?, ?, ?, ?, ?)""",
-            (guild_id, user_id, fact, source, learned_from_user_id)
+            """INSERT INTO user_facts (guild_id, user_id, fact, source, learned_from_user_id, memory_type) 
+               VALUES (?, ?, ?, ?, ?, ?)""",
+            (guild_id, user_id, fact, source, learned_from_user_id, memory_type)
         )
         await db.commit()
         return cursor.lastrowid
@@ -1892,7 +2112,7 @@ async def get_facts_detailed(guild_id: int, user_id: int) -> List[Dict[str, Any]
     async with guild_db(guild_id) as db:
         db.row_factory = aiosqlite.Row
         async with db.execute(
-            """SELECT id, fact, source, learned_from_user_id, created_at 
+            """SELECT id, fact, source, learned_from_user_id, memory_type, created_at 
                FROM user_facts WHERE guild_id = ? AND user_id = ? ORDER BY created_at DESC""",
             (guild_id, user_id)
         ) as cursor:
@@ -2811,6 +3031,24 @@ GUILD_CONFIG_FIELDS: Set[str] = {
     "spam_window_seconds",
     "spam_timeout_minutes",
     "mod_log_channel_id",
+    "brave_api_key",
+    "replicate_api_key",
+    "image_provider",
+    "image_model",
+    "web_search_enabled",
+    "image_gen_enabled",
+    "sticker_usage_enabled",
+    "emoji_usage_enabled",
+    "pin_message_enabled",
+    "self_teaching_enabled",
+    "youtube_enabled",
+    "profile_peek_enabled",
+    "rag_enabled",
+    "custom_endpoint_url",
+    "custom_endpoint_api_key",
+    "custom_model_name",
+    "custom_model_capabilities",
+    "custom_endpoint_enabled",
 }
 
 

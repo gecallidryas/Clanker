@@ -45,6 +45,10 @@ from utils.db_handler import (
     set_last_wellbeing_date,
     get_staff_roles,
     get_mod_log_channel_id,
+    get_guild_config,
+    get_server_memory,
+    get_persona_attributes,
+    get_sample_dialogues,
 )
 from utils.api_manager import UserInputError
 from utils.app_emojis import (
@@ -61,6 +65,7 @@ from utils.guild_ai import (
     generate_guild_gemini_text,
     generate_guild_gemini_vision,
     generate_guild_openrouter_text,
+    generate_guild_custom_text,
     get_guild_gemini_keys,
     get_guild_gemini_model,
     GuildConfigError,
@@ -69,6 +74,15 @@ from utils.admin_actions import execute_admin_action
 from modes import get_mode_profile
 from utils.rate_limiter import ai_limiter, get_rate_limit_message
 from utils.logger import get_logger
+from utils.tool_registry import (
+    register_builtin_tools,
+    execute_tool,
+    get_available_tools,
+    render_tool_definitions,
+)
+from utils.tool_parser import extract_tool_call, strip_tool_call
+from utils.tool_context import ToolContext
+from utils.rag_store import get_rag_context
 
 # Context window: stores last 20 messages within 30 minutes
 MAX_CONTEXT_SIZE = 20
@@ -149,6 +163,18 @@ Rules:
 - "more than X" -> threshold = X + 1.
 - "at least X" or "X or more" -> threshold = X.
 - "any emoji" -> emoji_mode = "any" and omit emoji_triggers.
+""".strip()
+
+TOOL_CALL_INSTRUCTIONS = """
+[TOOLS]
+If you need a tool, respond ONLY with a tool code block in this schema:
+
+```tool
+{"tool": "tool_name", "args": {"key": "value"}}
+```
+
+Do NOT include any other text outside the tool block.
+If the user asks what you can do, call the `review_capabilities` tool.
 """.strip()
 
 DEFAULT_ROLE_PERMISSIONS = discord.Permissions(
@@ -441,7 +467,8 @@ class ConversationContext:
         user_id: int,
         username: str,
         content: str,
-        reply_to_username: Optional[str] = None
+        reply_to_username: Optional[str] = None,
+        media: Optional[list[dict[str, Any]]] = None,
     ) -> None:
         """Add a message to the context."""
         self.messages.append({
@@ -450,7 +477,8 @@ class ConversationContext:
             "user_id": user_id,
             "username": username,
             "content": content,
-            "reply_to_username": reply_to_username
+            "reply_to_username": reply_to_username,
+            "media": media or [],
         })
     
     def get_context(self) -> str:
@@ -471,10 +499,15 @@ class ConversationContext:
         context_lines = []
         for msg in valid_messages:
             reply_to = msg.get("reply_to_username")
+            media = msg.get("media") or []
+            media_note = ""
+            if media:
+                files = ", ".join(item.get("filename", "attachment") for item in media[:3])
+                media_note = f" [Attachments: {files}]"
             if reply_to:
-                context_lines.append(f"{msg['username']} (replying to {reply_to}): {msg['content']}")
+                context_lines.append(f"{msg['username']} (replying to {reply_to}): {msg['content']}{media_note}")
             else:
-                context_lines.append(f"{msg['username']}: {msg['content']}")
+                context_lines.append(f"{msg['username']}: {msg['content']}{media_note}")
         
         return "\n".join(context_lines)
 
@@ -498,6 +531,7 @@ class AIBrain(commands.Cog):
     
     def __init__(self, bot: commands.Bot):
         self.bot = bot
+        register_builtin_tools()
         self.contexts: Dict[int, ConversationContext] = {}  # channel_id -> context
         self.chain_memory: Dict[int, int] = {}  # message_id -> user_id
         self.chain_order: deque[int] = deque()
@@ -1067,7 +1101,7 @@ class AIBrain(commands.Cog):
         return "\n".join(lines)
     
     async def build_prompt(
-        self, 
+        self,
         guild_id: int, 
         user_id: int, 
         message: str, 
@@ -1075,7 +1109,8 @@ class AIBrain(commands.Cog):
         member: Optional[discord.Member] = None,
         wellbeing_prompt: str = "",
         affection_data: Optional[Dict[str, int]] = None,
-        allow_evil: bool = True
+        allow_evil: bool = True,
+        allow_tools: bool = True,
     ) -> str:
         """
         Build the full prompt for Gemini.
@@ -1094,10 +1129,18 @@ class AIBrain(commands.Cog):
         mode = await get_server_mode(guild_id)
         evil_mode = allow_evil and await get_evil_mode(guild_id)
         persona = await self._load_persona(guild_id, mode, evil_mode)
+        guild_config = await get_guild_config(guild_id)
         
         # Get user facts (Current speaker)
-        facts = await get_facts(guild_id, user_id)
-        facts_list = [f"- (User {user_id}) {fact}" for fact in facts]
+        personal_facts = await get_facts(guild_id, user_id, ["personal"])
+        short_term_facts = await get_facts(guild_id, user_id, ["short_term"])
+        long_term_facts = await get_facts(guild_id, user_id, ["long_term"])
+
+        facts_list = [f"- (User {user_id}) {fact}" for fact in personal_facts[:10]]
+        if short_term_facts:
+            facts_list.extend([f"- (Short-term) {fact}" for fact in short_term_facts[:5]])
+        if long_term_facts:
+            facts_list.extend([f"- (Long-term) {fact}" for fact in long_term_facts[:5]])
 
         # Check for mentions in the message and fetch their facts
         mentioned_ids = set(re.findall(r"<@!?(\d+)>", message))
@@ -1107,16 +1150,46 @@ class AIBrain(commands.Cog):
             if uid == self.bot.user.id or uid == user_id:
                 continue
             
-            other_facts = await get_facts(guild_id, uid)
+            other_facts = await get_facts(guild_id, uid, ["personal"])
             if other_facts:
                 # Try to resolve username for better context
                 user = self.bot.get_user(uid)
                 name = user.display_name if user else f"User {uid}"
-                facts_list.extend([f"- ({name}) {fact}" for fact in other_facts])
+                facts_list.extend([f"- ({name}) {fact}" for fact in other_facts[:5]])
 
         facts_section = ""
         if facts_list:
             facts_section = f"\n\nThings you know about the users:\n" + "\n".join(facts_list)
+
+        server_memory_section = ""
+        server_memory = await get_server_memory(guild_id)
+        if server_memory:
+            server_memory_section = "\n\nServer memory:\n" + "\n".join(
+                f"- {fact}" for fact in server_memory[:10]
+            )
+
+        attributes_section = ""
+        attributes = await get_persona_attributes(guild_id)
+        if attributes:
+            lines = [f"- {item['attribute']}: {item['value']}" for item in attributes[:10]]
+            attributes_section = "\n\nPersona attributes:\n" + "\n".join(lines)
+
+        dialogue_section = ""
+        dialogues = await get_sample_dialogues(guild_id)
+        if dialogues:
+            lines = [f"- {item['speaker']}: {item['dialogue']}" for item in dialogues[:10]]
+            dialogue_section = "\n\nSample dialogues:\n" + "\n".join(lines)
+
+        rag_section = ""
+        try:
+            rag_enabled = bool(guild_config.get("rag_enabled") or 0)
+            if rag_enabled and str(os.getenv("ACTIVATE_LOCAL_RAG", "")).lower() in {"1", "true", "yes", "on"}:
+                top_k = int(os.getenv("RAG_TOP_K", "4"))
+                rag_context = await get_rag_context(guild_id, message, top_k=top_k)
+                if rag_context:
+                    rag_section = "\n\nDocument memory:\n" + rag_context
+        except Exception as exc:
+            logger.warning("RAG lookup failed: %s", exc)
         
         # Get affection level for behavior adjustment
         if affection_data is None:
@@ -1215,6 +1288,12 @@ You can explain these commands to the user if asked:
 - !remind <time> <msg>: Set a reminder
 - !aka @user <name> / !whois <name>: Manage nicknames
 - !remember <fact> / !aboutuser @user: Memory system
+- /teach memory personal|server: Teach personal or server memory
+- /teach attribute / /teach sampledialogue: Teach persona traits and dialogue
+- /teach document: Upload documents for RAG
+- /generate image: Generate an image from a prompt
+- /tools status: Show enabled tool capabilities
+- /personal privacy: Opt out of personal memory
 - !stats / !ping: Bot status
 """
 
@@ -1250,6 +1329,16 @@ You can explain these commands to the user if asked:
             "the SERVER EMOJIS list. Unicode emojis are allowed.]"
         )
 
+        tools_section = ""
+        tool_instructions = ""
+        if allow_tools:
+            available_tools = get_available_tools(guild_config)
+            if available_tools:
+                tools_section = "\n\n=== AVAILABLE TOOLS ===\n" + render_tool_definitions(available_tools)
+            tool_instructions = TOOL_CALL_INSTRUCTIONS
+        else:
+            tool_instructions = "[TOOLS DISABLED] Do not call tools."
+
         agentic_level = await _get_agentic_permission_level(member)
         if agentic_level >= 2:
             agentic_access = "admin"
@@ -1283,10 +1372,11 @@ Low affection = reserved, won't agree to demands. High affection = eager to plea
 {admin_note}
 {emoji_policy_note}
 
-{commands_help}{custom_emoji_section}{emoji_section}
-{AGENTIC_TOOL_INSTRUCTIONS}
-{admin_instructions}
-{facts_section}
+        {commands_help}{custom_emoji_section}{emoji_section}{tools_section}
+        {tool_instructions}
+        {AGENTIC_TOOL_INSTRUCTIONS}
+        {admin_instructions}
+        {facts_section}{server_memory_section}{attributes_section}{dialogue_section}{rag_section}
 
 Recent conversation:
 {context}
@@ -1327,6 +1417,17 @@ Respond naturally in character. Keep responses concise.
                 except Exception as e:
                     logger.warning("OpenRouter failed, falling back to Gemini: %s", e)
             
+            # Custom endpoint (optional) before Gemini
+            try:
+                response_text, _ = await generate_guild_custom_text(guild_id, prompt)
+                return response_text
+            except GuildConfigError:
+                pass
+            except UserInputError:
+                raise
+            except Exception as exc:
+                logger.warning("Custom endpoint failed, falling back to Gemini: %s", exc)
+
             # Default to Gemini (censored)
             response_text, _ = await generate_guild_gemini_text(guild_id, prompt)
             return response_text
@@ -1372,6 +1473,16 @@ Respond naturally in character. Keep responses concise.
         
         # Get channel context
         context = self.get_context(message.channel.id)
+        media_refs = None
+        if message.attachments:
+            media_refs = [
+                {
+                    "filename": attachment.filename,
+                    "url": attachment.url,
+                    "content_type": attachment.content_type,
+                }
+                for attachment in message.attachments
+            ]
 
         mentioned = self.bot.user in message.mentions
         content_lower = message.content.lower()
@@ -1392,6 +1503,7 @@ Respond naturally in character. Keep responses concise.
                 message.author.display_name,
                 message.content,
                 reply_to_username=reply_to_username,
+                media=media_refs,
             )
             return
 
@@ -1452,6 +1564,7 @@ Respond naturally in character. Keep responses concise.
             message.author.display_name,
             content_for_prompt,
             reply_to_username=reply_to_username,
+            media=media_refs,
         )
 
         # Let other cogs handle mention-only messages without images
@@ -1513,11 +1626,47 @@ Respond naturally in character. Keep responses concise.
             )
 
         raw_response = response
+        tool_call = extract_tool_call(raw_response)
+        if tool_call:
+            guild_config = await get_guild_config(message.guild.id)
+            tool_context = ToolContext(
+                bot=self.bot,
+                guild=message.guild,
+                channel=message.channel,
+                user=message.author,
+                message=message,
+                guild_config=guild_config,
+                locale="en",
+            )
+            result = await execute_tool(
+                str(tool_call.get("tool") or "").strip(),
+                tool_call.get("args") or {},
+                tool_context,
+            )
+
+            tool_message = f"{content_for_prompt}\n\n{result.to_prompt()}"
+            tool_prompt = await self.build_prompt(
+                message.guild.id,
+                message.author.id,
+                tool_message,
+                context_snapshot,
+                member=message.author,
+                wellbeing_prompt=wellbeing_prompt,
+                affection_data=affection_data,
+                allow_evil=allow_evil,
+                allow_tools=False,
+            )
+            response = await self.generate_response(
+                tool_prompt,
+                message.guild.id,
+                allow_evil=allow_evil,
+            )
+            raw_response = response
         sent = await handle_agentic_actions(message, raw_response)
         if sent is None:
             sent = await handle_admin_actions(self, message, raw_response)
         if sent is None:
-            response = raw_response
+            response = strip_tool_call(raw_response)
             evil_mode_enabled = allow_evil and await get_evil_mode(message.guild.id)
 
             emoji_manager = getattr(self.bot, "emoji_manager", None)

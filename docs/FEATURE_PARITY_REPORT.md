@@ -9,21 +9,21 @@ A comprehensive comparison of features between **FemboiBot** (Python/discord.py)
 | Category | FemboiBot | TomoriBot | Parity |
 |----------|-----------|-----------|--------|
 | Core AI Chat | ✅ | ✅ | ✅ Match |
-| Memory System | ✅ Unified | ✅ Long/Short Term | ⚠️ TomoriBot more advanced |
+| Memory System | ✅ Unified | ✅ Long/Short + /teach + RAG | ⚠️ TomoriBot more advanced |
 | Persona System | ✅ | ✅ | ✅ Match |
-| Multi-Provider AI | ⚠️ Gemini + OpenRouter | ✅ Gemini + OpenRouter + NovelAI | ⚠️ Partial |
+| Multi-Provider AI | ⚠️ Gemini + OpenRouter | ✅ Gemini + OpenRouter + NovelAI (+ custom endpoint) | ⚠️ Partial |
 | Affection Tracking | ✅ Advanced | ❌ | ✅ FemboiBot ahead |
 | Image Analysis | ✅ Gemini Vision | ✅ | ✅ Match |
-| Image Generation | ❌ | ✅ | ❌ Missing |
-| Web Search | ❌ | ✅ MCP (Brave/DuckDuckGo) | ❌ Missing |
+| Image Generation | ❌ | ✅ Beta (imagegen tool) | ❌ Missing |
+| Web Search | ❌ | ✅ MCP + REST (Brave/DuckDuckGo/Fetch) | ❌ Missing |
 | Reminders | ✅ | ✅ | ✅ Match |
 | Starboard | ✅ | ❌ | ✅ FemboiBot ahead |
 | Automoderation | ✅ | ❌ | ✅ FemboiBot ahead |
 | YouTube Tool | ❌ | ✅ | ❌ Missing |
-| Sticker/GIF Tools | ❌ | ✅ | ❌ Missing |
-| Message Pinning | ❌ | ✅ AI-controlled | ❌ Missing |
-| RAG/Document Memory | ❌ | ✅ pgvector | ❌ Missing |
-| Localization | ❌ | ✅ i18n | ❌ Missing |
+| Sticker/GIF Tools | ❌ | ✅ Stickers + GIF tool (dev) | ❌ Missing |
+| Message Pinning | ❌ | ✅ pin_selected_message tool | ❌ Missing |
+| RAG/Document Memory | ❌ | ✅ pgvector + /teach document | ❌ Missing |
+| Localization | ❌ | ✅ i18n (en-US/ja) | ❌ Missing |
 
 ---
 
@@ -39,14 +39,14 @@ A comprehensive comparison of features between **FemboiBot** (Python/discord.py)
 - **Trigger**: Mentions or configurable trigger words
 
 #### TomoriBot
-- **Core AI**: Multi-provider (Google Gemini, OpenRouter, NovelAI)
-- **Context**: Conversation history with long/short term memory separation
-- **Tool System**: Extensive function calling with MCP integration
+- **Core AI**: Multi-provider (Google Gemini, OpenRouter, NovelAI; optional custom endpoint for self-hosting)
+- **Context**: Conversation history plus short/long-term memory updates
+- **Tool System**: Built-in tools + MCP servers + REST APIs (feature-flag gated)
 - **Streaming**: Real-time response streaming
-- **Trigger**: Configurable trigger words + mentions
+- **Trigger**: Configurable trigger words, mentions, and auto-message triggers
 
 > [!IMPORTANT]
-> TomoriBot has a more sophisticated tool/function calling system with 13+ built-in tools.
+> TomoriBot uses a 3-tier tool system with 12 built-in function tools plus MCP and REST tools (availability depends on feature flags).
 
 ---
 
@@ -64,11 +64,11 @@ A comprehensive comparison of features between **FemboiBot** (Python/discord.py)
 #### TomoriBot
 | Feature | Details |
 |---------|---------|
-| Short-term Memory | Recent conversation context |
-| Long-term Memory | Persistent facts via `/teach` commands |
-| RAG Support | Optional pgvector for document retrieval |
-| Memory Tools | AI can create/update memories dynamically |
-| Export/Import | Data portability features |
+| Short-term Memory | Conversation history + AI short-term memory updates |
+| Long-term Memory | `/teach memory` (personal/server) + self-teaching updates |
+| Behavioral Teaching | `/teach attribute` and `/teach sampledialogue` |
+| RAG Support | `/teach document` with pgvector (prod-on; local gated) |
+| Privacy/Export | `/forget` + `/data` export; personal memory opt-out |
 
 > [!NOTE]
 > FemboiBot has birthday and alias features that TomoriBot lacks.
@@ -87,10 +87,11 @@ A comprehensive comparison of features between **FemboiBot** (Python/discord.py)
 - **Server Avatar**: Changes bot avatar per mode
 
 #### TomoriBot
-- **Presets**: Pre-configured personalities
-- **Custom Personas**: Via `/persona` commands
-- **Export/Import**: Character card style sharing
-- **Attributes**: Detailed attribute and sample dialogue system
+- **Presets**: Pre-configured personalities with per-server setup
+- **Multi-Persona**: One main persona + multiple alters per server, each with triggers
+- **Custom Personas**: `/persona` create/import/export (character card style)
+- **Rendering**: Webhook-based alter replies with per-persona avatars
+- **Server Avatar**: `/server avatar` and persona/preset swaps can update guild avatar
 
 ---
 
@@ -105,29 +106,31 @@ Reminders           ✅ Natural time parsing
 Embed Generation    ✅ AI-generated embeds
 ```
 
-#### TomoriBot Tools (13+ function calls)
+#### TomoriBot Tools (built-in function calls)
 ```
-generateImage       ✅ AI image generation
-youtubeVideo        ✅ YouTube video analysis
-memoryTool          ✅ Dynamic memory creation
-reminderTool        ✅ Set reminders
-stickerTool         ✅ Use server stickers
-processGif          ✅ GIF handling
-pinMessage          ✅ AI-controlled pinning
-peekProfilePicture  ✅ View user avatars
-increaseMediaContext ✅ Request more media context
-reviewCapabilities  ✅ Self-capability review
+remember_this_fact           OK Self-teaching memory creation
+update_short_term_memory     OK Short-term memory summary
+update_long_term_memory      OK Update stored memories by ID
+set_channel_task_or_reminder OK Reminders/tasks
+select_sticker_for_response  OK Sticker usage
+process_youtube_video        OK YouTube processing (Gemini capability)
+pin_selected_message         OK Pin important messages
+peek_profile_picture         OK Profile picture analysis
+generate_image               OK Text-to-image (also image-to-image via refs)
+increase_media_context       OK Expand media context window
+process_gif                  OK GIF keyframes (dev only)
+review_capabilities          OK Self-capability review
 ```
 
 #### TomoriBot MCP Servers
 ```
-Brave Search        ✅ Web search (requires API key)
-DuckDuckGo Search   ✅ Fallback web search
-URL Fetch           ✅ Webpage content analysis
+Brave Search        OK Web search (MCP + REST)
+DuckDuckGo Search   OK Web/search + fetch-url + url-metadata
+Fetch               OK Raw webpage content
 ```
 
 > [!CAUTION]
-> FemboiBot is missing significant agentic capabilities: Image Generation, Web Search, YouTube, and AI-controlled message pinning.
+> FemboiBot is missing significant agentic capabilities: Image Generation, Web Search, YouTube processing, sticker tools, profile picture peek, RAG, and AI-controlled message pinning.
 
 ---
 
@@ -165,8 +168,8 @@ Additional features:
 
 #### TomoriBot
 - **API Keys**: Per-server encrypted key storage
-- **Provider Selection**: Switch between Gemini/OpenRouter/NovelAI
-- **Feature Toggles**: Stickers, web search, self-teaching, pin messages, imagegen
+- **Provider Selection**: Switch between Gemini/OpenRouter/NovelAI (custom endpoint in self-hosted)
+- **Feature Toggles**: Self-teaching, sticker usage, web search, imagegen, pin messages
 - **Localization**: Multi-language support
 
 ---
@@ -201,6 +204,7 @@ Additional features:
 #### TomoriBot
 - `/data` commands for export/delete
 - `/forget` commands to remove memories
+- Personal privacy controls (opt out of personal memory)
 - Legal compliance (privacy policy, terms)
 
 ---
@@ -213,7 +217,7 @@ Additional features:
    - Implementation: New cog with `/generate image` command
 
 2. **Web Search Capability**
-   - Option A: MCP integration like TomoriBot
+   - Option A: MCP + REST integration like TomoriBot
    - Option B: Direct API (Brave, DuckDuckGo, SerpAPI)
    - Use case: AI can search for current information
 
@@ -230,7 +234,7 @@ Additional features:
    - Let AI pin important messages when appropriate
 
 6. **Sticker/GIF Usage**
-   - AI can react with server stickers
+   - AI can react with server stickers and emojis
    - GIF responses
 
 7. **NovelAI Provider**
@@ -256,7 +260,7 @@ Additional features:
 4. **Birthday Tracking** - With upcoming birthdays view
 5. **User Aliases** - `!aka` and `!whois` for nicknames
 6. **Welcome System** - AI-powered custom welcomes
-7. **Mode-specific Avatars** - Bot avatar changes per persona
+7. **Autorole** - Automatic role assignment on join
 
 ---
 

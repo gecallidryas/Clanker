@@ -11,6 +11,7 @@ from typing import Dict, List, Optional, Tuple
 from utils.logger import get_logger
 from utils.db_handler import get_guild_config
 from utils.encryption import get_encryption
+from utils.encryption import get_encryption
 from utils.api_manager import (
     UserInputError,
     OpenRouterManager,
@@ -165,6 +166,33 @@ async def get_guild_openrouter_config(guild_id: int) -> Tuple[str, List[str]]:
     return model_id, fallbacks
 
 
+def _parse_capabilities(raw: Optional[str]) -> List[str]:
+    if not raw:
+        return []
+    items = [item.strip().lower() for item in raw.split(",") if item.strip()]
+    return list(dict.fromkeys(items))
+
+
+async def get_guild_custom_endpoint_config(
+    guild_id: int,
+) -> Tuple[Optional[str], Optional[str], Optional[str], List[str], bool]:
+    """Return (url, api_key, model, capabilities, enabled)."""
+    config = await get_guild_config(guild_id)
+    url = (config.get("custom_endpoint_url") or "").strip() or None
+    model = (config.get("custom_model_name") or "").strip() or None
+    enabled = bool(config.get("custom_endpoint_enabled") or 0)
+    capabilities = _parse_capabilities(config.get("custom_model_capabilities"))
+
+    api_key_encrypted = config.get("custom_endpoint_api_key")
+    api_key = None
+    if api_key_encrypted:
+        try:
+            api_key = get_encryption().decrypt(api_key_encrypted)
+        except Exception:
+            api_key = None
+    return url, api_key, model, capabilities, enabled
+
+
 async def _next_key_index(guild_id: int, task: str, key_count: int) -> int:
     async with _guild_key_lock:
         current = _guild_key_index.get((guild_id, task), 0)
@@ -308,3 +336,39 @@ async def generate_guild_openrouter_text(guild_id: int, prompt: str) -> tuple[st
             last_error = exc
             continue
     raise RuntimeError(f"All OpenRouter keys failed. Last error: {last_error}")
+
+
+_custom_client_cache: Dict[tuple[int, str, str], AsyncOpenAI] = {}
+
+
+def _get_custom_client(guild_id: int, api_key: Optional[str], base_url: str) -> AsyncOpenAI:
+    cache_key = (guild_id, api_key or "", base_url)
+    cached = _custom_client_cache.get(cache_key)
+    if cached:
+        return cached
+    client = AsyncOpenAI(
+        api_key=api_key or "EMPTY",
+        base_url=base_url,
+        timeout=_parse_timeout(os.getenv("CUSTOM_ENDPOINT_TIMEOUT_SECONDS"), 45.0),
+        max_retries=0,
+    )
+    _custom_client_cache[cache_key] = client
+    return client
+
+
+async def generate_guild_custom_text(guild_id: int, prompt: str) -> tuple[str, str]:
+    url, api_key, model, _, enabled = await get_guild_custom_endpoint_config(guild_id)
+    if not enabled or not url or not model:
+        raise GuildConfigError("Custom endpoint not configured for this server.")
+    client = _get_custom_client(guild_id, api_key, url)
+    response = await client.chat.completions.create(
+        model=model,
+        messages=[{"role": "user", "content": prompt}],
+    )
+    if not response or not getattr(response, "choices", None):
+        raise RuntimeError("Custom endpoint returned no choices.")
+    message = response.choices[0].message
+    content = getattr(message, "content", None)
+    if not content:
+        raise RuntimeError("Custom endpoint returned empty content.")
+    return content, model

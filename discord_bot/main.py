@@ -113,6 +113,12 @@ class Femmy(commands.Bot):
         # Initialize database
         from utils.db_handler import init_db
         await init_db()
+        if str(os.getenv("ACTIVATE_LOCAL_RAG", "")).lower() in {"1", "true", "yes", "on"}:
+            try:
+                from utils.pg_client import ensure_pg_schema
+                await ensure_pg_schema()
+            except Exception as exc:
+                logger.warning("Failed to initialize RAG Postgres schema: %s", exc)
 
         # Validate mode registry once on startup
         issues = validate_mode_registry()

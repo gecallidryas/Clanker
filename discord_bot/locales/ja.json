@@ -1,0 +1,13 @@
+{
+  "tools.status.title": "ツール状態",
+  "tools.status.enabled": "有効なツール",
+  "tools.status.disabled": "無効なツール",
+  "tools.status.flags": "機能フラグ",
+  "teach.memory.personal_saved": "{user} の個人メモリを保存しました。",
+  "teach.memory.server_saved": "サーバーメモリを保存しました。",
+  "teach.attribute.saved": "ペルソナ属性を保存しました。",
+  "teach.sampledialogue.saved": "サンプル会話を保存しました。",
+  "teach.document.saved": "ドキュメントを保存しました (ID {doc_id}, {chunks} チャンク)。",
+  "personal.privacy.on": "個人メモリのオプトアウトを有効にしました。",
+  "personal.privacy.off": "個人メモリのオプトアウトを無効にしました。"
+}

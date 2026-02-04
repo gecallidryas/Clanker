@@ -6,6 +6,8 @@ This document is the canonical, detailed feature inventory for this repository. 
 - Multi-cog Discord bot with per-guild configuration, persistent storage, and AI-driven chat.
 - Persona system with multiple modes, per-mode prompts, server-specific avatars, and custom personas per guild.
 - Per-guild SQLite databases plus a global stats database.
+- Tool registry with per-guild feature-flag gating and a tool-call pipeline for AI actions.
+- Optional Postgres + pgvector for document RAG storage.
 
 ## Feature catalog (by subsystem)
 
@@ -14,6 +16,7 @@ This document is the canonical, detailed feature inventory for this repository. 
 - Requires `DISCORD_TOKEN` and `ENCRYPTION_KEY` at startup; configurable `COMMAND_PREFIX` and `BOT_MODE` lock.
 - Auto-discovers and loads all cogs in `discord_bot/cogs` at startup.
 - Initializes databases and syncs slash commands on startup.
+- Initializes Postgres pgvector schema when `ACTIVATE_LOCAL_RAG` is enabled.
 - Enforces guild-only commands (blocks prefix and slash commands in DMs).
 - Sets bot presence to Playing: Clanking with humans.
 - Tracks command usage metrics.
@@ -37,14 +40,39 @@ This document is the canonical, detailed feature inventory for this repository. 
 - Provider selection:
   - Default: Gemini.
   - Uncensored (evil) mode: OpenRouter when enabled and allowed by affection level; falls back to Gemini if needed.
+- Optional custom OpenAI-compatible endpoint for standard (censored) responses when enabled per guild.
 - Agentic action execution (role management and moderation) via structured JSON responses when user has configured staff permissions; logs to mod-log channel.
 - Natural-language admin configuration via `admin_action` JSON for starboard, welcome, automod, and basic config actions, with confirmation prompts if required fields are missing.
+- Tool pipeline:
+  - Injects per-guild tool list and tool-call JSON instructions into prompts.
+  - Parses tool calls, executes gated tools, and feeds tool results back into the response pipeline.
+  - Injects RAG document context into prompts when local RAG is enabled.
 
 ### Vision analysis (discord_bot/cogs/vision.py)
 - Explicit image analysis via `!describe` or `/describe` with optional question prompt.
 - Supports image attachments on the current message or a replied message.
 - Enforces supported formats and size limits (10 MB).
 - Uses per-user AI rate limiting.
+
+### Tooling and web intelligence
+- Tool registry with per-guild feature flags and tool-call JSON envelope (`{"tool": "...", "args": {...}}`).
+- Web search tools:
+  - DuckDuckGo search (no key required).
+  - Brave Search (optional per-guild key).
+  - URL fetch and text extraction via trafilatura.
+- Media/expression tools:
+  - Image generation via Replicate or OpenRouter image models.
+  - Sticker selection and emoji reactions from guild assets.
+  - Media context expansion from recent history.
+  - Dev-only GIF inspection (frame counts/durations) gated by `GIF_ANALYSIS_ENABLED`.
+- Content tools:
+  - YouTube metadata + transcript retrieval.
+  - Pin message tool with permission checks.
+  - Profile picture analysis via Gemini Vision.
+
+### Internationalization (discord_bot/utils/i18n.py)
+- Locale JSON files in `discord_bot/locales/` with helper `t(key, locale, **vars)`.
+- Used for selected tool/admin responses (English and Japanese provided).
 
 ### Personality, modes, and presentation
 - Mode registry with profiles in `discord_bot/modes/*` and prompts in `discord_bot/prompts/*`.
@@ -84,7 +112,7 @@ This document is the canonical, detailed feature inventory for this repository. 
 - Personal facts:
   - `!remember` / `/remember` to store facts.
   - Automatic fact reconciliation using Gemini summarization when possible.
-  - `!forget` / `/forget` clears facts.
+  - `!forget` / `/forget` clears facts (supports personal, short_term, long_term, server, and document scopes).
 - Aliases and lookup:
   - `!aka` / `/aka` to add aliases.
   - `!aliases` / `/aliases` list aliases.
@@ -94,6 +122,13 @@ This document is the canonical, detailed feature inventory for this repository. 
   - View, set, and list upcoming birthdays (`!birthday`, `/birthday`).
 - User profile analysis:
   - `/analyze` runs AI-driven personality summary using message history and saved facts.
+- Teaching system (`discord_bot/cogs/teach.py`):
+  - `/teach memory personal` and `/teach memory server` to store personal or server memories.
+  - `/teach attribute` to store persona attributes.
+  - `/teach sampledialogue` to store sample dialogue lines.
+  - `/teach document` to upload documents for RAG (Postgres + pgvector).
+  - `/personal privacy` to opt out of personal memory.
+- Self-teaching tools can store short-term and long-term memories when enabled per guild.
 
 ### Reminders (discord_bot/cogs/reminders.py)
 - Natural language time parsing for reminders (minutes/hours/days/weeks, tomorrow, next week).
@@ -140,7 +175,9 @@ This document is the canonical, detailed feature inventory for this repository. 
 - Model selection for Gemini and OpenRouter (with recommended lists).
 - Env upload and example delivery for guild-specific configuration.
 - `/config env example` sends the warning text plus a multi-part guild.env template when it exceeds message length.
-- Feature toggles (evil mode, autorole, welcome) via `/config toggle`.
+- Feature toggles via `/config toggle`:
+  - evil, autorole, welcome
+  - web_search, image_gen, stickers, emojis, pin_message, self_teaching, youtube, profile_peek, rag
 - Staff roles and permission levels via `/config staff`.
 - Mod log channel via `/config modlog`.
 - Auto-role configuration via `/config autorole`.
@@ -148,6 +185,8 @@ This document is the canonical, detailed feature inventory for this repository. 
   - Channel, enable/disable
   - Custom template
   - DM welcome message and toggle
+- Custom endpoint configuration via `/config custom_endpoint`.
+- Tool availability overview via `/tools status`.
 - Admin user management:
   - Reset user data (facts, affection, aliases)
   - View full user profile
@@ -172,7 +211,7 @@ This document is the canonical, detailed feature inventory for this repository. 
 - Tables (per-guild unless noted):
   - global: `bot_stats`, `guild_registry`
   - users and profiles: `users`, `user_profiles`
-  - memory: `user_facts`, `user_aliases`, `pending_facts`
+  - memory: `user_facts`, `user_aliases`, `pending_facts`, `persona_attributes`, `sample_dialogues`
   - relationships: `user_affection_by_mode`, `bot_mood`, `wellbeing_checks`, `interaction_cooldowns`
   - affection traits: `persona_traits`, `user_trait_history`
   - reminders: `reminders`
@@ -184,8 +223,13 @@ This document is the canonical, detailed feature inventory for this repository. 
 - `starboard_settings` fields include `channel_id`, `emoji_trigger`, `emoji_triggers`, `emoji_mode`, `threshold`, `allow_self_star`, `enabled`.
 - `guild_config` includes `gemini_profile_key` for profile analysis.
 - `guild_config` includes `gemini_key_type` for Gemini key rotation mode.
+- `guild_config` includes Brave/Replicate keys, image provider settings, tool feature flags, and custom endpoint fields.
+- `user_facts` includes `source`, `learned_from_user_id`, and `memory_type` for memory tracking.
+- `user_profiles` includes `personal_memory_opt_out`.
 - Built-in migrations for new columns and tables.
 - Custom persona assets are stored under `discord_bot/data/avatars/custom/` by guild.
+- Optional Postgres RAG store (when `ACTIVATE_LOCAL_RAG` is enabled):
+  - `documents` and `document_chunks` with pgvector embeddings.
 
 ### Deployment and ops
 - Deployment scripts in `deploy/` with a systemd service template.
@@ -193,7 +237,7 @@ This document is the canonical, detailed feature inventory for this repository. 
 - Logging to `discord_bot/logs/femmy.log` with rotation.
 
 ### Tests
-- Unit tests for API key manager, mode registry, image downloader, persona DB helpers, and affection traits in `tests/`.
+- Unit tests for API key manager, mode registry, image downloader, persona DB helpers, affection traits, and tool parsing/flags in `tests/`.
 
 ## Commands
 
@@ -214,13 +258,16 @@ This document is the canonical, detailed feature inventory for this repository. 
 - Persona: `/create persona`, `/persona create`, `/persona list`, `/persona preview`, `/persona edit`, `/persona delete`
 - Affection: `/affection`, `/mood`, `/headpat`, `/hug`
 - Automod: `/automod add`, `/automod remove`, `/automod list`, `/automod spam`
-- Config: `/config auth`, `/config password set|change|reset`, `/config keys view|set|clear`, `/config model view|set`, `/config env example|upload`, `/config toggle evil|autorole|welcome`, `/config staff add|remove|list`, `/config modlog set|clear|view`, `/config autorole set|clear|view`, `/config welcome channel|clear|test|set_message|view_message|clear_message|set_dm_message|clear_dm_message|toggle_dm`
+- Config: `/config auth`, `/config password set|change|reset`, `/config keys view|set|clear`, `/config model view|set`, `/config env example|upload`, `/config toggle evil|autorole|welcome|web_search|image_gen|stickers|emojis|pin_message|self_teaching|youtube|profile_peek|rag`, `/config staff add|remove|list`, `/config modlog set|clear|view`, `/config autorole set|clear|view`, `/config welcome channel|clear|test|set_message|view_message|clear_message|set_dm_message|clear_dm_message|toggle_dm`, `/config custom_endpoint view|set`
 - Memory: `/timezone`, `/remember`, `/forget`, `/myinfo`, `/aka`, `/aliases`, `/whois`, `/aboutuser`, `/birthday`, `/analyze`
+- Teach: `/teach memory personal`, `/teach memory server`, `/teach attribute`, `/teach sampledialogue`, `/teach document`, `/personal privacy`
 - Reminders: `/remind`, `/reminders`, `/remindcancel`
 - Scheduler: `/bumpchannel`, `/bumpstart`, `/bumpstop`
 - Social: `/evil`, `/mode`, `/modes`, `/currentmode`
 - Starboard: `/starboard setup`, `/starboard toggle`, `/starboard ignore`, `/starboard unignore`, `/starboard ignored`
 - Utilities: `/help`, `/stats`, `/reload`, `/translate`, `/generate_embed`, `/tldr`, `/ping`, `/about`
+- Tools: `/tools status`
+- Media: `/generate image`
 - Vision: `/describe`
 - Misc: `/setgenderrole` (admin)
 
@@ -229,6 +276,8 @@ This document is the canonical, detailed feature inventory for this repository. 
 - Guild-level configuration: upload `discord_bot/guild.env.example` via `/config env upload`; `/config env example` replies with the text template (ephemeral).
 - Guild env keys include `GEMINI_PROFILE_KEY` for `/analyze` profile summaries.
 - Guild env supports `GEMINI_KEY_TYPE` to control Gemini key rotation (`free` rotates every request, `paid` sticks unless a key fails).
+- Guild env supports optional `BRAVE_API_KEY`, `REPLICATE_API_KEY`, `IMAGE_PROVIDER`, `IMAGE_MODEL`, and `CUSTOM_ENDPOINT_*` settings.
+- Bot env supports Postgres RAG settings (`ACTIVATE_LOCAL_RAG`, `POSTGRES_*`, `RAG_*`) and dev flags (`GIF_ANALYSIS_ENABLED`).
 - Per-guild API keys are stored encrypted using `ENCRYPTION_KEY`.
 
 ## Folder skeleton (top level)
@@ -251,6 +300,7 @@ This document is the canonical, detailed feature inventory for this repository. 
       ai_brain.py
       automod.py
       config.py
+      imagegen.py
       logger.py
       memories.py
       persona.py
@@ -258,9 +308,14 @@ This document is the canonical, detailed feature inventory for this repository. 
       scheduler.py
       social.py
       starboard.py
+      teach.py
+      tools_admin.py
       utilities.py
       vision.py
       __init__.py
+    locales/
+      en.json
+      ja.json
     data/
       avatars/
         .gitkeep
@@ -297,18 +352,52 @@ This document is the canonical, detailed feature inventory for this repository. 
       db_handler.py
       emoji_manager.py
       encryption.py
+      expression_picker.py
+      expression_tools.py
+      gif_processor.py
       guild_ai.py
+      i18n.py
       image_downloader.py
+      image_generation.py
       logger.py
+      media_context.py
+      pg_client.py
+      pin_tool.py
+      profile_peek.py
+      rag_documents.py
+      rag_embeddings.py
+      rag_store.py
       rate_limiter.py
+      review_capabilities.py
       server_avatar.py
+      self_teaching.py
       sentiment.py
+      tool_context.py
+      tool_flags.py
+      tool_parser.py
+      tool_registry.py
+      url_fetcher.py
+      web_search.py
       __init__.py
     .env
     .env.example
     guild.env.example
     main.py
     requirements.txt
+  docs/
+    AGENTS.md
+    FEATURES.md
+    FEATURE_PARITY_REPORT.md
+    Improvement3.md
+    apidbrefactor.md
+    application.commands
+    emojilist.md
+    freeapisafety.md
+    implementation8.md
+    implementation9.md
+    improvement.md
+    improvement7.md
+    task.md
   scripts/
     split_db.py
   tests/
@@ -318,22 +407,12 @@ This document is the canonical, detailed feature inventory for this repository. 
     test_image_downloader.py
     test_mode_registry.py
     test_persona_db.py
-  AGENTS.md
-  FEATURES.md
-  emojilist.md
-  freeapisafety.md
-  application.commands
-  implementation8.md
-  implementation9.md
-  improvement.md
-  Improvement3.md
-  improvement7.md
-  plan.md
-  apidbrefactor.md
-  task.md
+    test_tool_parser.py
+    test_tool_registry.py
+  tomoribot_reference/
 ```
 
 ## Notes
-- On Windows, `FEATURES.md` and `features.md` refer to the same file; this repository uses `FEATURES.md` as the canonical filename for the detailed features doc.
+- On Windows, `docs/FEATURES.md` and `docs/features.md` refer to the same file; this repository uses `docs/FEATURES.md` as the canonical filename for the detailed features doc.
 - Emoji assets are not bundled; emoji IDs in `discord_bot/data/emoji_config.json` are the source of truth.
 ```
