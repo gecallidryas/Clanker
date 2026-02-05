@@ -117,7 +117,11 @@ WELLBEING_NIGHT_START = 20
 WELLBEING_NIGHT_END = 23
 
 
-AGENTIC_JSON_PATTERN = re.compile(r"```json\s*(\{.*?\})\s*```", re.DOTALL)
+AGENTIC_JSON_PATTERN = re.compile(
+    r"```(?:json)?\s*(\{.*?\})\s*```",
+    re.DOTALL | re.IGNORECASE,
+)
+AGENTIC_JSON_BARE_PATTERN = re.compile(r"^\s*(\{.*\})\s*$", re.DOTALL)
 ADMIN_ACTION_PATTERN = re.compile(r"```admin_action\s*(\{.*?\})\s*```", re.DOTALL)
 ADMIN_CONFIRM_TOKENS = {"confirm", "yes", "y", "ok", "okay"}
 ADMIN_CANCEL_TOKENS = {"cancel", "stop", "never mind", "nevermind"}
@@ -131,7 +135,7 @@ If the user has permission and asks for a role or moderation action, respond ONL
 ```json
 {
   "action": "manage_role" | "moderate_user",
-  "sub_action": "create" | "give" | "remove" | "ban" | "kick" | "timeout" | "mute",
+  "sub_action": "create" | "give" | "remove" | "ban" | "unban" | "kick" | "timeout" | "mute",
   "target_name": "Role name (if applicable)",
   "target_id": "USER_ID_NUMERIC",
   "duration": "Timeout duration in minutes (if timeout/mute)",
@@ -139,6 +143,10 @@ If the user has permission and asks for a role or moderation action, respond ONL
   "reply": "Conversational confirmation for the user"
 }
 ```
+
+Notes:
+- For role creation only, target_id is optional. If provided, also grant the role.
+- For role give/remove and all moderation actions, target_id is required.
 
 If the user does NOT have permission, refuse politely and do NOT output JSON.
 """.strip()
@@ -189,8 +197,19 @@ DEFAULT_ROLE_PERMISSIONS = discord.Permissions(
 
 
 def _find_agentic_json_block(response_text: str) -> Optional[str]:
-    match = AGENTIC_JSON_PATTERN.search(response_text or "")
-    return match.group(1) if match else None
+    if not response_text:
+        return None
+    match = AGENTIC_JSON_PATTERN.search(response_text)
+    if match:
+        return match.group(1)
+
+    stripped = response_text.strip()
+    if not stripped.startswith("{") or not stripped.endswith("}"):
+        return None
+    if "\"action\"" not in stripped or "\"sub_action\"" not in stripped:
+        return None
+    bare_match = AGENTIC_JSON_BARE_PATTERN.match(stripped)
+    return bare_match.group(1) if bare_match else None
 
 
 def _find_admin_action_block(response_text: str) -> Optional[str]:
@@ -202,6 +221,18 @@ def _strip_admin_action_block(response_text: str) -> str:
     if not response_text:
         return ""
     return ADMIN_ACTION_PATTERN.sub("", response_text).strip()
+
+
+def _strip_agentic_json_block(response_text: str) -> str:
+    if not response_text:
+        return ""
+    cleaned = AGENTIC_JSON_PATTERN.sub("", response_text).strip()
+    if cleaned != response_text:
+        return cleaned
+    stripped = response_text.strip()
+    if AGENTIC_JSON_BARE_PATTERN.match(stripped):
+        return ""
+    return response_text
 
 
 def _build_admin_confirmation_prompt(result: Dict[str, Any]) -> str:
@@ -239,7 +270,7 @@ def _agentic_action_requires_level(action: str) -> int:
     action = (action or "").lower().strip()
     if action in {"kick", "timeout", "mute"}:
         return 1
-    if action in {"ban", "create", "give", "remove"}:
+    if action in {"ban", "unban", "create", "give", "remove"}:
         return 2
     return 2
 
@@ -297,7 +328,7 @@ async def handle_agentic_actions(
     sub_action = (data.get("sub_action") or "").lower().strip()
     if action not in {"manage_role", "moderate_user"}:
         return None
-    if sub_action not in {"create", "give", "remove", "ban", "kick", "timeout", "mute"}:
+    if sub_action not in {"create", "give", "remove", "ban", "unban", "kick", "timeout", "mute"}:
         return None
 
     if not message.guild or not isinstance(message.author, discord.Member):
@@ -310,17 +341,22 @@ async def handle_agentic_actions(
         return await message.reply("Nice try, but you don't have permission to do that.", mention_author=False)
 
     target_id = data.get("target_id")
-    try:
-        target_id_int = int(target_id)
-    except (TypeError, ValueError):
-        return await message.reply("I couldn't identify the target user.", mention_author=False)
+    target_id_int: Optional[int] = None
+    target_id_invalid = False
+    if target_id is not None and str(target_id).strip():
+        try:
+            target_id_int = int(target_id)
+        except (TypeError, ValueError):
+            target_id_invalid = True
 
     role_name = (data.get("target_name") or "").strip()
     reason = (data.get("reason") or "No reason provided").strip()
     reply_text = (data.get("reply") or "Done.").strip()
 
     guild = message.guild
-    target_member = await _resolve_member(guild, target_id_int)
+    target_member: Optional[discord.Member] = None
+    if target_id_int is not None:
+        target_member = await _resolve_member(guild, target_id_int)
 
     try:
         if data.get("action") == "manage_role":
@@ -328,7 +364,20 @@ async def handle_agentic_actions(
                 return await message.reply("Please specify a role name.", mention_author=False)
 
             role = discord.utils.get(guild.roles, name=role_name)
-            if sub_action in {"create", "give"}:
+            if sub_action == "create":
+                if not role:
+                    role = await guild.create_role(
+                        name=role_name,
+                        permissions=DEFAULT_ROLE_PERMISSIONS,
+                        reason=f"Requested by {message.author}",
+                    )
+                if target_id_invalid:
+                    return await message.reply("I couldn't identify the target user.", mention_author=False)
+                if target_member:
+                    await target_member.add_roles(role, reason=reason)
+            elif sub_action == "give":
+                if target_id_invalid or target_id_int is None:
+                    return await message.reply("I couldn't identify the target user.", mention_author=False)
                 if not role:
                     role = await guild.create_role(
                         name=role_name,
@@ -339,6 +388,8 @@ async def handle_agentic_actions(
                     return await message.reply("I couldn't find that member.", mention_author=False)
                 await target_member.add_roles(role, reason=reason)
             elif sub_action == "remove":
+                if target_id_invalid or target_id_int is None:
+                    return await message.reply("I couldn't identify the target user.", mention_author=False)
                 if not role:
                     return await message.reply(f"I couldn't find the role '{role_name}'.", mention_author=False)
                 if not target_member:
@@ -356,8 +407,12 @@ async def handle_agentic_actions(
             )
 
         elif data.get("action") == "moderate_user":
+            if target_id_invalid or target_id_int is None:
+                return await message.reply("I couldn't identify the target user.", mention_author=False)
             if sub_action == "ban":
                 await guild.ban(discord.Object(id=target_id_int), reason=reason)
+            elif sub_action == "unban":
+                await guild.unban(discord.Object(id=target_id_int), reason=reason)
             elif sub_action == "kick":
                 if not target_member:
                     return await message.reply("I couldn't find that member.", mention_author=False)
@@ -1550,11 +1605,16 @@ Respond naturally in character. Keep responses concise.
         triggered_modes = await self._get_triggered_modes(message.guild.id, message.content)
         has_current_trigger = mode in triggered_modes
         has_other_trigger = bool(triggered_modes - {mode})
+        is_active = self._is_active_conversation(message.channel.id, message.author.id)
 
         # Determine if we should respond
-        should_respond = (mentioned or has_current_trigger) and not (has_other_trigger and not has_current_trigger)
+        should_respond = mentioned or has_current_trigger or is_active
+        if not mentioned and has_other_trigger and not has_current_trigger:
+            should_respond = False
 
         if not should_respond:
+            if has_other_trigger and is_active:
+                self.active_convos.pop((message.channel.id, message.author.id), None)
             _, reply_to_username = self._resolve_reply_to(message)
             context.add_message(
                 message.id,
@@ -1733,10 +1793,19 @@ Respond naturally in character. Keep responses concise.
             sent = await handle_admin_actions(self, message, raw_response)
         if sent is None:
             response = strip_tool_call(raw_response)
+            response = _strip_agentic_json_block(response)
+            response = _strip_admin_action_block(response)
             evil_mode_enabled = allow_evil and await get_evil_mode(message.guild.id)
 
             emoji_manager = getattr(self.bot, "emoji_manager", None)
-            if emoji_manager:
+            emoji_usage_enabled = True
+            try:
+                guild_config = await get_guild_config(message.guild.id)
+                emoji_usage_enabled = bool(guild_config.get("emoji_usage_enabled", 1))
+            except Exception:
+                emoji_usage_enabled = True
+
+            if emoji_manager and emoji_usage_enabled:
                 response = emoji_manager.apply_trigger_emojis(
                     response_text=response,
                     user_text=message.content,
@@ -1753,10 +1822,13 @@ Respond naturally in character. Keep responses concise.
                 except Exception as exc:
                     logger.warning("Failed to normalize emojis: %s", exc)
 
+            if emoji_manager:
+                response = emoji_manager.replace_shortcodes(response, strip_unknown=True)
+
             sent = await self._send_in_chunks(message, response)
 
         # Manage conversation state
-        if mentioned or has_trigger:
+        if mentioned or has_current_trigger:
             # Fresh trigger - activate/refresh conversation
             self._refresh_conversation(message.channel.id, message.author.id)
         elif is_active:

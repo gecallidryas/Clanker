@@ -731,7 +731,7 @@ async def _init_guild_schema(db: aiosqlite.Connection) -> None:
         CREATE TABLE IF NOT EXISTS starboard_settings (
             guild_id INTEGER PRIMARY KEY,
             channel_id INTEGER,
-            emoji_trigger TEXT DEFAULT 'â­',
+            emoji_trigger TEXT DEFAULT '⭐',
             emoji_triggers TEXT,
             emoji_mode TEXT DEFAULT 'list',
             threshold INTEGER DEFAULT 3,
@@ -1988,6 +1988,16 @@ async def get_automod_rules(guild_id: int) -> List[Dict[str, Any]]:
 # Starboard Settings + Entries
 # ============================================
 
+_MOJIBAKE_EMOJI_MAP = {
+    "â­": "⭐",
+    "ðŸŒŸ": "🌟",
+}
+
+
+def _normalize_mojibake_emoji(token: str) -> str:
+    return _MOJIBAKE_EMOJI_MAP.get(token, token)
+
+
 def _parse_starboard_triggers(raw: Any) -> List[str]:
     if raw is None:
         return []
@@ -2018,9 +2028,12 @@ async def get_starboard_settings(guild_id: int) -> Optional[Dict[str, Any]]:
             if not row:
                 return None
             settings = dict(row)
-            settings["emoji_triggers"] = _parse_starboard_triggers(settings.get("emoji_triggers"))
+            settings["emoji_triggers"] = [
+                _normalize_mojibake_emoji(item)
+                for item in _parse_starboard_triggers(settings.get("emoji_triggers"))
+            ]
             emoji_mode = (settings.get("emoji_mode") or "").strip().lower()
-            legacy_trigger = (settings.get("emoji_trigger") or "").strip()
+            legacy_trigger = _normalize_mojibake_emoji((settings.get("emoji_trigger") or "").strip())
             if not emoji_mode:
                 if legacy_trigger.upper() == "ANY":
                     emoji_mode = "any"
@@ -2043,7 +2056,11 @@ async def upsert_starboard_settings(
 ) -> None:
     """Create or update starboard settings."""
     emoji_mode = (emoji_mode or "list").strip().lower()
-    emoji_triggers = [str(item).strip() for item in (emoji_triggers or []) if str(item).strip()]
+    emoji_triggers = [
+        _normalize_mojibake_emoji(str(item).strip())
+        for item in (emoji_triggers or [])
+        if str(item).strip()
+    ]
     if emoji_mode == "any":
         emoji_triggers = []
     else:
@@ -2053,7 +2070,7 @@ async def upsert_starboard_settings(
     if emoji_mode == "any":
         emoji_trigger = "ANY"
     else:
-        emoji_trigger = emoji_triggers[0] if emoji_triggers else "â­"
+        emoji_trigger = emoji_triggers[0] if emoji_triggers else "⭐"
 
     emoji_triggers_json = json.dumps(emoji_triggers, ensure_ascii=False)
 

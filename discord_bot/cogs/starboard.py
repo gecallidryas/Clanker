@@ -207,41 +207,89 @@ class Starboard(commands.Cog):
 
         settings = await get_starboard_settings(payload.guild_id)
         if not settings:
+            logger.debug("Starboard skip: no settings for guild %s", payload.guild_id)
             return
         if not settings.get("enabled"):
+            logger.debug("Starboard skip: disabled for guild %s", payload.guild_id)
             return
         starboard_channel_id = settings.get("channel_id")
         if not starboard_channel_id:
+            logger.debug("Starboard skip: no channel configured for guild %s", payload.guild_id)
             return
 
         if payload.channel_id == starboard_channel_id:
+            logger.debug(
+                "Starboard skip: reaction in starboard channel (guild %s, channel %s)",
+                payload.guild_id,
+                payload.channel_id,
+            )
             return
 
         ignored_channels = await get_starboard_ignored_channels(payload.guild_id)
         if payload.channel_id in ignored_channels:
+            logger.debug(
+                "Starboard skip: channel ignored (guild %s, channel %s)",
+                payload.guild_id,
+                payload.channel_id,
+            )
             return
 
         emoji_mode, triggers = self._get_trigger_config(settings)
         payload_emoji = payload.emoji
         if emoji_mode != "any" and not self._emoji_matches_any(triggers, payload_emoji):
+            logger.debug(
+                "Starboard skip: emoji mismatch (guild %s, emoji %s, triggers %s, mode %s)",
+                payload.guild_id,
+                self._stringify_emoji(payload_emoji),
+                triggers,
+                emoji_mode,
+            )
             return
 
         entry = await get_starboard_entry(payload.guild_id, payload.message_id)
         if entry and entry.get("is_deleted"):
+            logger.debug(
+                "Starboard skip: entry marked deleted (guild %s, message %s)",
+                payload.guild_id,
+                payload.message_id,
+            )
             return
 
         emoji_display = self._stringify_emoji(payload_emoji)
         if entry and entry.get("emoji_used") and entry.get("emoji_used") != emoji_display:
+            logger.debug(
+                "Starboard skip: emoji used mismatch (guild %s, message %s, got %s, expected %s)",
+                payload.guild_id,
+                payload.message_id,
+                emoji_display,
+                entry.get("emoji_used"),
+            )
             return
 
         channel = await self._fetch_channel(payload.channel_id)
         if not channel:
+            logger.debug(
+                "Starboard skip: source channel not found (guild %s, channel %s)",
+                payload.guild_id,
+                payload.channel_id,
+            )
             return
 
         message = await self._fetch_message(channel, payload.message_id)
         if not message:
+            logger.debug(
+                "Starboard skip: message not found (guild %s, channel %s, message %s)",
+                payload.guild_id,
+                payload.channel_id,
+                payload.message_id,
+            )
             return
         if message.author and message.author.bot:
+            logger.debug(
+                "Starboard skip: message authored by bot (guild %s, message %s)",
+                payload.guild_id,
+                payload.message_id,
+            )
             return
 
         emoji_to_track = payload_emoji
@@ -256,6 +304,11 @@ class Starboard(commands.Cog):
         threshold = max(1, int(settings.get("threshold") or 1))
         starboard_channel = await self._fetch_channel(starboard_channel_id)
         if not starboard_channel:
+            logger.debug(
+                "Starboard skip: starboard channel not found (guild %s, channel %s)",
+                payload.guild_id,
+                starboard_channel_id,
+            )
             return
 
         if entry:
@@ -264,6 +317,13 @@ class Starboard(commands.Cog):
             except (discord.NotFound, discord.Forbidden, discord.HTTPException):
                 await clear_starboard_entry(payload.guild_id, payload.message_id)
                 if effective_count < threshold:
+                    logger.debug(
+                        "Starboard skip: below threshold after missing entry (guild %s, message %s, count %s, threshold %s)",
+                        payload.guild_id,
+                        payload.message_id,
+                        effective_count,
+                        threshold,
+                    )
                     return
                 sb_message = None
 
@@ -289,6 +349,13 @@ class Starboard(commands.Cog):
             return
 
         if effective_count < threshold:
+            logger.debug(
+                "Starboard skip: below threshold (guild %s, message %s, count %s, threshold %s)",
+                payload.guild_id,
+                payload.message_id,
+                effective_count,
+                threshold,
+            )
             return
 
         embed, video_url = self._build_embed(message)
@@ -346,7 +413,7 @@ class Starboard(commands.Cog):
             footer_text = new_embed.footer.text or ""
             suffix = "Original message deleted."
             if suffix not in footer_text:
-                new_footer = f"{footer_text} â€¢ {suffix}".strip(" â€¢")
+                new_footer = f"{footer_text} • {suffix}".strip(" •")
                 new_embed.set_footer(text=new_footer)
             await sb_message.edit(embed=new_embed)
 
@@ -369,7 +436,7 @@ class Starboard(commands.Cog):
         interaction: discord.Interaction,
         channel: discord.TextChannel,
         threshold: int = 3,
-        emoji: str = "â­",
+        emoji: str = "⭐",
         allow_self_star: Optional[bool] = False,
     ):
         if not interaction.guild:
@@ -379,7 +446,7 @@ class Starboard(commands.Cog):
         emoji_mode = "any" if emoji_input.lower() in {"any", "all", "*"} else "list"
         emoji_triggers = [] if emoji_mode == "any" else self._split_emoji_input(emoji_input)
         if emoji_mode != "any" and not emoji_triggers:
-            emoji_triggers = ["â­"]
+            emoji_triggers = ["⭐"]
 
         await upsert_starboard_settings(
             interaction.guild.id,

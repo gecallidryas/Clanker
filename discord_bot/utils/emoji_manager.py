@@ -9,7 +9,9 @@ from utils.logger import get_logger
 logger = get_logger(__name__)
 
 _EMOJI_TOKEN_PATTERN = re.compile(r"<a?:[A-Za-z0-9_]+:(\d+)>")
+_EMOJI_NAME_PATTERN = re.compile(r"<a?:([A-Za-z0-9_]+):\d+>")
 _EMOJI_IN_TEXT_PATTERN = re.compile(r"<a?:[A-Za-z0-9_]+:\d+>")
+_SHORTCODE_PATTERN = re.compile(r"(?<!<a)(?<!<):([A-Za-z0-9_]+):")
 
 
 class EmojiManager:
@@ -150,7 +152,16 @@ class EmojiManager:
         user_lower = (user_text or "").lower()
 
         def _has_any(text: str, phrases: List[str]) -> bool:
-            return any(phrase in text for phrase in phrases)
+            for phrase in phrases:
+                if not phrase:
+                    continue
+                if " " in phrase:
+                    if phrase in text:
+                        return True
+                else:
+                    if re.search(r"\b" + re.escape(phrase) + r"\b", text):
+                        return True
+            return False
 
         selected: List[str] = []
 
@@ -229,3 +240,34 @@ class EmojiManager:
             return response_text
 
         return response_text.rstrip() + " " + " ".join(additions)
+
+    def _build_shortcode_lookup(self) -> Dict[str, str]:
+        lookup: Dict[str, str] = {}
+        for name, token in self._validated_emojis.items():
+            if not token:
+                continue
+            lookup[name.lower()] = token
+            match = _EMOJI_NAME_PATTERN.match(token)
+            if match:
+                lookup.setdefault(match.group(1).lower(), token)
+
+        for token in self._validated_general:
+            match = _EMOJI_NAME_PATTERN.match(token)
+            if match:
+                lookup.setdefault(match.group(1).lower(), token)
+
+        return lookup
+
+    def replace_shortcodes(self, text: str, strip_unknown: bool = True) -> str:
+        if not text:
+            return text
+        lookup = self._build_shortcode_lookup()
+
+        def _replace(match: re.Match) -> str:
+            name = match.group(1).lower()
+            token = lookup.get(name)
+            if token:
+                return token
+            return name if strip_unknown else match.group(0)
+
+        return _SHORTCODE_PATTERN.sub(_replace, text)
