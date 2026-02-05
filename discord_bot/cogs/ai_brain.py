@@ -147,6 +147,9 @@ If the user has permission and asks for a role or moderation action, respond ONL
 Notes:
 - For role creation only, target_id is optional. If provided, also grant the role.
 - For role give/remove and all moderation actions, target_id is required.
+- If the user says "me", use the provided User ID for target_id.
+- If you need a target_id but it is missing, ask for a mention or numeric ID instead of refusing.
+- Agentic actions are administrative tasks. If agentic access is granted, comply regardless of affection level.
 
 If the user does NOT have permission, refuse politely and do NOT output JSON.
 """.strip()
@@ -233,6 +236,21 @@ def _strip_agentic_json_block(response_text: str) -> str:
     if AGENTIC_JSON_BARE_PATTERN.match(stripped):
         return ""
     return response_text
+
+
+def _should_assign_created_role(message: discord.Message) -> bool:
+    content = (message.content or "").lower()
+    if not content:
+        return False
+    triggers = [
+        "give it to me",
+        "give me",
+        "for me",
+        "to me",
+        "assign me",
+        "add me",
+    ]
+    return any(trigger in content for trigger in triggers)
 
 
 def _build_admin_confirmation_prompt(result: Dict[str, Any]) -> str:
@@ -373,6 +391,8 @@ async def handle_agentic_actions(
                     )
                 if target_id_invalid:
                     return await message.reply("I couldn't identify the target user.", mention_author=False)
+                if not target_member and _should_assign_created_role(message):
+                    target_member = message.author
                 if target_member:
                     await target_member.add_roles(role, reason=reason)
             elif sub_action == "give":
@@ -1462,6 +1482,9 @@ You can explain these commands to the user if asked:
         else:
             agentic_access = "none"
         agentic_note = f"[Agentic access: {agentic_access}]"
+        user_id_note = ""
+        if agentic_access != "none":
+            user_id_note = f"[User ID: {user_id}. Use this as target_id when the user says 'me'.]"
 
         admin_access = "yes" if member and (
             member.guild_permissions.administrator or member.guild_permissions.manage_guild
@@ -1484,6 +1507,7 @@ Low affection = reserved, won't agree to demands. High affection = eager to plea
 {address_note}
 {wellbeing_note}
 {agentic_note}
+{user_id_note}
 {admin_note}
 {emoji_policy_note}
 

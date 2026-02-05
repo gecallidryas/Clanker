@@ -42,7 +42,7 @@ This document is the canonical, detailed feature inventory for this repository. 
   - Default: Gemini.
   - Uncensored (evil) mode: OpenRouter when enabled and allowed by affection level; falls back to Gemini if needed.
 - Optional custom OpenAI-compatible endpoint for standard (censored) responses when enabled per guild.
-- Agentic action execution (role management and moderation) via structured JSON responses when user has configured staff permissions; role creation can omit a target user; supports unban; logs to mod-log channel.
+- Agentic action execution (role management and moderation) via structured JSON responses when user has configured staff permissions; role creation can omit a target user and can auto-assign to the requester when asked; supports unban; logs to mod-log channel.
 - Natural-language admin configuration via `admin_action` JSON for starboard, welcome, automod, and basic config actions, with confirmation prompts if required fields are missing.
 - Tool pipeline:
   - Injects per-guild tool list and tool-call JSON instructions into prompts.
