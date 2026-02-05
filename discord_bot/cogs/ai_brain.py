@@ -842,15 +842,29 @@ class AIBrain(commands.Cog):
             return False
         content = message.content or ""
         if "role" not in content.lower():
+            logger.debug("Role fallback: skip (no 'role' keyword).")
             return False
 
         permission_level = await _get_agentic_permission_level(message.author)
         if permission_level < 2:
+            logger.debug(
+                "Role fallback: skip (permission level %s < 2).",
+                permission_level,
+            )
             return False
 
         role_name = _extract_role_name_from_text(content)
         if not role_name:
+            logger.debug(
+                "Role fallback: skip (could not parse role name). content=%r",
+                content,
+            )
             return False
+        logger.debug(
+            "Role fallback: parsed role name '%s' for user %s.",
+            role_name,
+            message.author.id,
+        )
 
         payload = {
             "action": "manage_role",
@@ -860,8 +874,10 @@ class AIBrain(commands.Cog):
             "reason": "User request",
             "reply": f"Done! Created or assigned the role '{role_name}'.",
         }
+        logger.debug("Role fallback: executing agentic payload %s", payload)
         response_text = "```json\n" + json.dumps(payload, ensure_ascii=False) + "\n```"
         handled = await handle_agentic_actions(message, response_text)
+        logger.debug("Role fallback: handled=%s", handled is not None)
         return handled is not None
 
     async def _get_recent_history(self, message: discord.Message, limit: int = 5) -> str:
