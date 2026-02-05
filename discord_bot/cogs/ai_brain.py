@@ -249,8 +249,32 @@ def _should_assign_created_role(message: discord.Message) -> bool:
         "to me",
         "assign me",
         "add me",
+        "make me",
     ]
     return any(trigger in content for trigger in triggers)
+
+
+def _extract_role_name_from_text(content: str) -> Optional[str]:
+    if not content:
+        return None
+    quoted = re.findall(r"[\"“”'‘’]([^\"“”'‘’]+)[\"“”'‘’]", content)
+    for token in quoted:
+        name = token.strip()
+        if name:
+            return name
+
+    patterns = [
+        r"(?:make|give|assign|add)\s+me\s+(?:the\s+)?(.+?)\s+role\b",
+        r"create\s+(?:a\s+)?role\s+(?:named|called)?\s*(.+?)(?:\s+for\s+me|\s+and\s+give|\s*$)",
+        r"create\s+(.+?)\s+role\b",
+    ]
+    for pattern in patterns:
+        match = re.search(pattern, content, flags=re.IGNORECASE)
+        if match:
+            name = match.group(1).strip()
+            if name:
+                return name
+    return None
 
 
 def _build_admin_confirmation_prompt(result: Dict[str, Any]) -> str:
@@ -272,6 +296,8 @@ async def _get_agentic_permission_level(member: Optional[discord.Member]) -> int
     """Return the highest agentic permission level for a member (0-2)."""
     if not member or not member.guild:
         return 0
+    if member.guild.owner_id == member.id:
+        return 2
     if member.guild_permissions.administrator:
         return 2
     staff_roles = await get_staff_roles(member.guild.id)
@@ -381,7 +407,10 @@ async def handle_agentic_actions(
             if not role_name:
                 return await message.reply("Please specify a role name.", mention_author=False)
 
-            role = discord.utils.get(guild.roles, name=role_name)
+            role = next(
+                (item for item in guild.roles if (item.name or "").lower() == role_name.lower()),
+                None,
+            )
             if sub_action == "create":
                 if not role:
                     role = await guild.create_role(
@@ -807,6 +836,33 @@ class AIBrain(commands.Cog):
             pass
         
         return ""
+
+    async def _maybe_handle_role_request(self, message: discord.Message) -> bool:
+        if not message.guild or not isinstance(message.author, discord.Member):
+            return False
+        content = message.content or ""
+        if "role" not in content.lower():
+            return False
+
+        permission_level = await _get_agentic_permission_level(message.author)
+        if permission_level < 2:
+            return False
+
+        role_name = _extract_role_name_from_text(content)
+        if not role_name:
+            return False
+
+        payload = {
+            "action": "manage_role",
+            "sub_action": "create",
+            "target_name": role_name,
+            "target_id": str(message.author.id),
+            "reason": "User request",
+            "reply": f"Done! Created or assigned the role '{role_name}'.",
+        }
+        response_text = "```json\n" + json.dumps(payload, ensure_ascii=False) + "\n```"
+        handled = await handle_agentic_actions(message, response_text)
+        return handled is not None
 
     async def _get_recent_history(self, message: discord.Message, limit: int = 5) -> str:
         """Fetch recent messages before this one for additional context."""
@@ -1487,7 +1543,9 @@ You can explain these commands to the user if asked:
             user_id_note = f"[User ID: {user_id}. Use this as target_id when the user says 'me'.]"
 
         admin_access = "yes" if member and (
-            member.guild_permissions.administrator or member.guild_permissions.manage_guild
+            member.guild.owner_id == member.id
+            or member.guild_permissions.administrator
+            or member.guild_permissions.manage_guild
         ) else "no"
         admin_note = f"[Admin config access: {admin_access}]"
         admin_instructions = ADMIN_ACTION_INSTRUCTIONS if admin_access == "yes" else ""
@@ -1639,6 +1697,19 @@ Respond naturally in character. Keep responses concise.
         if not should_respond:
             if has_other_trigger and is_active:
                 self.active_convos.pop((message.channel.id, message.author.id), None)
+            _, reply_to_username = self._resolve_reply_to(message)
+            context.add_message(
+                message.id,
+                message.author.id,
+                message.author.display_name,
+                message.content,
+                reply_to_username=reply_to_username,
+                media=media_refs,
+            )
+            return
+
+        # Fast-path role requests for agentic admins (bypass model refusals)
+        if await self._maybe_handle_role_request(message):
             _, reply_to_username = self._resolve_reply_to(message)
             context.add_message(
                 message.id,
