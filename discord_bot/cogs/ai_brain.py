@@ -277,6 +277,16 @@ def _extract_role_name_from_text(content: str) -> Optional[str]:
     return None
 
 
+def _extract_target_member_id(message: discord.Message) -> Optional[int]:
+    if not message.mentions:
+        return None
+    for member in message.mentions:
+        if member.bot:
+            continue
+        return member.id
+    return None
+
+
 def _build_admin_confirmation_prompt(result: Dict[str, Any]) -> str:
     missing = result.get("missing") or []
     summary = result.get("summary") or ""
@@ -866,11 +876,16 @@ class AIBrain(commands.Cog):
             message.author.id,
         )
 
+        target_id = _extract_target_member_id(message)
+        if target_id is None and _should_assign_created_role(message):
+            target_id = message.author.id
+        logger.debug("Role fallback: target_id=%s", target_id)
+
         payload = {
             "action": "manage_role",
             "sub_action": "create",
             "target_name": role_name,
-            "target_id": str(message.author.id),
+            "target_id": str(target_id) if target_id is not None else None,
             "reason": "User request",
             "reply": f"Done! Created or assigned the role '{role_name}'.",
         }
