@@ -134,9 +134,13 @@ If the user has permission and asks for a role or moderation action, respond ONL
 
 ```json
 {
-  "action": "manage_role" | "moderate_user",
-  "sub_action": "create" | "give" | "remove" | "ban" | "unban" | "kick" | "timeout" | "mute",
+  "action": "manage_role" | "moderate_user" | "manage_channel",
+  "sub_action": "create" | "give" | "remove" | "ban" | "unban" | "kick" | "timeout" | "mute"
+               | "create_category" | "create_text_channel" | "create_voice_channel",
   "target_name": "Role name (if applicable)",
+  "channel_name": "Channel or category name (if applicable)",
+  "parent_name": "Category name to place channel under (optional)",
+  "parent_id": "Category ID to place channel under (optional)",
   "target_id": "USER_ID_NUMERIC",
   "duration": "Timeout duration in minutes (if timeout/mute)",
   "reason": "Reason for action",
@@ -150,6 +154,7 @@ Notes:
 - If the user says "me", use the provided User ID for target_id.
 - If you need a target_id but it is missing, ask for a mention or numeric ID instead of refusing.
 - Agentic actions are administrative tasks. If agentic access is granted, comply regardless of affection level.
+- For channels, use manage_channel with create_category or create_text_channel/create_voice_channel and include parent_name or parent_id when asked.
 
 If the user does NOT have permission, refuse politely and do NOT output JSON.
 """.strip()
@@ -287,6 +292,85 @@ def _extract_target_member_id(message: discord.Message) -> Optional[int]:
     return None
 
 
+def _clean_channel_name(name: str) -> str:
+    name = (name or "").strip()
+    if not name:
+        return ""
+    name = re.sub(r"(?:please|pls|thanks|thank you)$", "", name, flags=re.IGNORECASE).strip()
+    name = name.strip("\"'“”‘’")
+    return name.strip()
+
+
+def _extract_channel_request(content: str) -> Optional[dict]:
+    if not content:
+        return None
+    content_lower = content.lower()
+    has_category = "category" in content_lower
+    has_channel = "channel" in content_lower
+    if not has_category and not has_channel:
+        return None
+
+    quotes = re.findall(r"[\"“”'‘’]([^\"“”'‘’]+)[\"“”'‘’]", content)
+    quote_names = [_clean_channel_name(item) for item in quotes if _clean_channel_name(item)]
+
+    if has_category and has_channel and len(quote_names) >= 2:
+        return {
+            "sub_action": "create_text_channel",
+            "channel_name": quote_names[1],
+            "parent_name": quote_names[0],
+        }
+    if has_category and len(quote_names) >= 1:
+        return {
+            "sub_action": "create_category",
+            "channel_name": quote_names[0],
+            "parent_name": None,
+        }
+    if has_channel and len(quote_names) >= 2 and ("under" in content_lower or "in " in content_lower):
+        return {
+            "sub_action": "create_text_channel",
+            "channel_name": quote_names[0],
+            "parent_name": quote_names[1],
+        }
+    if has_channel and len(quote_names) >= 1:
+        return {
+            "sub_action": "create_text_channel",
+            "channel_name": quote_names[0],
+            "parent_name": None,
+        }
+
+    category_match = re.search(
+        r"(?:create|make|add)\s+(?:a\s+)?category\s+(?:named|called)?\s*([\\w\\- ]+)",
+        content,
+        flags=re.IGNORECASE,
+    )
+    if category_match:
+        name = _clean_channel_name(category_match.group(1))
+        if name:
+            return {"sub_action": "create_category", "channel_name": name, "parent_name": None}
+
+    channel_match = re.search(
+        r"(?:create|make|add)\s+(?:a\s+)?channel\s+(?:named|called)?\s*([\\w\\- ]+)",
+        content,
+        flags=re.IGNORECASE,
+    )
+    if channel_match:
+        name = _clean_channel_name(channel_match.group(1))
+        if name:
+            parent_match = re.search(
+                r"(?:under|in)\s+(?:the\s+)?([\\w\\- ]+?)\\s*(?:category)?(?:\\b|$)",
+                content,
+                flags=re.IGNORECASE,
+            )
+            parent_name = _clean_channel_name(parent_match.group(1)) if parent_match else None
+            return {
+                "sub_action": "create_text_channel",
+                "channel_name": name,
+                "parent_name": parent_name or None,
+            }
+
+    return None
+
+
 def _build_admin_confirmation_prompt(result: Dict[str, Any]) -> str:
     missing = result.get("missing") or []
     summary = result.get("summary") or ""
@@ -324,7 +408,16 @@ def _agentic_action_requires_level(action: str) -> int:
     action = (action or "").lower().strip()
     if action in {"kick", "timeout", "mute"}:
         return 1
-    if action in {"ban", "unban", "create", "give", "remove"}:
+    if action in {
+        "ban",
+        "unban",
+        "create",
+        "give",
+        "remove",
+        "create_category",
+        "create_text_channel",
+        "create_voice_channel",
+    }:
         return 2
     return 2
 
@@ -380,9 +473,21 @@ async def handle_agentic_actions(
         return None
     action = (data.get("action") or "").lower().strip()
     sub_action = (data.get("sub_action") or "").lower().strip()
-    if action not in {"manage_role", "moderate_user"}:
+    if action not in {"manage_role", "moderate_user", "manage_channel"}:
         return None
-    if sub_action not in {"create", "give", "remove", "ban", "unban", "kick", "timeout", "mute"}:
+    if sub_action not in {
+        "create",
+        "give",
+        "remove",
+        "ban",
+        "unban",
+        "kick",
+        "timeout",
+        "mute",
+        "create_category",
+        "create_text_channel",
+        "create_voice_channel",
+    }:
         return None
 
     if not message.guild or not isinstance(message.author, discord.Member):
@@ -499,6 +604,57 @@ async def handle_agentic_actions(
                 target_member,
                 reason,
             )
+        elif data.get("action") == "manage_channel":
+            channel_name = (data.get("channel_name") or data.get("target_name") or "").strip()
+            if not channel_name:
+                return await message.reply("Please specify a channel or category name.", mention_author=False)
+
+            parent_id = data.get("parent_id")
+            parent_name = (data.get("parent_name") or "").strip()
+            category: Optional[discord.CategoryChannel] = None
+            if parent_id:
+                try:
+                    parent_id_int = int(parent_id)
+                except (TypeError, ValueError):
+                    parent_id_int = None
+                if parent_id_int:
+                    parent = guild.get_channel(parent_id_int)
+                    if isinstance(parent, discord.CategoryChannel):
+                        category = parent
+            if category is None and parent_name:
+                for item in guild.categories:
+                    if (item.name or "").lower() == parent_name.lower():
+                        category = item
+                        break
+                if category is None:
+                    category = await guild.create_category(
+                        name=parent_name,
+                        reason=f"Requested by {message.author}",
+                    )
+
+            if sub_action == "create_category":
+                existing = next(
+                    (item for item in guild.categories if (item.name or "").lower() == channel_name.lower()),
+                    None,
+                )
+                category = existing or await guild.create_category(
+                    name=channel_name,
+                    reason=f"Requested by {message.author}",
+                )
+            elif sub_action == "create_text_channel":
+                await guild.create_text_channel(
+                    name=channel_name,
+                    category=category,
+                    reason=f"Requested by {message.author}",
+                )
+            elif sub_action == "create_voice_channel":
+                await guild.create_voice_channel(
+                    name=channel_name,
+                    category=category,
+                    reason=f"Requested by {message.author}",
+                )
+            else:
+                return await message.reply("Unknown channel action.", mention_author=False)
         else:
             return await message.reply("Unknown agentic action.", mention_author=False)
 
@@ -846,6 +1002,62 @@ class AIBrain(commands.Cog):
             pass
         
         return ""
+
+    async def _maybe_handle_channel_request(self, message: discord.Message) -> bool:
+        if not message.guild or not isinstance(message.author, discord.Member):
+            return False
+        content = message.content or ""
+        content_lower = content.lower()
+        if "channel" not in content_lower and "category" not in content_lower:
+            logger.debug("Channel fallback: skip (no channel/category keyword).")
+            return False
+
+        permission_level = await _get_agentic_permission_level(message.author)
+        if permission_level < 2:
+            logger.debug(
+                "Channel fallback: skip (permission level %s < 2).",
+                permission_level,
+            )
+            return False
+
+        request = _extract_channel_request(content)
+        if not request:
+            logger.debug(
+                "Channel fallback: skip (could not parse request). content=%r",
+                content,
+            )
+            return False
+
+        sub_action = request.get("sub_action")
+        channel_name = request.get("channel_name")
+        parent_name = request.get("parent_name")
+        if not channel_name or not sub_action:
+            logger.debug(
+                "Channel fallback: skip (missing parsed fields). request=%s",
+                request,
+            )
+            return False
+
+        if "voice" in content_lower or "vc" in content_lower:
+            sub_action = "create_voice_channel" if sub_action != "create_category" else sub_action
+
+        payload = {
+            "action": "manage_channel",
+            "sub_action": sub_action,
+            "channel_name": channel_name,
+            "parent_name": parent_name,
+            "reason": "User request",
+            "reply": (
+                f"Done! Created {channel_name}."
+                if sub_action == "create_category"
+                else f"Done! Created channel '{channel_name}'."
+            ),
+        }
+        logger.debug("Channel fallback: executing agentic payload %s", payload)
+        response_text = "```json\n" + json.dumps(payload, ensure_ascii=False) + "\n```"
+        handled = await handle_agentic_actions(message, response_text)
+        logger.debug("Channel fallback: handled=%s", handled is not None)
+        return handled is not None
 
     async def _maybe_handle_role_request(self, message: discord.Message) -> bool:
         if not message.guild or not isinstance(message.author, discord.Member):
@@ -1728,6 +1940,19 @@ Respond naturally in character. Keep responses concise.
         if not should_respond:
             if has_other_trigger and is_active:
                 self.active_convos.pop((message.channel.id, message.author.id), None)
+            _, reply_to_username = self._resolve_reply_to(message)
+            context.add_message(
+                message.id,
+                message.author.id,
+                message.author.display_name,
+                message.content,
+                reply_to_username=reply_to_username,
+                media=media_refs,
+            )
+            return
+
+        # Fast-path channel/category requests for agentic admins (bypass model refusals)
+        if await self._maybe_handle_channel_request(message):
             _, reply_to_username = self._resolve_reply_to(message)
             context.add_message(
                 message.id,
