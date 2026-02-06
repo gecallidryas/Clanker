@@ -8,8 +8,6 @@ from discord import app_commands
 from discord.ext import commands
 
 from utils.db_handler import (
-    add_fact,
-    add_server_memory,
     add_persona_attribute,
     add_sample_dialogue,
     set_personal_memory_opt_out,
@@ -18,52 +16,20 @@ from utils.db_handler import (
 from utils.rag_documents import extract_text_from_bytes
 from utils.rag_store import store_document
 from utils.i18n import get_locale_from_interaction, t
+from utils.memory_limits import (
+    get_memory_limit_error_message,
+    validate_attribute_content,
+    validate_document_text,
+    validate_sample_dialogue_content,
+)
 
 
 class Teach(commands.Cog):
     teach_group = app_commands.Group(name="teach", description="Teach the bot new knowledge")
-    memory_group = app_commands.Group(name="memory", description="Teach memory", parent=teach_group)
     personal_group = app_commands.Group(name="personal", description="Personal settings")
 
     def __init__(self, bot: commands.Bot) -> None:
         self.bot = bot
-
-    @memory_group.command(name="personal", description="Teach a personal memory about a user.")
-    @app_commands.describe(fact="Fact to remember", member="User to store the fact for (optional)")
-    async def teach_memory_personal(
-        self,
-        interaction: discord.Interaction,
-        fact: str,
-        member: Optional[discord.Member] = None,
-    ):
-        if not interaction.guild:
-            await interaction.response.send_message(
-                t("common.server_only", get_locale_from_interaction(interaction)),
-                ephemeral=True,
-            )
-            return
-        target = member or interaction.user
-        await add_fact(interaction.guild.id, target.id, fact, memory_type="personal")
-        locale = get_locale_from_interaction(interaction)
-        await interaction.response.send_message(
-            t("teach.memory.personal_saved", locale, user=target.display_name), ephemeral=True
-        )
-
-    @memory_group.command(name="server", description="Teach a server memory.")
-    @app_commands.describe(fact="Server-wide memory entry")
-    async def teach_memory_server(self, interaction: discord.Interaction, fact: str):
-        if not interaction.guild:
-            await interaction.response.send_message(
-                t("common.server_only", get_locale_from_interaction(interaction)),
-                ephemeral=True,
-            )
-            return
-        if not interaction.user.guild_permissions.manage_guild:
-            await interaction.response.send_message("You need Manage Server to add server memory.", ephemeral=True)
-            return
-        await add_server_memory(interaction.guild.id, fact, source="manual", learned_from_user_id=interaction.user.id)
-        locale = get_locale_from_interaction(interaction)
-        await interaction.response.send_message(t("teach.memory.server_saved", locale), ephemeral=True)
 
     @teach_group.command(name="attribute", description="Teach a persona attribute.")
     @app_commands.describe(attribute="Attribute name", value="Attribute value")
@@ -76,6 +42,20 @@ class Teach(commands.Cog):
             return
         if not interaction.user.guild_permissions.manage_guild:
             await interaction.response.send_message("You need Manage Server to add attributes.", ephemeral=True)
+            return
+        attr_validation = validate_attribute_content(attribute.strip())
+        if not attr_validation.is_valid:
+            await interaction.response.send_message(
+                get_memory_limit_error_message(attr_validation),
+                ephemeral=True,
+            )
+            return
+        value_validation = validate_attribute_content(value.strip())
+        if not value_validation.is_valid:
+            await interaction.response.send_message(
+                get_memory_limit_error_message(value_validation),
+                ephemeral=True,
+            )
             return
         await add_persona_attribute(interaction.guild.id, attribute.strip(), value.strip(), interaction.user.id)
         locale = get_locale_from_interaction(interaction)
@@ -92,6 +72,20 @@ class Teach(commands.Cog):
             return
         if not interaction.user.guild_permissions.manage_guild:
             await interaction.response.send_message("You need Manage Server to add sample dialogues.", ephemeral=True)
+            return
+        speaker_validation = validate_attribute_content(speaker.strip())
+        if not speaker_validation.is_valid:
+            await interaction.response.send_message(
+                get_memory_limit_error_message(speaker_validation),
+                ephemeral=True,
+            )
+            return
+        dialogue_validation = validate_sample_dialogue_content(dialogue.strip())
+        if not dialogue_validation.is_valid:
+            await interaction.response.send_message(
+                get_memory_limit_error_message(dialogue_validation),
+                ephemeral=True,
+            )
             return
         await add_sample_dialogue(interaction.guild.id, speaker.strip(), dialogue.strip(), interaction.user.id)
         locale = get_locale_from_interaction(interaction)
@@ -129,6 +123,13 @@ class Teach(commands.Cog):
         text = extract_text_from_bytes(data, file.filename)
         if not text:
             await interaction.followup.send("Unsupported file type. Use .txt, .md, or .pdf.", ephemeral=True)
+            return
+        text_validation = validate_document_text(text)
+        if not text_validation.is_valid:
+            await interaction.followup.send(
+                get_memory_limit_error_message(text_validation),
+                ephemeral=True,
+            )
             return
         doc_title = title or file.filename
         try:

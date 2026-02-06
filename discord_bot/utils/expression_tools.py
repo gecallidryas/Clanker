@@ -14,8 +14,11 @@ async def _handle_select_sticker(context: ToolContext, args: dict[str, Any]) -> 
     sticker = pick_sticker(context.guild, query if query else None)
     if not sticker:
         return ToolResult(ok=False, summary="No stickers available.")
-    await context.channel.send(stickers=[sticker])
-    return ToolResult(ok=True, summary=f"Sent sticker {sticker.name}.", data={"sticker": sticker.name})
+    return ToolResult(
+        ok=True,
+        summary=f"Selected sticker {sticker.name}.",
+        data={"sticker": sticker.name, "sticker_id": int(sticker.id)},
+    )
 
 
 async def _handle_react_with_emoji(context: ToolContext, args: dict[str, Any]) -> ToolResult:

@@ -4,6 +4,11 @@ import os
 from typing import Any, Dict, List, Optional
 
 from utils.logger import get_logger
+from utils.memory_limits import (
+    get_memory_limit_error_message,
+    validate_document_chunks,
+    validate_document_text,
+)
 from utils.pg_client import ensure_pg_schema, get_pg_pool
 from utils.rag_documents import chunk_text, hash_content
 from utils.rag_embeddings import embed_texts
@@ -22,6 +27,9 @@ async def store_document(
     ready = await ensure_pg_schema()
     if not ready:
         raise RuntimeError("Postgres is not configured.")
+    text_validation = validate_document_text(text)
+    if not text_validation.is_valid:
+        raise RuntimeError(get_memory_limit_error_message(text_validation))
     chunks = chunk_text(
         text,
         chunk_size=int(os.getenv("RAG_CHUNK_SIZE", "800")),
@@ -29,6 +37,9 @@ async def store_document(
     )
     if not chunks:
         raise RuntimeError("No chunks extracted from document.")
+    chunk_validation = validate_document_chunks(len(chunks))
+    if not chunk_validation.is_valid:
+        raise RuntimeError(get_memory_limit_error_message(chunk_validation))
     embeddings = await embed_texts(guild_id, chunks)
     if len(embeddings) != len(chunks):
         raise RuntimeError("Embedding count mismatch.")

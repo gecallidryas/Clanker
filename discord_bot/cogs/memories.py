@@ -23,6 +23,7 @@ from discord import app_commands
 from utils.db_handler import (
     set_timezone,
     add_fact,
+    add_server_memory,
     get_facts,
     delete_facts,
     get_user,
@@ -34,6 +35,7 @@ from utils.db_handler import (
 from utils.api_manager import get_gemini_summarize_manager, UserInputError
 from utils.logger import get_logger
 from utils.i18n import get_locale_from_guild, get_locale_from_interaction, t
+from utils.memory_limits import get_memory_limit_error_message, validate_fact_content
 
 logger = get_logger(__name__)
 
@@ -51,6 +53,8 @@ New fact to add:
 
 
 class Memories(commands.Cog):
+    remember_group = app_commands.Group(name="remember", description="Save personal or server memories.")
+
     """
     Memories Cog - User personalization and fact storage.
     
@@ -215,9 +219,9 @@ class Memories(commands.Cog):
         if not ctx.guild:
             await ctx.send(t("facts.server_only", get_locale_from_guild(ctx.guild)))
             return
-
-        if len(fact) > 500:
-            await ctx.send("Fact too long! Please keep it under 500 characters.")
+        validation = validate_fact_content(fact)
+        if not validation.is_valid:
+            await ctx.send(get_memory_limit_error_message(validation))
             return
 
         await create_user(ctx.guild.id, target.id)
@@ -226,8 +230,16 @@ class Memories(commands.Cog):
         summarized = await self._summarize_facts(existing, fact) if existing else None
 
         if summarized:
-            await delete_facts(ctx.guild.id, target.id)
+            validated_items: list[str] = []
             for item in summarized:
+                item_validation = validate_fact_content(item)
+                if not item_validation.is_valid:
+                    await ctx.send(get_memory_limit_error_message(item_validation))
+                    return
+                validated_items.append(item)
+
+            await delete_facts(ctx.guild.id, target.id)
+            for item in validated_items:
                 await add_fact(ctx.guild.id, target.id, item)
 
             await ctx.send(
@@ -684,7 +696,7 @@ class Memories(commands.Cog):
             f"Your current time: `{current_time}`"
         )
 
-    @app_commands.command(name="remember", description="Save a fact about yourself.")
+    @remember_group.command(name="personal", description="Save a personal fact.")
     @app_commands.describe(fact="The fact to remember", member="User to store the fact for (optional)")
     async def remember_fact_slash(self, interaction: discord.Interaction, fact: str, member: discord.Member = None):
         if not interaction.guild:
@@ -694,9 +706,13 @@ class Memories(commands.Cog):
             )
             return
 
-        if len(fact) > 500:
+        if not fact.strip():
+            await interaction.response.send_message("Please provide a fact to remember.", ephemeral=True)
+            return
+        validation = validate_fact_content(fact.strip())
+        if not validation.is_valid:
             await interaction.response.send_message(
-                "Fact too long! Please keep it under 500 characters.",
+                get_memory_limit_error_message(validation),
                 ephemeral=True,
             )
             return
@@ -709,8 +725,19 @@ class Memories(commands.Cog):
         summarized = await self._summarize_facts(existing, fact) if existing else None
 
         if summarized:
-            await delete_facts(interaction.guild.id, target.id)
+            validated_items: list[str] = []
             for item in summarized:
+                item_validation = validate_fact_content(item)
+                if not item_validation.is_valid:
+                    await interaction.followup.send(
+                        get_memory_limit_error_message(item_validation),
+                        ephemeral=True,
+                    )
+                    return
+                validated_items.append(item)
+
+            await delete_facts(interaction.guild.id, target.id)
+            for item in validated_items:
                 await add_fact(interaction.guild.id, target.id, item)
 
             await interaction.followup.send(
@@ -721,6 +748,46 @@ class Memories(commands.Cog):
         await add_fact(interaction.guild.id, target.id, fact)
         target_text = f" for {target.display_name}" if target.id != interaction.user.id else ""
         await interaction.followup.send(f"Got it! I'll remember that{target_text}.")
+
+    @remember_group.command(name="server", description="Save a server memory.")
+    @app_commands.describe(fact="Server-wide memory entry")
+    async def remember_server_slash(self, interaction: discord.Interaction, fact: str):
+        if not interaction.guild:
+            await interaction.response.send_message(
+                t("facts.server_only", get_locale_from_interaction(interaction)),
+                ephemeral=True,
+            )
+            return
+
+        if not interaction.user.guild_permissions.manage_guild:
+            await interaction.response.send_message(
+                "You need Manage Server to add server memory.",
+                ephemeral=True,
+            )
+            return
+
+        if not fact.strip():
+            await interaction.response.send_message("Please provide a server memory to remember.", ephemeral=True)
+            return
+        validation = validate_fact_content(fact.strip())
+        if not validation.is_valid:
+            await interaction.response.send_message(
+                get_memory_limit_error_message(validation),
+                ephemeral=True,
+            )
+            return
+
+        await add_server_memory(
+            interaction.guild.id,
+            fact.strip(),
+            source="manual",
+            learned_from_user_id=interaction.user.id,
+        )
+        locale = get_locale_from_interaction(interaction)
+        await interaction.response.send_message(
+            t("remember.server.saved", locale),
+            ephemeral=True,
+        )
 
     @app_commands.command(name="forget", description="Clear stored memory.")
     @app_commands.describe(scope="Memory scope to clear", document_id="Document ID (for scope=document)")
@@ -827,11 +894,11 @@ class Memories(commands.Cog):
         else:
             embed.add_field(
                 name="📝 Remembered Facts",
-                value="*No facts stored yet. Use `/remember <fact>` to add some!*",
+                value="*No facts stored yet. Use `/remember personal <fact>` to add some!*",
                 inline=False,
             )
 
-        embed.set_footer(text="Use /remember to add facts, /forget to clear them")
+        embed.set_footer(text="Use /remember personal to add facts, /forget to clear them")
         await interaction.response.send_message(embed=embed)
 
     @app_commands.command(name="aka", description="Add an alias for a user.")

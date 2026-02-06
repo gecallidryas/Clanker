@@ -50,6 +50,9 @@ from utils.db_handler import (
     get_persona_attributes,
     get_sample_dialogues,
     get_guild_custom_personas,
+    delete_short_term_facts_for_channel,
+    get_short_term_facts_for_channel,
+    get_facts_detailed,
 )
 from utils.api_manager import UserInputError
 from utils.app_emojis import (
@@ -85,6 +88,21 @@ from utils.tool_parser import extract_tool_call, strip_tool_call
 from utils.tool_context import ToolContext
 from utils.rag_store import get_rag_context
 from utils.text_splitter import split_message
+from utils.context_builder import (
+    build_structured_prompt,
+    section_from_lines,
+    section_from_text,
+    ContextSection,
+)
+from utils.emoji_penalty import filter_duplicate_custom_emojis
+from utils.output_cleaner import clean_llm_output, normalize_custom_emojis_for_llm
+from utils.memory_id import format_memory_with_id
+from utils.message_cooldown import (
+    check_reply_cooldown,
+    clear_channel_scoped_reply_cooldowns,
+    normalize_cooldown_type,
+    set_reply_cooldown,
+)
 
 # Context window: stores last 20 messages within 30 minutes
 MAX_CONTEXT_SIZE = 20
@@ -753,17 +771,20 @@ class ConversationContext:
             "media": media or [],
         })
     
-    def get_context(self) -> str:
+    def get_context(self, min_message_id: Optional[int] = None) -> str:
         """
         Get formatted context string for AI prompt.
         Only includes messages from the last 30 minutes.
         """
         cutoff = datetime.now() - timedelta(minutes=self.expiry_minutes)
         
-        valid_messages = [
-            msg for msg in self.messages
-            if msg["timestamp"] > cutoff
-        ]
+        valid_messages = []
+        for msg in self.messages:
+            if msg["timestamp"] <= cutoff:
+                continue
+            if min_message_id is not None and int(msg.get("message_id", 0)) <= min_message_id:
+                continue
+            valid_messages.append(msg)
         
         if not valid_messages:
             return "No recent conversation context."
@@ -812,12 +833,120 @@ class AIBrain(commands.Cog):
         self.pending_admin_actions: Dict[tuple[int, int], Dict[str, Any]] = {}
         # Active conversations: (channel_id, user_id) -> {"remaining": int, "last_active": datetime}
         self.active_convos: Dict[tuple[int, int], dict] = {}
+        self.reply_cooldowns: Dict[tuple[str, int], datetime] = {}
+        self.auto_channel_counters: Dict[tuple[int, int], int] = {}
+        self.context_reset_markers: Dict[int, int] = {}
     
     def get_context(self, channel_id: int) -> ConversationContext:
         """Get or create context for a channel."""
         if channel_id not in self.contexts:
             self.contexts[channel_id] = ConversationContext()
         return self.contexts[channel_id]
+
+    async def clear_channel_memory_boundary(
+        self,
+        guild_id: int,
+        channel_id: int,
+        marker_message_id: Optional[int] = None,
+    ) -> int:
+        context = self.get_context(channel_id)
+        deleted_short_term = 0
+        try:
+            deleted_short_term = await delete_short_term_facts_for_channel(guild_id, channel_id)
+        except Exception as exc:
+            logger.warning(
+                "Failed clearing channel short-term memory for channel %s in guild %s: %s",
+                channel_id,
+                guild_id,
+                exc,
+            )
+        context.messages.clear()
+        if marker_message_id:
+            self.context_reset_markers[channel_id] = marker_message_id
+        else:
+            self.context_reset_markers.pop(channel_id, None)
+
+        self.active_convos = {
+            key: value for key, value in self.active_convos.items() if key[0] != channel_id
+        }
+        # Keep compatibility with any older in-memory key shape ((channel_id, user_id)).
+        self.reply_cooldowns = {
+            key: value
+            for key, value in self.reply_cooldowns.items()
+            if not (
+                isinstance(key, tuple)
+                and len(key) == 2
+                and isinstance(key[0], int)
+                and key[0] == channel_id
+            )
+        }
+        clear_channel_scoped_reply_cooldowns(self.reply_cooldowns, channel_id)
+        self.auto_channel_counters = {
+            key: value for key, value in self.auto_channel_counters.items() if key[0] != channel_id
+        }
+        return deleted_short_term
+
+    def _parse_id_list(self, raw: Optional[str]) -> list[int]:
+        if not raw:
+            return []
+        try:
+            data = json.loads(raw)
+        except json.JSONDecodeError:
+            return []
+        if not isinstance(data, list):
+            return []
+        ids: list[int] = []
+        for item in data:
+            try:
+                ids.append(int(item))
+            except (TypeError, ValueError):
+                continue
+        return list(dict.fromkeys(ids))
+
+    async def _bot_reply_chain_depth(self, message: discord.Message, max_depth: int = 25) -> int:
+        """
+        Count bot-authored ancestors across a reply chain.
+
+        This intentionally counts non-contiguous bot messages so alternating
+        user/bot reply chains are still bounded by ai_self_reply_limit.
+        """
+        depth = 0
+        cursor: Any = message
+        visited_ids: set[int] = set()
+        hops = 0
+
+        while hops < max_depth:
+            reference = getattr(cursor, "reference", None)
+            if not reference:
+                break
+
+            resolved = getattr(reference, "resolved", None)
+            if resolved is None:
+                ref_message_id = getattr(reference, "message_id", None)
+                channel = getattr(cursor, "channel", None)
+                if ref_message_id and channel and hasattr(channel, "fetch_message"):
+                    try:
+                        resolved = await channel.fetch_message(int(ref_message_id))
+                    except Exception:
+                        resolved = None
+            if resolved is None:
+                break
+
+            resolved_id = getattr(resolved, "id", None)
+            if isinstance(resolved_id, int):
+                if resolved_id in visited_ids:
+                    break
+                visited_ids.add(resolved_id)
+
+            author = getattr(resolved, "author", None)
+            author_id = getattr(author, "id", None)
+            if author_id == self.bot.user.id:
+                depth += 1
+
+            cursor = resolved
+            hops += 1
+
+        return depth
 
     async def _send_in_chunks(self, message: discord.Message, text: str) -> discord.Message:
         parts = split_message(text)
@@ -895,11 +1024,13 @@ class AIBrain(commands.Cog):
             if self.active_convos[key]["remaining"] <= 0:
                 del self.active_convos[key]
 
-    def _refresh_conversation(self, channel_id: int, user_id: int):
+    def _refresh_conversation(self, channel_id: int, user_id: int, remaining_messages: Optional[int] = None):
         """Refresh conversation (user re-triggered or mentioned)."""
         key = (channel_id, user_id)
+        remaining = remaining_messages if remaining_messages is not None else ACTIVE_CONVO_MESSAGES
+        remaining = max(1, int(remaining))
         self.active_convos[key] = {
-            "remaining": ACTIVE_CONVO_MESSAGES,
+            "remaining": remaining,
             "last_active": datetime.now()
         }
 
@@ -1532,6 +1663,42 @@ class AIBrain(commands.Cog):
             lines.append(f"{token} ({display_name})")
 
         return "\n".join(lines)
+
+    def _build_sticker_knowledge(self, guild: Optional[discord.Guild], limit: int = 30) -> list[str]:
+        if not guild:
+            return []
+        lines: list[str] = []
+        for sticker in list(getattr(guild, "stickers", []))[:limit]:
+            format_obj = getattr(sticker, "format", None)
+            format_name = getattr(format_obj, "name", str(format_obj)) if format_obj is not None else "unknown"
+            description = (getattr(sticker, "description", "") or "").strip()
+            base = f"{sticker.name} (id={sticker.id}, format={format_name})"
+            if description:
+                base += f" -> {description}"
+            lines.append(base)
+        return lines
+
+    def _prompt_to_chat_payload(self, prompt: str) -> tuple[str, list[dict[str, str]]]:
+        marker = "\n\n=== CURRENT MESSAGE ===\n\n"
+        if marker not in prompt:
+            return "", [{"role": "user", "content": prompt}]
+        system_block, user_block = prompt.split(marker, 1)
+        return system_block.strip(), [{"role": "user", "content": user_block.strip()}]
+
+    def _filter_recent_custom_emoji_reuse(
+        self,
+        response_text: str,
+        context: ConversationContext,
+        recent_messages: int = 6,
+    ) -> str:
+        if not response_text:
+            return response_text
+        recent_bot_messages: list[str] = []
+        for item in list(context.messages)[-recent_messages:]:
+            if int(item.get("user_id", 0)) != self.bot.user.id:
+                continue
+            recent_bot_messages.append(str(item.get("content") or ""))
+        return filter_duplicate_custom_emojis(response_text, recent_bot_messages) or response_text
     
     async def build_prompt(
         self,
@@ -1539,6 +1706,7 @@ class AIBrain(commands.Cog):
         user_id: int, 
         message: str, 
         context: str,
+        channel_id: Optional[int] = None,
         member: Optional[discord.Member] = None,
         wellbeing_prompt: str = "",
         affection_data: Optional[Dict[str, int]] = None,
@@ -1558,73 +1726,50 @@ class AIBrain(commands.Cog):
             - [ ] Add server-specific customizations
             - [ ] Implement fact relevance scoring
         """
-        # Get current persona mode
         mode = await get_server_mode(guild_id)
         evil_mode = allow_evil and await get_evil_mode(guild_id)
         persona = await self._load_persona(guild_id, mode, evil_mode)
         guild_config = await get_guild_config(guild_id)
-        
-        # Get user facts (Current speaker)
+
         personal_facts = await get_facts(guild_id, user_id, ["personal"])
-        short_term_facts = await get_facts(guild_id, user_id, ["short_term"])
-        long_term_facts = await get_facts(guild_id, user_id, ["long_term"])
+        if channel_id is not None:
+            short_term_facts = await get_short_term_facts_for_channel(guild_id, user_id, channel_id)
+        else:
+            short_term_facts = await get_facts(guild_id, user_id, ["short_term"])
+        long_term_rows = await get_facts_detailed(guild_id, user_id)
+        long_term_facts = [
+            format_memory_with_id(int(item["id"]), str(item["fact"]))
+            for item in long_term_rows
+            if str(item.get("memory_type") or "") == "long_term"
+        ]
 
-        facts_list = [f"- (User {user_id}) {fact}" for fact in personal_facts[:10]]
-        if short_term_facts:
-            facts_list.extend([f"- (Short-term) {fact}" for fact in short_term_facts[:5]])
-        if long_term_facts:
-            facts_list.extend([f"- (Long-term) {fact}" for fact in long_term_facts[:5]])
-
-        # Check for mentions in the message and fetch their facts
         mentioned_ids = set(re.findall(r"<@!?(\d+)>", message))
+        mentioned_user_lines: list[str] = []
+        mentioned_fact_lines: list[str] = []
         for mentioned_id in mentioned_ids:
             uid = int(mentioned_id)
-            # Skip if it's the bot itself or the current speaker (already fetched)
             if uid == self.bot.user.id or uid == user_id:
                 continue
-            
+            user_obj = self.bot.get_user(uid)
+            name = user_obj.display_name if user_obj else f"User {uid}"
+            mentioned_user_lines.append(f"{name} ({uid})")
             other_facts = await get_facts(guild_id, uid, ["personal"])
-            if other_facts:
-                # Try to resolve username for better context
-                user = self.bot.get_user(uid)
-                name = user.display_name if user else f"User {uid}"
-                facts_list.extend([f"- ({name}) {fact}" for fact in other_facts[:5]])
+            for fact in other_facts[:5]:
+                mentioned_fact_lines.append(f"{name}: {fact}")
 
-        facts_section = ""
-        if facts_list:
-            facts_section = f"\n\nThings you know about the users:\n" + "\n".join(facts_list)
-
-        server_memory_section = ""
         server_memory = await get_server_memory(guild_id)
-        if server_memory:
-            server_memory_section = "\n\nServer memory:\n" + "\n".join(
-                f"- {fact}" for fact in server_memory[:10]
-            )
-
-        attributes_section = ""
         attributes = await get_persona_attributes(guild_id)
-        if attributes:
-            lines = [f"- {item['attribute']}: {item['value']}" for item in attributes[:10]]
-            attributes_section = "\n\nPersona attributes:\n" + "\n".join(lines)
-
-        dialogue_section = ""
         dialogues = await get_sample_dialogues(guild_id)
-        if dialogues:
-            lines = [f"- {item['speaker']}: {item['dialogue']}" for item in dialogues[:10]]
-            dialogue_section = "\n\nSample dialogues:\n" + "\n".join(lines)
 
-        rag_section = ""
+        rag_context = ""
         try:
             rag_enabled = bool(guild_config.get("rag_enabled") or 0)
             if rag_enabled and str(os.getenv("ACTIVATE_LOCAL_RAG", "")).lower() in {"1", "true", "yes", "on"}:
                 top_k = int(os.getenv("RAG_TOP_K", "4"))
-                rag_context = await get_rag_context(guild_id, message, top_k=top_k)
-                if rag_context:
-                    rag_section = "\n\nDocument memory:\n" + rag_context
+                rag_context = await get_rag_context(guild_id, message, top_k=top_k) or ""
         except Exception as exc:
             logger.warning("RAG lookup failed: %s", exc)
-        
-        # Get affection level for behavior adjustment
+
         if affection_data is None:
             if mode == "mode_default":
                 affection_data = {
@@ -1637,7 +1782,6 @@ class AIBrain(commands.Cog):
         affection_level = affection_data.get("affection_level", "stranger")
         affection_points = affection_data.get("affection_points", 0)
 
-        # Determine user gender from configured roles
         gender = await self.get_user_gender(member, guild_id, user_id)
         if gender == "unknown":
             gender_note = (
@@ -1656,8 +1800,7 @@ class AIBrain(commands.Cog):
                 f"[User Gender: {gender}. Use the user's stated pronouns if known; "
                 "otherwise avoid gendered language or honorifics.]"
             )
-        
-        # Addressing preferences for Femmy
+
         address_note = ""
         if mode == "mode_femboy":
             strict_alias = await get_strict_alias(guild_id, user_id)
@@ -1675,7 +1818,6 @@ class AIBrain(commands.Cog):
                 if honorific:
                     address_note = f"[Addressing: Call the user {honorific}.]"
 
-        # Affection prompts that gate compliance and warmth
         affection_prompts = {
             "stranger": """This user is a STRANGER (0-49 affection points).
 - Be polite but distant and guarded
@@ -1683,36 +1825,30 @@ class AIBrain(commands.Cog):
 - Decline intimate requests politely ("We just met... I don't know you well enough yet")
 - Don't use pet names or show attachment
 - Keep responses short and professional""",
-            
             "acquaintance": """This user is an ACQUAINTANCE (50-199 points).
 - Be friendly but maintain some boundaries
 - You can help with simple requests
 - Still hesitant about personal or intimate topics
 - Starting to warm up but not fully trusting yet""",
-            
             "friend": """This user is a FRIEND (200-499 points).
 - Be casual and comfortable with them
 - Happy to help with most requests
 - Use their name, share jokes
 - Still have some boundaries on very intimate topics""",
-            
             "close_friend": """This user is a CLOSE FRIEND (500-999 points).
 - Be very affectionate and playful
 - Willing to do most things they ask
 - Reference past interactions
 - Very trusting, few boundaries remaining""",
-            
             "beloved": """This is your BELOVED (1000+ points) - your favorite person!
 - Show deep care, attachment, and protectiveness
 - Willing to do almost anything they ask
 - Use pet names constantly
-- Very intimate and devoted"""
+- Very intimate and devoted""",
         }
         affection_context = affection_prompts.get(affection_level, affection_prompts["stranger"])
 
-        # Command context for RAG-like help
         commands_help = """
-=== AVAILABLE COMMANDS ===
 You can explain these commands to the user if asked:
 - !mode <type>: Switch personality (femboy, tsundere, oneesan)
 - !affection / !mood: Check relationship/server mood
@@ -1721,26 +1857,22 @@ You can explain these commands to the user if asked:
 - !remind <time> <msg>: Set a reminder
 - !aka @user <name> / !whois <name>: Manage nicknames
 - !remember <fact> / !aboutuser @user: Memory system
-- /teach memory personal|server: Teach personal or server memory
+- /remember personal|server: Save personal or server memory
 - /teach attribute / /teach sampledialogue: Teach persona traits and dialogue
 - /teach document: Upload documents for RAG
 - /generate image: Generate an image from a prompt
 - /usage: Show usage dashboard
 - /tools status: Show enabled tool capabilities
+- /tools refresh: Reset channel short-term memory and context boundary
 - /personal privacy: Opt out of personal memory
 - !stats / !ping: Bot status
-"""
+""".strip()
 
-        # Get guild emojis
-        emoji_section = ""
+        emoji_lines: list[str] = []
         if member and guild_id:
             emojis = await self._get_app_emojis(mode, member.guild)
             if emojis:
-                emoji_section = (
-                    "\n\n=== SERVER EMOJIS ===\n"
-                    "You can use these server emojis naturally in your responses:\n"
-                    f"{emojis}\n"
-                )
+                emoji_lines.extend(emojis.splitlines())
 
         custom_emoji_section = ""
         emoji_manager = getattr(self.bot, "emoji_manager", None)
@@ -1751,7 +1883,7 @@ You can explain these commands to the user if asked:
                 evil_mode=evil_mode,
             )
             if custom_emojis:
-                custom_emoji_section = f"\n\n{custom_emojis}"
+                custom_emoji_section = custom_emojis
 
         wellbeing_note = (
             f"[Wellbeing check: YES. {wellbeing_prompt}]"
@@ -1768,7 +1900,7 @@ You can explain these commands to the user if asked:
         if allow_tools:
             available_tools = get_available_tools(guild_config)
             if available_tools:
-                tools_section = "\n\n=== AVAILABLE TOOLS ===\n" + render_tool_definitions(available_tools)
+                tools_section = render_tool_definitions(available_tools)
             tool_instructions = TOOL_CALL_INSTRUCTIONS
         else:
             tool_instructions = "[TOOLS DISABLED] Do not call tools."
@@ -1793,42 +1925,133 @@ You can explain these commands to the user if asked:
         admin_note = f"[Admin config access: {admin_access}]"
         admin_instructions = ADMIN_ACTION_INSTRUCTIONS if admin_access == "yes" else ""
 
-        # Build full prompt
-        prompt = f"""
-{persona}
+        section_order: list[ContextSection] = []
 
-=== RELATIONSHIP STATUS ===
-User's affection level: {affection_level.replace('_', ' ').upper()} ({affection_points} points)
-{affection_context}
+        section_system = section_from_lines(
+            "SYSTEM / HUMANIZER RULES",
+            [
+                f"Active mode: {mode}",
+                f"Evil mode enabled for this request: {'yes' if evil_mode else 'no'}",
+                f"User affection: {affection_level.replace('_', ' ').upper()} ({affection_points} points)",
+                "Warmth/compliance must match affection level exactly.",
+                gender_note,
+                address_note,
+                wellbeing_note,
+                agentic_note,
+                user_id_note,
+                admin_note,
+                emoji_policy_note,
+            ],
+        )
+        if section_system:
+            section_order.append(section_system)
 
-IMPORTANT: Your warmth, compliance, and willingness to help MUST match the affection level above.
-Low affection = reserved, won't agree to demands. High affection = eager to please.
+        section_persona = section_from_lines(
+            "PERSONA / PERSONALITY ATTRIBUTES",
+            [f"{item['attribute']}: {item['value']}" for item in attributes[:10]],
+        )
+        if section_persona:
+            section_order.append(section_persona)
+        section_affection = section_from_text("RELATIONSHIP MODEL", affection_context)
+        if section_affection:
+            section_order.append(section_affection)
 
-{gender_note}
-{address_note}
-{wellbeing_note}
-{agentic_note}
-{user_id_note}
-{admin_note}
-{emoji_policy_note}
+        section_server = section_from_lines(
+            "SERVER INFO + LONG-TERM SERVER MEMORY",
+            [
+                f"Guild ID: {guild_id}",
+                f"Guild: {member.guild.name}" if member and member.guild else "",
+                *[f"Memory: {fact}" for fact in server_memory[:10]],
+            ],
+        )
+        if section_server:
+            section_order.append(section_server)
 
-        {commands_help}{custom_emoji_section}{emoji_section}{tools_section}
-        {tool_instructions}
-        {AGENTIC_TOOL_INSTRUCTIONS}
-        {admin_instructions}
-        {facts_section}{server_memory_section}{attributes_section}{dialogue_section}{rag_section}
+        section_emoji = section_from_text("SERVER EMOJI KNOWLEDGE", "\n".join(emoji_lines))
+        if section_emoji:
+            section_order.append(section_emoji)
+        section_custom_emoji = section_from_text("CUSTOM EMOJI KNOWLEDGE", custom_emoji_section)
+        if section_custom_emoji:
+            section_order.append(section_custom_emoji)
+        section_sticker = section_from_lines(
+            "SERVER STICKER KNOWLEDGE",
+            self._build_sticker_knowledge(member.guild if member else None),
+        )
+        if section_sticker:
+            section_order.append(section_sticker)
 
-Recent conversation:
-{context}
+        if rag_context:
+            section_order.append(ContextSection("DOCUMENT RAG CHUNKS", rag_context))
 
-Current message from user:
-{message}
+        users_in_convo_lines = [
+            f"Current user: {member.display_name} ({user_id})" if member else f"Current user id: {user_id}",
+            *[f"Mentioned: {entry}" for entry in mentioned_user_lines],
+            *[f"Mentioned fact: {entry}" for entry in mentioned_fact_lines],
+        ]
+        section_users = section_from_lines("USERS IN CONVERSATION", users_in_convo_lines)
+        if section_users:
+            section_order.append(section_users)
 
-Respond naturally in character. Keep responses concise.
-"""
-        return prompt
+        section_short = section_from_lines("SHORT-TERM MEMORY", short_term_facts[:10])
+        if section_short:
+            section_order.append(section_short)
+        section_long = section_from_lines("LONG-TERM/PERSONAL MEMORY", personal_facts[:10] + long_term_facts[:10])
+        if section_long:
+            section_order.append(section_long)
+
+        section_dialogues = section_from_lines(
+            "SAMPLE DIALOGUES",
+            [f"{item['speaker']}: {item['dialogue']}" for item in dialogues[:10]],
+        )
+        if section_dialogues:
+            section_order.append(section_dialogues)
+
+        section_commands = section_from_text("COMMAND REFERENCE", commands_help)
+        if section_commands:
+            section_order.append(section_commands)
+        section_tools = section_from_text("AVAILABLE TOOLS", tools_section)
+        if section_tools:
+            section_order.append(section_tools)
+        section_tool_hints = section_from_text("TOOL INSTRUCTIONS", tool_instructions)
+        if section_tool_hints:
+            section_order.append(section_tool_hints)
+
+        section_agentic = section_from_text("AGENTIC ACTION INSTRUCTIONS", AGENTIC_TOOL_INSTRUCTIONS)
+        if section_agentic:
+            section_order.append(section_agentic)
+        section_admin = section_from_text("ADMIN CONFIG INSTRUCTIONS", admin_instructions)
+        if section_admin:
+            section_order.append(section_admin)
+
+        section_history = section_from_text("CONVERSATION TIMELINE", context)
+        if section_history:
+            section_order.append(section_history)
+
+        end_hint_lines = [
+            "When a stable personal preference appears, consider remember_this_fact/update_long_term_memory.",
+            "When the discussion has temporary working context, consider update_short_term_memory.",
+            "Prefer concise in-character replies unless the user asks for detail.",
+        ]
+        section_end = section_from_lines("END-OF-CONTEXT HINTS", end_hint_lines)
+        if section_end:
+            section_order.append(section_end)
+
+        return build_structured_prompt(
+            persona=persona,
+            sections=section_order,
+            current_message=message,
+            final_instruction="Respond naturally in character. Keep responses concise.",
+        )
     
-    async def generate_response(self, prompt: str, guild_id: int = None, allow_evil: bool = True) -> str:
+    async def generate_response(
+        self,
+        prompt: str,
+        guild_id: int = None,
+        allow_evil: bool = True,
+        *,
+        system_instruction: Optional[str] = None,
+        messages: Optional[list[dict[str, str]]] = None,
+    ) -> str:
         """
         Generate a response using the appropriate AI provider.
         
@@ -1845,7 +2068,12 @@ Respond naturally in character. Keep responses concise.
         try:
             if evil_mode:
                 try:
-                    response_text, _ = await generate_guild_openrouter_text(guild_id, prompt)
+                    response_text, _ = await generate_guild_openrouter_text(
+                        guild_id,
+                        prompt,
+                        messages=messages,
+                        system_instruction=system_instruction,
+                    )
                     return response_text
                 except GuildConfigError as exc:
                     return (
@@ -1859,7 +2087,12 @@ Respond naturally in character. Keep responses concise.
             
             # Custom endpoint (optional) before Gemini
             try:
-                response_text, _ = await generate_guild_custom_text(guild_id, prompt)
+                response_text, _ = await generate_guild_custom_text(
+                    guild_id,
+                    prompt,
+                    messages=messages,
+                    system_instruction=system_instruction,
+                )
                 return response_text
             except GuildConfigError:
                 pass
@@ -1869,7 +2102,12 @@ Respond naturally in character. Keep responses concise.
                 logger.warning("Custom endpoint failed, falling back to Gemini: %s", exc)
 
             # Default to Gemini (censored)
-            response_text, _ = await generate_guild_gemini_text(guild_id, prompt)
+            response_text, _ = await generate_guild_gemini_text(
+                guild_id,
+                prompt,
+                messages=messages,
+                system_instruction=system_instruction,
+            )
             return response_text
             
         except UserInputError:
@@ -1926,16 +2164,61 @@ Respond naturally in character. Keep responses concise.
 
         mentioned = self.bot.user in message.mentions
         mode = await get_server_mode(message.guild.id)
+        guild_config = await get_guild_config(message.guild.id)
+        normalized_message_content = normalize_custom_emojis_for_llm(message.content or "")
 
         triggered_modes = await self._get_triggered_modes(message.guild.id, message.content)
         has_current_trigger = mode in triggered_modes
         has_other_trigger = bool(triggered_modes - {mode})
         is_active = self._is_active_conversation(message.channel.id, message.author.id)
+        whitelist_channel_ids = self._parse_id_list(guild_config.get("ai_channel_whitelist"))
+        auto_channel_ids = self._parse_id_list(guild_config.get("ai_auto_channels"))
+        auto_threshold = int(guild_config.get("ai_auto_threshold") or 0)
+        reply_cooldown_seconds = max(0, int(guild_config.get("ai_reply_cooldown_seconds") or 0))
+        reply_cooldown_type = normalize_cooldown_type(
+            guild_config.get("ai_reply_cooldown_type") or "per_user"
+        )
+        self_reply_limit = max(1, int(guild_config.get("ai_self_reply_limit") or 3))
+
+        auto_key = (message.channel.id, message.author.id)
+        auto_triggered = False
+        if (
+            auto_threshold > 0
+            and message.channel.id in auto_channel_ids
+            and not mentioned
+            and not has_current_trigger
+            and not is_active
+        ):
+            count = self.auto_channel_counters.get(auto_key, 0) + 1
+            self.auto_channel_counters[auto_key] = count
+            if count >= auto_threshold:
+                auto_triggered = True
+                self.auto_channel_counters[auto_key] = 0
+        elif mentioned or has_current_trigger:
+            self.auto_channel_counters.pop(auto_key, None)
 
         # Determine if we should respond
-        should_respond = mentioned or has_current_trigger or is_active
+        should_respond = mentioned or has_current_trigger or is_active or auto_triggered
         if not mentioned and has_other_trigger and not has_current_trigger:
             should_respond = False
+        if should_respond and whitelist_channel_ids and message.channel.id not in whitelist_channel_ids and not mentioned:
+            should_respond = False
+        if should_respond and not mentioned and not has_current_trigger:
+            reply_chain_depth = await self._bot_reply_chain_depth(message)
+            if reply_chain_depth >= self_reply_limit:
+                should_respond = False
+        if should_respond and reply_cooldown_seconds > 0 and not mentioned:
+            on_cooldown, _remaining = check_reply_cooldown(
+                self.reply_cooldowns,
+                cooldown_type=reply_cooldown_type,
+                cooldown_seconds=reply_cooldown_seconds,
+                guild_id=message.guild.id,
+                channel_id=message.channel.id,
+                user_id=message.author.id,
+                member=message.author if isinstance(message.author, discord.Member) else None,
+            )
+            if on_cooldown:
+                should_respond = False
 
         if not should_respond:
             if has_other_trigger and is_active:
@@ -1945,7 +2228,7 @@ Respond naturally in character. Keep responses concise.
                 message.id,
                 message.author.id,
                 message.author.display_name,
-                message.content,
+                normalized_message_content,
                 reply_to_username=reply_to_username,
                 media=media_refs,
             )
@@ -1958,7 +2241,7 @@ Respond naturally in character. Keep responses concise.
                 message.id,
                 message.author.id,
                 message.author.display_name,
-                message.content,
+                normalized_message_content,
                 reply_to_username=reply_to_username,
                 media=media_refs,
             )
@@ -1971,7 +2254,7 @@ Respond naturally in character. Keep responses concise.
                 message.id,
                 message.author.id,
                 message.author.display_name,
-                message.content,
+                normalized_message_content,
                 reply_to_username=reply_to_username,
                 media=media_refs,
             )
@@ -2012,7 +2295,7 @@ Respond naturally in character. Keep responses concise.
             )
             return
 
-        content_for_prompt = message.content
+        content_for_prompt = normalized_message_content
         if video_descriptions:
             video_context = self._format_video_descriptions(video_descriptions)
             if content_for_prompt.strip():
@@ -2032,7 +2315,7 @@ Respond naturally in character. Keep responses concise.
             message.id,
             message.author.id,
             message.author.display_name,
-            content_for_prompt,
+            normalize_custom_emojis_for_llm(content_for_prompt),
             reply_to_username=reply_to_username,
             media=media_refs,
         )
@@ -2077,29 +2360,38 @@ Respond naturally in character. Keep responses concise.
         # Show typing indicator
         async with message.channel.typing():
             # Build and send prompt
-            context_snapshot = context.get_context()
+            context_snapshot = context.get_context(
+                min_message_id=self.context_reset_markers.get(message.channel.id)
+            )
             prompt = await self.build_prompt(
                 message.guild.id,
                 message.author.id,
                 content_for_prompt,
                 context_snapshot,
+                channel_id=message.channel.id,
                 member=message.author,
                 wellbeing_prompt=wellbeing_prompt,
                 affection_data=affection_data,
                 allow_evil=allow_evil
             )
-            
+            system_instruction, chat_messages = self._prompt_to_chat_payload(prompt)
             response = await self.generate_response(
                 prompt,
                 message.guild.id,
-                allow_evil=allow_evil
+                allow_evil=allow_evil,
+                system_instruction=system_instruction,
+                messages=chat_messages,
             )
 
         raw_response = response
-        tool_call = extract_tool_call(raw_response)
         sent = None
-        if tool_call:
-            guild_config = await get_guild_config(message.guild.id)
+        pending_sticker_id: Optional[int] = None
+        tool_loops = 0
+        max_tool_loops = 4
+        while tool_loops < max_tool_loops:
+            tool_call = extract_tool_call(raw_response)
+            if not tool_call:
+                break
             tool_context = ToolContext(
                 bot=self.bot,
                 guild=message.guild,
@@ -2109,35 +2401,50 @@ Respond naturally in character. Keep responses concise.
                 guild_config=guild_config,
                 locale="en",
             )
+            tool_name = str(tool_call.get("tool") or "").strip()
             result = await execute_tool(
-                str(tool_call.get("tool") or "").strip(),
+                tool_name,
                 tool_call.get("args") or {},
                 tool_context,
             )
+            if (
+                tool_name == "select_sticker_for_response"
+                and result.ok
+                and isinstance(result.data, dict)
+                and result.data.get("sticker_id")
+            ):
+                try:
+                    pending_sticker_id = int(result.data.get("sticker_id"))
+                except (TypeError, ValueError):
+                    pending_sticker_id = None
 
             if result.skip_model:
                 reply_text = result.user_message or result.summary or "Done."
                 sent = await self._send_in_chunks(message, reply_text)
                 raw_response = ""
-            else:
-                tool_message = f"{content_for_prompt}\n\n{result.to_prompt()}"
-                tool_prompt = await self.build_prompt(
-                    message.guild.id,
-                    message.author.id,
-                    tool_message,
-                    context_snapshot,
-                    member=message.author,
-                    wellbeing_prompt=wellbeing_prompt,
-                    affection_data=affection_data,
-                    allow_evil=allow_evil,
-                    allow_tools=False,
-                )
-                response = await self.generate_response(
-                    tool_prompt,
-                    message.guild.id,
-                    allow_evil=allow_evil,
-                )
-                raw_response = response
+                break
+
+            chat_messages.append({"role": "assistant", "content": raw_response})
+            chat_messages.append(
+                {
+                    "role": "user",
+                    "content": f"Tool `{tool_name}` result:\n{result.to_prompt()}",
+                }
+            )
+            raw_response = await self.generate_response(
+                prompt,
+                message.guild.id,
+                allow_evil=allow_evil,
+                system_instruction=system_instruction,
+                messages=chat_messages,
+            )
+            tool_loops += 1
+
+        if tool_loops >= max_tool_loops and extract_tool_call(raw_response):
+            raw_response = (
+                "I could not finish all requested tool steps safely in one response. "
+                "Please ask again with a narrower request."
+            )
         if sent is None:
             sent = await handle_agentic_actions(message, raw_response)
         if sent is None:
@@ -2149,12 +2456,12 @@ Respond naturally in character. Keep responses concise.
             evil_mode_enabled = allow_evil and await get_evil_mode(message.guild.id)
 
             emoji_manager = getattr(self.bot, "emoji_manager", None)
-            emoji_usage_enabled = True
-            try:
-                guild_config = await get_guild_config(message.guild.id)
-                emoji_usage_enabled = bool(guild_config.get("emoji_usage_enabled", 1))
-            except Exception:
-                emoji_usage_enabled = True
+            emoji_usage_enabled = bool(guild_config.get("emoji_usage_enabled", 1))
+            response = clean_llm_output(
+                response,
+                bot_name=getattr(self.bot.user, "display_name", "Tomori"),
+                emoji_usage_enabled=emoji_usage_enabled,
+            )
 
             if emoji_manager and emoji_usage_enabled:
                 response = emoji_manager.apply_trigger_emojis(
@@ -2175,13 +2482,26 @@ Respond naturally in character. Keep responses concise.
 
             if emoji_manager:
                 response = emoji_manager.replace_shortcodes(response, strip_unknown=True)
+            response = self._filter_recent_custom_emoji_reuse(response, context)
 
             sent = await self._send_in_chunks(message, response)
+
+        if pending_sticker_id and message.guild:
+            sticker = discord.utils.get(message.guild.stickers, id=pending_sticker_id)
+            if sticker:
+                try:
+                    await message.channel.send(stickers=[sticker])
+                except Exception as exc:
+                    logger.warning("Failed to send pending sticker %s: %s", pending_sticker_id, exc)
 
         # Manage conversation state
         if mentioned or has_current_trigger:
             # Fresh trigger - activate/refresh conversation
-            self._refresh_conversation(message.channel.id, message.author.id)
+            self._refresh_conversation(
+                message.channel.id,
+                message.author.id,
+                remaining_messages=self_reply_limit,
+            )
         elif is_active:
             # Continuing active conversation - decrement remaining
             self._continue_conversation(message.channel.id, message.author.id)
@@ -2190,12 +2510,20 @@ Respond naturally in character. Keep responses concise.
             await set_last_wellbeing_date(message.guild.id, message.author.id, wellbeing_date)
 
         # Track bot response for chain memory and context
+        if reply_cooldown_seconds > 0 and reply_cooldown_type != "off":
+            set_reply_cooldown(
+                self.reply_cooldowns,
+                cooldown_type=reply_cooldown_type,
+                guild_id=message.guild.id,
+                channel_id=message.channel.id,
+                user_id=message.author.id,
+            )
         self._track_message_id(sent.id, sent.author.id)
         context.add_message(
             sent.id,
             sent.author.id,
             sent.author.display_name,
-            sent.content,
+            normalize_custom_emojis_for_llm(sent.content),
             reply_to_username=message.author.display_name
         )
 

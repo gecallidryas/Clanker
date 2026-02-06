@@ -21,7 +21,7 @@ import asyncio
 import random
 from datetime import datetime, timedelta
 from dataclasses import dataclass
-from typing import Optional, List
+from typing import Optional, List, Dict
 from google import genai
 from google.genai import types
 import aiohttp
@@ -891,16 +891,31 @@ class OpenRouterManager:
                 cooldown_seconds = max(cooldown_seconds, retry_after)
             state.mark_cooldown(cooldown_seconds)
 
-    async def _create_completion(self, model_id: str, prompt: str, fallbacks: List[str] = None):
+    async def _create_completion(
+        self,
+        model_id: str,
+        prompt: str,
+        fallbacks: List[str] = None,
+        messages: Optional[List[Dict[str, str]]] = None,
+        system_instruction: Optional[str] = None,
+    ):
         """Create completion with optional server-side fallback."""
         extra_body = {}
         if fallbacks:
             # OpenRouter server-side fallback - more reliable than client-side
             extra_body["models"] = [model_id, *fallbacks]
-        
+
+        payload_messages: List[Dict[str, str]] = []
+        if messages:
+            if system_instruction:
+                payload_messages.append({"role": "system", "content": system_instruction})
+            payload_messages.extend(messages)
+        else:
+            payload_messages = [{"role": "user", "content": prompt}]
+
         return await self.client.chat.completions.create(
             model=model_id,
-            messages=[{"role": "user", "content": prompt}],
+            messages=payload_messages,
             max_tokens=self.max_tokens,
             temperature=self.temperature,
             timeout=self.request_timeout,
@@ -925,7 +940,12 @@ class OpenRouterManager:
             raise RuntimeError(f"OpenRouter returned empty content (finish_reason={finish_reason})")
         return content
     
-    async def generate(self, prompt: str) -> tuple[str, str]:
+    async def generate(
+        self,
+        prompt: str,
+        messages: Optional[List[Dict[str, str]]] = None,
+        system_instruction: Optional[str] = None,
+    ) -> tuple[str, str]:
         """
         Generate a response using OpenRouter API.
         
@@ -946,7 +966,13 @@ class OpenRouterManager:
             model_id = self._pick_model(candidates)
             fallbacks = [m for m in candidates if m != model_id]
             try:
-                response = await self._create_completion(model_id, prompt, fallbacks)
+                response = await self._create_completion(
+                    model_id,
+                    prompt,
+                    fallbacks,
+                    messages=messages,
+                    system_instruction=system_instruction,
+                )
                 content = self._extract_content(response)
                 self._model_states[model_id].mark_success()
                 logger.info("Generated response using OpenRouter (%s)", model_id)

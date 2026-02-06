@@ -51,7 +51,8 @@ HELP_COMMANDS = {
         "visibility": "public",
         "prefix": ["!remember", "!forget", "!myinfo", "!set_timezone", "!birthday", "!aboutuser", "!aka", "!aliases", "!whois"],
         "slash": [
-            "/remember",
+            "/remember personal",
+            "/remember server",
             "/forget",
             "/myinfo",
             "/timezone",
@@ -61,8 +62,6 @@ HELP_COMMANDS = {
             "/aliases",
             "/whois",
             "/analyze",
-            "/teach memory personal",
-            "/teach memory server",
             "/teach attribute",
             "/teach sampledialogue",
             "/teach document",
@@ -104,6 +103,7 @@ HELP_COMMANDS = {
             "/config model",
             "/config env",
             "/config toggle",
+            "/config ai",
             "/config url_safety",
             "/config ui",
             "/config custom_endpoint",
@@ -122,7 +122,7 @@ HELP_COMMANDS = {
     "tools": {
         "visibility": "admin",
         "prefix": [],
-        "slash": ["/tools status"],
+        "slash": ["/tools status", "/tools refresh"],
     },
     "staff": {
         "visibility": "admin",

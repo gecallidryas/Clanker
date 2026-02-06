@@ -10,6 +10,7 @@ import discord
 from utils.db_handler import get_guild_config
 from utils.encryption import get_encryption
 from utils.logger import get_logger
+from utils.tenor_resolver import resolve_tenor_url
 from utils.tool_context import ToolContext
 from utils.tool_registry import ToolDefinition, ToolResult
 
@@ -156,6 +157,9 @@ async def _handle_send_gif(context: ToolContext, args: dict[str, Any]) -> ToolRe
         return ToolResult(ok=False, summary="No gif results found.")
 
     gif_url = results[0]["url"]
+    resolved_url = await resolve_tenor_url(gif_url)
+    if resolved_url:
+        gif_url = resolved_url
     message = gif_url if not caption else f"{caption}\n{gif_url}"
     return ToolResult(
         ok=True,

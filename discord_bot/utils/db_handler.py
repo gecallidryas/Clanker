@@ -26,6 +26,12 @@ from datetime import datetime, timezone, timedelta, date
 from contextlib import asynccontextmanager
 
 from utils.logger import get_logger
+from utils.memory_limits import (
+    get_memory_limit_error_message,
+    validate_attribute_content,
+    validate_fact_content,
+    validate_sample_dialogue_content,
+)
 
 BASE_DIR = Path(__file__).resolve().parent.parent
 
@@ -272,6 +278,12 @@ async def _init_guild_schema(db: aiosqlite.Connection) -> None:
             profile_peek_enabled INTEGER DEFAULT 0,
             rag_enabled INTEGER DEFAULT 1,
             gif_responses_enabled INTEGER DEFAULT 0,
+            ai_reply_cooldown_seconds INTEGER DEFAULT 0,
+            ai_reply_cooldown_type TEXT DEFAULT 'per_user',
+            ai_channel_whitelist TEXT,
+            ai_self_reply_limit INTEGER DEFAULT 3,
+            ai_auto_channels TEXT,
+            ai_auto_threshold INTEGER DEFAULT 0,
             url_safety_enabled INTEGER DEFAULT 0,
             url_allowlist TEXT,
             url_blocklist TEXT,
@@ -584,6 +596,12 @@ async def _init_guild_schema(db: aiosqlite.Connection) -> None:
             ("profile_peek_enabled", "INTEGER", 0),
             ("rag_enabled", "INTEGER", 1),
             ("gif_responses_enabled", "INTEGER", 0),
+            ("ai_reply_cooldown_seconds", "INTEGER", 0),
+            ("ai_reply_cooldown_type", "TEXT", "per_user"),
+            ("ai_channel_whitelist", "TEXT", None),
+            ("ai_self_reply_limit", "INTEGER", 3),
+            ("ai_auto_channels", "TEXT", None),
+            ("ai_auto_threshold", "INTEGER", 0),
             ("url_safety_enabled", "INTEGER", 0),
             ("url_allowlist", "TEXT", None),
             ("url_blocklist", "TEXT", None),
@@ -599,8 +617,12 @@ async def _init_guild_schema(db: aiosqlite.Connection) -> None:
             if default_value is None:
                 await db.execute(f"ALTER TABLE guild_config ADD COLUMN {column_name} {column_type}")
             else:
+                if isinstance(default_value, str):
+                    default_sql = "'" + default_value.replace("'", "''") + "'"
+                else:
+                    default_sql = str(default_value)
                 await db.execute(
-                    f"ALTER TABLE guild_config ADD COLUMN {column_name} {column_type} DEFAULT {default_value}"
+                    f"ALTER TABLE guild_config ADD COLUMN {column_name} {column_type} DEFAULT {default_sql}"
                 )
     except Exception:
         pass
@@ -963,6 +985,79 @@ async def delete_facts(
         return cursor.rowcount
 
 
+SHORT_TERM_CHANNEL_TAG = "short_term:channel:"
+
+
+def build_short_term_source(channel_id: int, source: str = "learned") -> str:
+    """Build a source tag for channel-scoped short-term memory records."""
+    base = (source or "learned").strip() or "learned"
+    return f"{base}|{SHORT_TERM_CHANNEL_TAG}{int(channel_id)}"
+
+
+async def add_short_term_fact(
+    guild_id: int,
+    user_id: int,
+    fact: str,
+    channel_id: int,
+    source: str = "learned",
+    learned_from_user_id: Optional[int] = None,
+) -> int:
+    """Store short-term memory scoped to a specific channel."""
+    return await add_fact_with_source(
+        guild_id,
+        user_id=user_id,
+        fact=fact,
+        source=build_short_term_source(channel_id, source=source),
+        learned_from_user_id=learned_from_user_id,
+        memory_type="short_term",
+    )
+
+
+async def get_short_term_facts_for_channel(
+    guild_id: int,
+    user_id: int,
+    channel_id: int,
+) -> List[str]:
+    """Return short-term memories that were learned in a specific channel."""
+    channel_pattern = f"%{SHORT_TERM_CHANNEL_TAG}{int(channel_id)}"
+    async with guild_db(guild_id) as db:
+        async with db.execute(
+            """SELECT fact FROM user_facts
+               WHERE guild_id = ? AND user_id = ? AND memory_type = 'short_term'
+                 AND source LIKE ?
+               ORDER BY created_at DESC""",
+            (guild_id, user_id, channel_pattern),
+        ) as cursor:
+            rows = await cursor.fetchall()
+            return [row[0] for row in rows]
+
+
+async def delete_short_term_facts_for_channel(
+    guild_id: int,
+    channel_id: int,
+    user_id: Optional[int] = None,
+) -> int:
+    """
+    Delete short-term memories that were learned in a specific channel.
+
+    If user_id is provided, only that user's channel-scoped short-term memory is removed.
+    """
+    channel_pattern = f"%{SHORT_TERM_CHANNEL_TAG}{int(channel_id)}"
+    query = (
+        "DELETE FROM user_facts WHERE guild_id = ? AND memory_type = 'short_term' "
+        "AND source LIKE ?"
+    )
+    params: list[Any] = [guild_id, channel_pattern]
+    if user_id is not None:
+        query += " AND user_id = ?"
+        params.append(user_id)
+
+    async with guild_db(guild_id) as db:
+        cursor = await db.execute(query, tuple(params))
+        await db.commit()
+        return cursor.rowcount
+
+
 async def add_server_memory(
     guild_id: int,
     fact: str,
@@ -1015,6 +1110,12 @@ async def add_persona_attribute(
     created_by: int,
 ) -> int:
     """Store a persona attribute for the guild."""
+    attribute_validation = validate_attribute_content(attribute)
+    if not attribute_validation.is_valid:
+        raise ValueError(get_memory_limit_error_message(attribute_validation))
+    value_validation = validate_attribute_content(value)
+    if not value_validation.is_valid:
+        raise ValueError(get_memory_limit_error_message(value_validation))
     async with guild_db(guild_id) as db:
         cursor = await db.execute(
             """INSERT INTO persona_attributes (guild_id, attribute, value, created_by)
@@ -1055,6 +1156,12 @@ async def add_sample_dialogue(
     created_by: int,
 ) -> int:
     """Store a sample dialogue line for the guild."""
+    speaker_validation = validate_attribute_content(speaker)
+    if not speaker_validation.is_valid:
+        raise ValueError(get_memory_limit_error_message(speaker_validation))
+    dialogue_validation = validate_sample_dialogue_content(dialogue)
+    if not dialogue_validation.is_valid:
+        raise ValueError(get_memory_limit_error_message(dialogue_validation))
     async with guild_db(guild_id) as db:
         cursor = await db.execute(
             """INSERT INTO sample_dialogues (guild_id, speaker, dialogue, created_by)
@@ -2217,6 +2324,9 @@ async def add_fact_with_source(
     memory_type: str = "personal",
 ) -> int:
     """Store a fact about a user with source tracking."""
+    fact_validation = validate_fact_content(fact)
+    if not fact_validation.is_valid:
+        raise ValueError(get_memory_limit_error_message(fact_validation))
     async with guild_db(guild_id) as db:
         cursor = await db.execute(
             """INSERT INTO user_facts (guild_id, user_id, fact, source, learned_from_user_id, memory_type) 
@@ -3213,6 +3323,12 @@ GUILD_CONFIG_FIELDS: Set[str] = {
     "profile_peek_enabled",
     "rag_enabled",
     "gif_responses_enabled",
+    "ai_reply_cooldown_seconds",
+    "ai_reply_cooldown_type",
+    "ai_channel_whitelist",
+    "ai_self_reply_limit",
+    "ai_auto_channels",
+    "ai_auto_threshold",
     "url_safety_enabled",
     "url_allowlist",
     "url_blocklist",

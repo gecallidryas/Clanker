@@ -5,6 +5,7 @@ Guild configuration commands for API keys and models.
 from __future__ import annotations
 
 import io
+import json
 from pathlib import Path
 from typing import Dict, List, Optional, Tuple
 
@@ -216,6 +217,7 @@ class Config(commands.Cog):
     model_group = app_commands.Group(name="model", description="View or set models", parent=config)
     env_group = app_commands.Group(name="env", description="Upload or retrieve guild env template", parent=config)
     toggle_group = app_commands.Group(name="toggle", description="Toggle guild features", parent=config)
+    ai_group = app_commands.Group(name="ai", description="Configure AI reply behavior", parent=config)
     url_safety_group = app_commands.Group(
         name="url_safety",
         description="Configure URL safety checks",
@@ -279,6 +281,23 @@ class Config(commands.Cog):
         if slot < 1 or slot > len(fields):
             return None
         return fields[slot - 1]
+
+    def _parse_id_list_field(self, raw: Optional[str]) -> list[int]:
+        if not raw:
+            return []
+        try:
+            data = json.loads(raw)
+        except json.JSONDecodeError:
+            data = []
+        if not isinstance(data, list):
+            return []
+        parsed: list[int] = []
+        for item in data:
+            try:
+                parsed.append(int(item))
+            except (TypeError, ValueError):
+                continue
+        return list(dict.fromkeys(parsed))
 
     # =========================
     # Password + Auth
@@ -1063,6 +1082,179 @@ class Config(commands.Cog):
     @app_commands.describe(state="on/off (leave empty to view)")
     async def toggle_url_safety(self, interaction: discord.Interaction, state: Optional[str] = None):
         await self._toggle_feature_flag(interaction, "url_safety_enabled", "URL safety", state)
+
+    # =========================
+    # AI Reply Behavior
+    # =========================
+
+    @ai_group.command(name="view", description="View AI reply gating settings.")
+    @app_commands.checks.has_permissions(administrator=True)
+    async def ai_view(self, interaction: discord.Interaction):
+        if not await self._require_guild(interaction):
+            return
+        if not await self._require_auth(interaction):
+            return
+
+        config = await get_guild_config(interaction.guild.id)
+        whitelist_ids = self._parse_id_list_field(config.get("ai_channel_whitelist"))
+        auto_ids = self._parse_id_list_field(config.get("ai_auto_channels"))
+        cooldown = int(config.get("ai_reply_cooldown_seconds") or 0)
+        cooldown_type = str(config.get("ai_reply_cooldown_type") or "per_user")
+        self_reply_limit = int(config.get("ai_self_reply_limit") or 3)
+        auto_threshold = int(config.get("ai_auto_threshold") or 0)
+
+        def _render_channels(ids: list[int]) -> str:
+            if not ids:
+                return "None"
+            return ", ".join(f"<#{channel_id}>" for channel_id in ids)
+
+        embed = discord.Embed(title="AI Reply Settings", color=discord.Color.blue())
+        embed.add_field(name="Reply Cooldown (seconds)", value=str(cooldown), inline=False)
+        embed.add_field(name="Reply Cooldown Scope", value=cooldown_type, inline=False)
+        embed.add_field(name="Self-reply chain limit", value=str(self_reply_limit), inline=False)
+        embed.add_field(name="Channel whitelist", value=_render_channels(whitelist_ids), inline=False)
+        embed.add_field(name="Auto channels", value=_render_channels(auto_ids), inline=False)
+        embed.add_field(name="Auto threshold", value=str(auto_threshold), inline=False)
+        await interaction.response.send_message(embed=embed, ephemeral=True)
+
+    @ai_group.command(name="cooldown", description="Set AI reply cooldown in seconds.")
+    @app_commands.checks.has_permissions(administrator=True)
+    @app_commands.describe(seconds="0 disables cooldown")
+    async def ai_set_cooldown(self, interaction: discord.Interaction, seconds: int):
+        if not await self._require_guild(interaction):
+            return
+        if not await self._require_auth(interaction):
+            return
+        if seconds < 0 or seconds > 3600:
+            await interaction.response.send_message("Use a value between 0 and 3600.", ephemeral=True)
+            return
+        await update_guild_config(interaction.guild.id, {"ai_reply_cooldown_seconds": int(seconds)})
+        await add_guild_config_audit(interaction.guild.id, interaction.user.id, "ai_reply_cooldown_seconds_set")
+        await interaction.response.send_message(f"AI reply cooldown set to {seconds}s.", ephemeral=True)
+
+    @ai_group.command(name="cooldown_type", description="Set AI reply cooldown scope.")
+    @app_commands.checks.has_permissions(administrator=True)
+    @app_commands.describe(
+        scope="off, per_user, per_channel, server_wide, strict_server_wide",
+    )
+    async def ai_set_cooldown_type(self, interaction: discord.Interaction, scope: str):
+        if not await self._require_guild(interaction):
+            return
+        if not await self._require_auth(interaction):
+            return
+        normalized = (scope or "").strip().lower()
+        valid = {"off", "per_user", "per_channel", "server_wide", "strict_server_wide"}
+        if normalized not in valid:
+            await interaction.response.send_message(
+                "Use one of: off, per_user, per_channel, server_wide, strict_server_wide.",
+                ephemeral=True,
+            )
+            return
+        await update_guild_config(interaction.guild.id, {"ai_reply_cooldown_type": normalized})
+        await add_guild_config_audit(interaction.guild.id, interaction.user.id, "ai_reply_cooldown_type_set")
+        await interaction.response.send_message(
+            f"AI reply cooldown scope set to `{normalized}`.",
+            ephemeral=True,
+        )
+
+    @ai_group.command(name="self_reply_limit", description="Set max self-reply chain depth.")
+    @app_commands.checks.has_permissions(administrator=True)
+    @app_commands.describe(limit="Maximum consecutive reply chain depth (1-20)")
+    async def ai_set_self_reply_limit(self, interaction: discord.Interaction, limit: int):
+        if not await self._require_guild(interaction):
+            return
+        if not await self._require_auth(interaction):
+            return
+        if limit < 1 or limit > 20:
+            await interaction.response.send_message("Use a value between 1 and 20.", ephemeral=True)
+            return
+        await update_guild_config(interaction.guild.id, {"ai_self_reply_limit": int(limit)})
+        await add_guild_config_audit(interaction.guild.id, interaction.user.id, "ai_self_reply_limit_set")
+        await interaction.response.send_message(f"AI self-reply chain limit set to {limit}.", ephemeral=True)
+
+    @ai_group.command(name="auto_threshold", description="Set message count threshold for auto channels.")
+    @app_commands.checks.has_permissions(administrator=True)
+    @app_commands.describe(threshold="0 disables auto-channel threshold behavior")
+    async def ai_set_auto_threshold(self, interaction: discord.Interaction, threshold: int):
+        if not await self._require_guild(interaction):
+            return
+        if not await self._require_auth(interaction):
+            return
+        if threshold < 0 or threshold > 20:
+            await interaction.response.send_message("Use a value between 0 and 20.", ephemeral=True)
+            return
+        await update_guild_config(interaction.guild.id, {"ai_auto_threshold": int(threshold)})
+        await add_guild_config_audit(interaction.guild.id, interaction.user.id, "ai_auto_threshold_set")
+        await interaction.response.send_message(f"AI auto-channel threshold set to {threshold}.", ephemeral=True)
+
+    @ai_group.command(name="whitelist_add", description="Add a channel to the AI reply whitelist.")
+    @app_commands.checks.has_permissions(administrator=True)
+    async def ai_whitelist_add(self, interaction: discord.Interaction, channel: discord.TextChannel):
+        if not await self._require_guild(interaction):
+            return
+        if not await self._require_auth(interaction):
+            return
+        config = await get_guild_config(interaction.guild.id)
+        current = self._parse_id_list_field(config.get("ai_channel_whitelist"))
+        if channel.id not in current:
+            current.append(channel.id)
+        await update_guild_config(interaction.guild.id, {"ai_channel_whitelist": json.dumps(current)})
+        await add_guild_config_audit(interaction.guild.id, interaction.user.id, "ai_whitelist_add")
+        await interaction.response.send_message(f"Added {channel.mention} to AI reply whitelist.", ephemeral=True)
+
+    @ai_group.command(name="whitelist_remove", description="Remove a channel from the AI reply whitelist.")
+    @app_commands.checks.has_permissions(administrator=True)
+    async def ai_whitelist_remove(self, interaction: discord.Interaction, channel: discord.TextChannel):
+        if not await self._require_guild(interaction):
+            return
+        if not await self._require_auth(interaction):
+            return
+        config = await get_guild_config(interaction.guild.id)
+        current = self._parse_id_list_field(config.get("ai_channel_whitelist"))
+        current = [channel_id for channel_id in current if channel_id != channel.id]
+        await update_guild_config(interaction.guild.id, {"ai_channel_whitelist": json.dumps(current)})
+        await add_guild_config_audit(interaction.guild.id, interaction.user.id, "ai_whitelist_remove")
+        await interaction.response.send_message(f"Removed {channel.mention} from AI reply whitelist.", ephemeral=True)
+
+    @ai_group.command(name="whitelist_clear", description="Clear the AI reply whitelist.")
+    @app_commands.checks.has_permissions(administrator=True)
+    async def ai_whitelist_clear(self, interaction: discord.Interaction):
+        if not await self._require_guild(interaction):
+            return
+        if not await self._require_auth(interaction):
+            return
+        await update_guild_config(interaction.guild.id, {"ai_channel_whitelist": None})
+        await add_guild_config_audit(interaction.guild.id, interaction.user.id, "ai_whitelist_clear")
+        await interaction.response.send_message("AI reply whitelist cleared.", ephemeral=True)
+
+    @ai_group.command(name="auto_channel_add", description="Add a channel to AI auto-response channels.")
+    @app_commands.checks.has_permissions(administrator=True)
+    async def ai_auto_channel_add(self, interaction: discord.Interaction, channel: discord.TextChannel):
+        if not await self._require_guild(interaction):
+            return
+        if not await self._require_auth(interaction):
+            return
+        config = await get_guild_config(interaction.guild.id)
+        current = self._parse_id_list_field(config.get("ai_auto_channels"))
+        if channel.id not in current:
+            current.append(channel.id)
+        await update_guild_config(interaction.guild.id, {"ai_auto_channels": json.dumps(current)})
+        await add_guild_config_audit(interaction.guild.id, interaction.user.id, "ai_auto_channel_add")
+        await interaction.response.send_message(f"Added {channel.mention} to AI auto channels.", ephemeral=True)
+
+    @ai_group.command(name="auto_channel_remove", description="Remove a channel from AI auto-response channels.")
+    @app_commands.checks.has_permissions(administrator=True)
+    async def ai_auto_channel_remove(self, interaction: discord.Interaction, channel: discord.TextChannel):
+        if not await self._require_guild(interaction):
+            return
+        if not await self._require_auth(interaction):
+            return
+        config = await get_guild_config(interaction.guild.id)
+        current = self._parse_id_list_field(config.get("ai_auto_channels"))
+        current = [channel_id for channel_id in current if channel_id != channel.id]
+        await update_guild_config(interaction.guild.id, {"ai_auto_channels": json.dumps(current)})
+        await add_guild_config_audit(interaction.guild.id, interaction.user.id, "ai_auto_channel_remove")
+        await interaction.response.send_message(f"Removed {channel.mention} from AI auto channels.", ephemeral=True)
 
     @config.command(name="ui", description="Open a quick toggle UI panel.")
     @app_commands.checks.has_permissions(administrator=True)

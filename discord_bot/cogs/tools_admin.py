@@ -71,6 +71,50 @@ class ToolsAdmin(commands.Cog):
 
         await interaction.response.send_message(embed=embed, ephemeral=True)
 
+    @tools_group.command(
+        name="refresh",
+        description="Clear short-term channel memory and set a new context boundary.",
+    )
+    async def tools_refresh(self, interaction: discord.Interaction):
+        if not interaction.guild:
+            await interaction.response.send_message(
+                t("common.server_only", get_locale_from_interaction(interaction)),
+                ephemeral=True,
+            )
+            return
+        if not interaction.user.guild_permissions.manage_guild:
+            await interaction.response.send_message(
+                "You need Manage Server to refresh channel context.",
+                ephemeral=True,
+            )
+            return
+
+        ai_brain = self.bot.get_cog("AIBrain")
+        if ai_brain is None or not hasattr(ai_brain, "clear_channel_memory_boundary"):
+            await interaction.response.send_message(
+                "AI context manager is unavailable.",
+                ephemeral=True,
+            )
+            return
+
+        await interaction.response.send_message("Refreshing channel context...")
+        marker_message = await interaction.original_response()
+        deleted = await ai_brain.clear_channel_memory_boundary(
+            guild_id=interaction.guild.id,
+            channel_id=interaction.channel_id,
+            marker_message_id=marker_message.id,
+        )
+
+        embed = discord.Embed(
+            title="Conversation Refreshed",
+            description=(
+                "Short-term channel context was cleared and a new prompt boundary has been set.\n"
+                f"Short-term memory records removed: **{deleted}**"
+            ),
+            color=discord.Color.blurple(),
+        )
+        await marker_message.edit(content=None, embed=embed)
+
 
 async def setup(bot: commands.Bot):
     await bot.add_cog(ToolsAdmin(bot))

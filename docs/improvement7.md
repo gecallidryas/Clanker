@@ -52,7 +52,7 @@ HELP_COMMANDS = {
     "memory": {
         "visibility": "public",
         "prefix": ["!remember", "!forget", "!myinfo", "!set_timezone", "!birthday", "!aboutuser", "!aka", "!aliases", "!whois"],
-        "slash": ["/remember", "/forget", "/myinfo", "/timezone", "/birthday", "/aboutuser", "/aka", "/aliases", "/whois", "/analyze"],
+        "slash": ["/remember personal", "/remember server", "/forget", "/myinfo", "/timezone", "/birthday", "/aboutuser", "/aka", "/aliases", "/whois", "/analyze"],
     },
     "affection": {
         "visibility": "public",

@@ -218,6 +218,8 @@ async def _generate_with_keys(
     keys: List[str],
     model: str,
     prompt: str,
+    messages: Optional[List[dict]] = None,
+    system_instruction: Optional[str] = None,
 ) -> tuple[str, str]:
     if not keys:
         raise GuildConfigError(f"{task} keys not configured for this server.")
@@ -232,7 +234,20 @@ async def _generate_with_keys(
         key_index = (start + offset) % len(keys)
         key = keys[key_index]
         try:
-            response = await generate_gemini_with_key(key, model, prompt, request_timeout)
+            effective_prompt = prompt
+            if messages:
+                blocks: list[str] = []
+                if system_instruction:
+                    blocks.append(system_instruction.strip())
+                for item in messages:
+                    role = str(item.get("role") or "user").strip().lower()
+                    content = str(item.get("content") or "").strip()
+                    if not content:
+                        continue
+                    blocks.append(f"{role.upper()}: {content}")
+                if blocks:
+                    effective_prompt = "\n\n".join(blocks)
+            response = await generate_gemini_with_key(key, model, effective_prompt, request_timeout)
             if key_type != "free":
                 await _set_key_index(guild_id, task, key_index, len(keys))
             return response
@@ -246,10 +261,23 @@ async def _generate_with_keys(
     raise RuntimeError(f"All guild {task} keys failed. Last error: {last_error}")
 
 
-async def generate_guild_gemini_text(guild_id: int, prompt: str) -> tuple[str, str]:
+async def generate_guild_gemini_text(
+    guild_id: int,
+    prompt: str,
+    messages: Optional[List[dict]] = None,
+    system_instruction: Optional[str] = None,
+) -> tuple[str, str]:
     keys = await get_guild_gemini_keys(guild_id)
     model = await get_guild_gemini_model(guild_id)
-    return await _generate_with_keys(guild_id, "general", keys, model, prompt)
+    return await _generate_with_keys(
+        guild_id,
+        "general",
+        keys,
+        model,
+        prompt,
+        messages=messages,
+        system_instruction=system_instruction,
+    )
 
 
 async def generate_guild_gemini_translate_text(guild_id: int, prompt: str) -> tuple[str, str]:
@@ -318,7 +346,12 @@ def _get_openrouter_manager(guild_id: int, api_key: str, model: str, fallbacks: 
     return manager
 
 
-async def generate_guild_openrouter_text(guild_id: int, prompt: str) -> tuple[str, str]:
+async def generate_guild_openrouter_text(
+    guild_id: int,
+    prompt: str,
+    messages: Optional[List[dict]] = None,
+    system_instruction: Optional[str] = None,
+) -> tuple[str, str]:
     keys = await get_guild_openrouter_keys(guild_id)
     if not keys:
         raise GuildConfigError("OpenRouter API keys not configured for this server.")
@@ -329,7 +362,11 @@ async def generate_guild_openrouter_text(guild_id: int, prompt: str) -> tuple[st
         api_key = keys[(start + offset) % len(keys)]
         manager = _get_openrouter_manager(guild_id, api_key, model, fallbacks)
         try:
-            return await manager.generate(prompt)
+            return await manager.generate(
+                prompt,
+                messages=messages,
+                system_instruction=system_instruction,
+            )
         except UserInputError:
             raise
         except Exception as exc:
@@ -356,14 +393,26 @@ def _get_custom_client(guild_id: int, api_key: Optional[str], base_url: str) -> 
     return client
 
 
-async def generate_guild_custom_text(guild_id: int, prompt: str) -> tuple[str, str]:
+async def generate_guild_custom_text(
+    guild_id: int,
+    prompt: str,
+    messages: Optional[List[dict]] = None,
+    system_instruction: Optional[str] = None,
+) -> tuple[str, str]:
     url, api_key, model, _, enabled = await get_guild_custom_endpoint_config(guild_id)
     if not enabled or not url or not model:
         raise GuildConfigError("Custom endpoint not configured for this server.")
     client = _get_custom_client(guild_id, api_key, url)
+    payload_messages: List[dict] = []
+    if messages:
+        if system_instruction:
+            payload_messages.append({"role": "system", "content": system_instruction})
+        payload_messages.extend(messages)
+    else:
+        payload_messages = [{"role": "user", "content": prompt}]
     response = await client.chat.completions.create(
         model=model,
-        messages=[{"role": "user", "content": prompt}],
+        messages=payload_messages,
     )
     if not response or not getattr(response, "choices", None):
         raise RuntimeError("Custom endpoint returned no choices.")

@@ -114,7 +114,8 @@ This document is the canonical, detailed feature inventory for this repository. 
 ### Memory and personalization (discord_bot/cogs/memories.py)
 - User timezone storage (IANA names and common abbreviations).
 - Personal facts:
-  - `!remember` / `/remember` to store facts.
+  - `!remember` / `/remember personal` to store personal facts.
+  - `/remember server` to store server-scoped memories (Manage Server required).
   - Automatic fact reconciliation using Gemini summarization when possible.
   - `!forget` / `/forget` clears facts (supports personal, short_term, long_term, server, and document scopes).
 - Aliases and lookup:
@@ -127,7 +128,6 @@ This document is the canonical, detailed feature inventory for this repository. 
 - User profile analysis:
   - `/analyze` runs AI-driven personality summary using message history and saved facts.
 - Teaching system (`discord_bot/cogs/teach.py`):
-  - `/teach memory personal` and `/teach memory server` to store personal or server memories.
   - `/teach attribute` to store persona attributes.
   - `/teach sampledialogue` to store sample dialogue lines.
   - `/teach document` to upload documents for RAG (Postgres + pgvector).
@@ -195,6 +195,7 @@ This document is the canonical, detailed feature inventory for this repository. 
   - DM welcome message and toggle
 - Custom endpoint configuration via `/config custom_endpoint`.
 - Tool availability overview via `/tools status`.
+- Channel memory/context reset boundary via `/tools refresh`.
 - Admin user management:
   - Reset user data (facts, affection, aliases)
   - View full user profile
@@ -268,14 +269,14 @@ This document is the canonical, detailed feature inventory for this repository. 
 - Affection: `/affection`, `/mood`, `/headpat`, `/hug`
 - Automod: `/automod add`, `/automod remove`, `/automod list`, `/automod spam`
 - Config: `/config auth`, `/config password set|change|reset`, `/config keys view|set|clear`, `/config model view|set`, `/config env example|upload`, `/config toggle evil|autorole|welcome|web_search|image_gen|stickers|emojis|pin_message|self_teaching|youtube|profile_peek|rag|gif_responses|url_safety`, `/config url_safety view|action|allowlist|blocklist|clear`, `/config ui`, `/config staff add|remove|list`, `/config modlog set|clear|view`, `/config autorole set|clear|view`, `/config welcome channel|clear|test|set_message|view_message|clear_message|set_dm_message|clear_dm_message|toggle_dm`, `/config custom_endpoint view|set`
-- Memory: `/timezone`, `/remember`, `/forget`, `/myinfo`, `/aka`, `/aliases`, `/whois`, `/aboutuser`, `/birthday`, `/analyze`
-- Teach: `/teach memory personal`, `/teach memory server`, `/teach attribute`, `/teach sampledialogue`, `/teach document`, `/personal privacy`
+- Memory: `/timezone`, `/remember personal`, `/remember server`, `/forget`, `/myinfo`, `/aka`, `/aliases`, `/whois`, `/aboutuser`, `/birthday`, `/analyze`
+- Teach: `/teach attribute`, `/teach sampledialogue`, `/teach document`, `/personal privacy`
 - Reminders: `/remind`, `/reminders`, `/remindcancel`
 - Scheduler: `/bumpchannel`, `/bumpstart`, `/bumpstop`
 - Social: `/evil`, `/mode`, `/modes`, `/currentmode`
 - Starboard: `/starboard setup`, `/starboard toggle`, `/starboard ignore`, `/starboard unignore`, `/starboard ignored`
 - Utilities: `/help`, `/stats`, `/usage`, `/reload`, `/translate`, `/generate_embed`, `/tldr`, `/ping`, `/about`
-- Tools: `/tools status`
+- Tools: `/tools status`, `/tools refresh`
 - Media: `/generate image`
 - Vision: `/describe`
 - Misc: `/setgenderrole` (admin)
