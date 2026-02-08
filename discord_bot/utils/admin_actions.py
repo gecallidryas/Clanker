@@ -150,6 +150,7 @@ async def execute_admin_action(
     guild: discord.Guild,
     executor: discord.Member,
     bot: Optional[discord.Client] = None,
+    current_channel_id: Optional[int] = None,
 ) -> Dict[str, Any]:
     if not action:
         return {"success": False, "error": "Missing action."}
@@ -168,6 +169,8 @@ async def execute_admin_action(
 
     if handler_name == "execute_config_mode":
         return await handler(params or {}, guild, executor, bot=bot)
+    if handler_name in {"execute_starboard_setup", "execute_config_log"}:
+        return await handler(params or {}, guild, executor, current_channel_id=current_channel_id)
     return await handler(params or {}, guild, executor)
 
 
@@ -175,12 +178,20 @@ async def execute_starboard_setup(
     params: Dict[str, Any],
     guild: discord.Guild,
     executor: discord.Member,
+    current_channel_id: Optional[int] = None,
 ) -> Dict[str, Any]:
     channel_id = params.get("channel_id")
     try:
         channel_id = int(channel_id) if channel_id is not None else None
     except (TypeError, ValueError):
         channel_id = None
+
+    if channel_id is None:
+        channel_hint = str(params.get("channel") or params.get("destination") or "").strip().lower()
+        if channel_hint in {"this channel", "current channel", "here"}:
+            channel_id = current_channel_id
+    if channel_id is None and current_channel_id and params.get("use_current_channel"):
+        channel_id = current_channel_id
 
     emoji_mode = (params.get("emoji_mode") or "list").strip().lower()
     emoji_triggers = _normalize_emoji_list(params.get("emoji_triggers"))
@@ -202,30 +213,23 @@ async def execute_starboard_setup(
     except (TypeError, ValueError):
         threshold = None
 
-    if threshold is not None:
-        threshold = max(1, threshold)
+    threshold = max(1, threshold) if threshold is not None else 3
 
-    missing = []
     if not channel_id:
-        missing.append("channel")
-    if threshold is None:
-        missing.append("threshold")
-    if emoji_mode != "any" and not emoji_triggers:
-        missing.append("emoji")
-
-    if missing:
-        summary = _summarize_starboard_params(channel_id, emoji_mode, emoji_triggers, threshold)
         return {
             "success": False,
             "needs_confirmation": True,
-            "missing": missing,
-            "summary": summary,
+            "missing": ["channel"],
+            "summary": _summarize_starboard_params(channel_id, emoji_mode, emoji_triggers, threshold),
             "defaults": {
                 "emoji_mode": "list" if emoji_mode != "any" else "any",
                 "emoji_triggers": emoji_triggers if emoji_triggers else ["⭐"],
-                "threshold": threshold if threshold is not None else 3,
+                "threshold": threshold,
             },
         }
+
+    if emoji_mode != "any" and not emoji_triggers:
+        emoji_triggers = ["⭐"]
 
     resolved_emojis = []
     invalid = []
@@ -428,12 +432,18 @@ async def execute_config_log(
     params: Dict[str, Any],
     guild: discord.Guild,
     executor: discord.Member,
+    current_channel_id: Optional[int] = None,
 ) -> Dict[str, Any]:
     channel_id = params.get("channel_id")
     try:
         channel_id = int(channel_id) if channel_id is not None else None
     except (TypeError, ValueError):
         channel_id = None
+
+    if channel_id is None:
+        channel_hint = str(params.get("channel") or "").strip().lower()
+        if channel_hint in {"this channel", "current channel", "here"}:
+            channel_id = current_channel_id
 
     if not channel_id:
         summary = _summarize_config_log(channel_id)

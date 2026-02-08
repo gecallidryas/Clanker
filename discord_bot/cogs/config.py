@@ -7,7 +7,7 @@ from __future__ import annotations
 import io
 import json
 from pathlib import Path
-from typing import Dict, List, Optional, Tuple
+from typing import Awaitable, Callable, Dict, List, Optional, Tuple
 
 import discord
 from discord import app_commands
@@ -207,6 +207,57 @@ class ConfigToggleView(discord.ui.View):
         await interaction.response.edit_message(embed=embed, view=self)
 
 
+class ManageConfirmView(discord.ui.View):
+    def __init__(
+        self,
+        user_id: int,
+        summary: str,
+        on_confirm: Callable[[], Awaitable[str]],
+    ):
+        super().__init__(timeout=120)
+        self.user_id = user_id
+        self.summary = summary
+        self.on_confirm = on_confirm
+        self.completed = False
+
+    async def interaction_check(self, interaction: discord.Interaction) -> bool:
+        if interaction.user.id != self.user_id:
+            await interaction.response.send_message(
+                "Only the command invoker can confirm this action.",
+                ephemeral=True,
+            )
+            return False
+        return True
+
+    def _disable_buttons(self) -> None:
+        for child in self.children:
+            if isinstance(child, discord.ui.Button):
+                child.disabled = True
+
+    @discord.ui.button(label="Confirm", style=discord.ButtonStyle.danger)
+    async def confirm(self, interaction: discord.Interaction, button: discord.ui.Button):
+        if self.completed:
+            await interaction.response.send_message("This confirmation is already resolved.", ephemeral=True)
+            return
+        self.completed = True
+        self._disable_buttons()
+        await interaction.response.edit_message(view=self)
+        try:
+            result = await self.on_confirm()
+            await interaction.followup.send(result, ephemeral=True)
+        except Exception as exc:
+            await interaction.followup.send(f"Action failed: {exc}", ephemeral=True)
+
+    @discord.ui.button(label="Cancel", style=discord.ButtonStyle.secondary)
+    async def cancel(self, interaction: discord.Interaction, button: discord.ui.Button):
+        if self.completed:
+            await interaction.response.send_message("This confirmation is already resolved.", ephemeral=True)
+            return
+        self.completed = True
+        self._disable_buttons()
+        await interaction.response.edit_message(content=f"Cancelled: {self.summary}", view=self)
+
+
 class Config(commands.Cog):
     # Main config group
     config = app_commands.Group(name="config", description="Guild configuration")
@@ -232,6 +283,7 @@ class Config(commands.Cog):
     # Standalone top-level groups
     staff_group = app_commands.Group(name="staff", description="Manage bot staff roles")
     modlog_group = app_commands.Group(name="modlog", description="Moderation log channel")
+    manage_group = app_commands.Group(name="manage", description="Manage channels, categories, and roles")
     autorole_group = app_commands.Group(name="autorole", description="Auto-role settings")
     welcome_group = app_commands.Group(name="welcome", description="Welcome message settings")
 
@@ -261,6 +313,34 @@ class Config(commands.Cog):
             )
             return False
         return True
+
+    async def _send_manage_mod_log(
+        self,
+        guild: discord.Guild,
+        actor: discord.abc.User,
+        action: str,
+        target: str,
+    ) -> None:
+        channel_id = await get_mod_log_channel_id(guild.id)
+        if not channel_id:
+            return
+        channel = guild.get_channel(channel_id)
+        if not isinstance(channel, discord.TextChannel):
+            return
+        embed = discord.Embed(
+            title="Management Action",
+            color=discord.Color.orange(),
+            timestamp=discord.utils.utcnow(),
+        )
+        embed.add_field(name="Action", value=action, inline=True)
+        embed.add_field(name="Moderator", value=f"{actor} ({actor.id})", inline=True)
+        embed.add_field(name="Target", value=target, inline=False)
+        try:
+            await channel.send(embed=embed, allowed_mentions=discord.AllowedMentions.none())
+        except discord.Forbidden:
+            logger.warning("Missing permissions to send manage mod log in %s", guild.name)
+        except Exception as exc:
+            logger.warning("Failed to send manage mod log in %s: %s", guild.name, exc)
 
     def _format_key(self, value: Optional[str]) -> str:
         if not value:
@@ -1759,6 +1839,196 @@ class Config(commands.Cog):
             role_name = role.mention if role else f"(deleted role {role_id})"
             lines.append(f"Level {level}: {role_name}")
         await interaction.response.send_message("\n".join(lines), ephemeral=True)
+
+    # =========================
+    # Structure Management
+    # =========================
+
+    @manage_group.command(name="create_category", description="Create a category.")
+    @app_commands.checks.has_permissions(manage_guild=True)
+    async def manage_create_category(self, interaction: discord.Interaction, name: str):
+        if not await self._require_guild(interaction):
+            return
+        category = await interaction.guild.create_category(
+            name=name.strip(),
+            reason=f"Requested by {interaction.user}",
+        )
+        await self._send_manage_mod_log(
+            interaction.guild,
+            interaction.user,
+            "create_category",
+            f"{category.name} ({category.id})",
+        )
+        await interaction.response.send_message(
+            f"Created category {category.name}.",
+            ephemeral=True,
+        )
+
+    @manage_group.command(name="create_text_channel", description="Create a text channel.")
+    @app_commands.checks.has_permissions(manage_guild=True)
+    @app_commands.describe(category="Optional parent category")
+    async def manage_create_text_channel(
+        self,
+        interaction: discord.Interaction,
+        name: str,
+        category: Optional[discord.CategoryChannel] = None,
+    ):
+        if not await self._require_guild(interaction):
+            return
+        channel = await interaction.guild.create_text_channel(
+            name=name.strip(),
+            category=category,
+            reason=f"Requested by {interaction.user}",
+        )
+        await self._send_manage_mod_log(
+            interaction.guild,
+            interaction.user,
+            "create_text_channel",
+            f"{channel.name} ({channel.id})",
+        )
+        await interaction.response.send_message(
+            f"Created text channel {channel.mention}.",
+            ephemeral=True,
+        )
+
+    @manage_group.command(name="create_voice_channel", description="Create a voice channel.")
+    @app_commands.checks.has_permissions(manage_guild=True)
+    @app_commands.describe(category="Optional parent category")
+    async def manage_create_voice_channel(
+        self,
+        interaction: discord.Interaction,
+        name: str,
+        category: Optional[discord.CategoryChannel] = None,
+    ):
+        if not await self._require_guild(interaction):
+            return
+        channel = await interaction.guild.create_voice_channel(
+            name=name.strip(),
+            category=category,
+            reason=f"Requested by {interaction.user}",
+        )
+        await self._send_manage_mod_log(
+            interaction.guild,
+            interaction.user,
+            "create_voice_channel",
+            f"{channel.name} ({channel.id})",
+        )
+        await interaction.response.send_message(
+            f"Created voice channel `{channel.name}`.",
+            ephemeral=True,
+        )
+
+    @manage_group.command(name="create_role", description="Create a role.")
+    @app_commands.checks.has_permissions(manage_guild=True)
+    async def manage_create_role(self, interaction: discord.Interaction, name: str):
+        if not await self._require_guild(interaction):
+            return
+        role = await interaction.guild.create_role(
+            name=name.strip(),
+            reason=f"Requested by {interaction.user}",
+        )
+        await self._send_manage_mod_log(
+            interaction.guild,
+            interaction.user,
+            "create_role",
+            f"{role.name} ({role.id})",
+        )
+        await interaction.response.send_message(
+            f"Created role {role.mention}.",
+            ephemeral=True,
+        )
+
+    @manage_group.command(name="delete_category", description="Delete a category (confirmation required).")
+    @app_commands.checks.has_permissions(manage_guild=True)
+    async def manage_delete_category(self, interaction: discord.Interaction, category: discord.CategoryChannel):
+        if not await self._require_guild(interaction):
+            return
+        summary = f"delete category '{category.name}'"
+
+        async def _confirm() -> str:
+            existing = interaction.guild.get_channel(category.id)
+            if not isinstance(existing, discord.CategoryChannel):
+                return "Category no longer exists."
+            name = existing.name
+            await existing.delete(reason=f"Requested by {interaction.user}")
+            await self._send_manage_mod_log(
+                interaction.guild,
+                interaction.user,
+                "delete_category",
+                f"{name} ({category.id})",
+            )
+            return f"Deleted category `{name}`."
+
+        view = ManageConfirmView(interaction.user.id, summary, _confirm)
+        await interaction.response.send_message(
+            f"Confirm delete: `{category.name}`",
+            view=view,
+            ephemeral=True,
+        )
+
+    @manage_group.command(name="delete_channel", description="Delete a text/voice channel (confirmation required).")
+    @app_commands.checks.has_permissions(manage_guild=True)
+    async def manage_delete_channel(
+        self,
+        interaction: discord.Interaction,
+        channel: discord.TextChannel | discord.VoiceChannel,
+    ):
+        if not await self._require_guild(interaction):
+            return
+        summary = f"delete channel '{channel.name}'"
+
+        async def _confirm() -> str:
+            existing = interaction.guild.get_channel(channel.id)
+            if not isinstance(existing, (discord.TextChannel, discord.VoiceChannel)):
+                return "Channel no longer exists."
+            name = existing.name
+            kind = "text" if isinstance(existing, discord.TextChannel) else "voice"
+            await existing.delete(reason=f"Requested by {interaction.user}")
+            await self._send_manage_mod_log(
+                interaction.guild,
+                interaction.user,
+                "delete_channel",
+                f"{name} ({channel.id}) [{kind}]",
+            )
+            return f"Deleted {kind} channel `{name}`."
+
+        view = ManageConfirmView(interaction.user.id, summary, _confirm)
+        await interaction.response.send_message(
+            f"Confirm delete: `{channel.name}`",
+            view=view,
+            ephemeral=True,
+        )
+
+    @manage_group.command(name="delete_role", description="Delete a role (confirmation required).")
+    @app_commands.checks.has_permissions(manage_guild=True)
+    async def manage_delete_role(self, interaction: discord.Interaction, role: discord.Role):
+        if not await self._require_guild(interaction):
+            return
+        if role.is_default():
+            await interaction.response.send_message("Cannot delete @everyone.", ephemeral=True)
+            return
+        summary = f"delete role '{role.name}'"
+
+        async def _confirm() -> str:
+            existing = interaction.guild.get_role(role.id)
+            if not existing:
+                return "Role no longer exists."
+            name = existing.name
+            await existing.delete(reason=f"Requested by {interaction.user}")
+            await self._send_manage_mod_log(
+                interaction.guild,
+                interaction.user,
+                "delete_role",
+                f"{name} ({role.id})",
+            )
+            return f"Deleted role `{name}`."
+
+        view = ManageConfirmView(interaction.user.id, summary, _confirm)
+        await interaction.response.send_message(
+            f"Confirm delete: `{role.name}`",
+            view=view,
+            ephemeral=True,
+        )
 
     # =========================
     # Mod Log

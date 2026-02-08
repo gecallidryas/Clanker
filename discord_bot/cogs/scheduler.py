@@ -16,7 +16,7 @@ Configuration:
 import asyncio
 import os
 from datetime import datetime, timedelta
-from typing import Dict
+from typing import Any, Dict, Optional, Tuple
 
 import pytz
 import discord
@@ -59,6 +59,31 @@ class Scheduler(commands.Cog):
         self.last_meal_check: Dict[tuple[int, int], datetime] = {}
         # Track pending bump reminders per guild
         self.pending_bump_reminders: Dict[int, bool] = {}
+
+    @staticmethod
+    def _parse_user_timezone_row(row: Any) -> Optional[Tuple[int, str]]:
+        """Parse a timezone row from db_handler safely."""
+        user_id: Optional[int] = None
+        timezone: Optional[str] = None
+
+        if isinstance(row, dict):
+            try:
+                user_id = int(row.get("user_id")) if row.get("user_id") is not None else None
+            except (TypeError, ValueError):
+                user_id = None
+            timezone_value = row.get("timezone")
+            timezone = str(timezone_value).strip() if timezone_value is not None else None
+        elif isinstance(row, (list, tuple)):
+            if len(row) >= 2:
+                try:
+                    user_id = int(row[0]) if row[0] is not None else None
+                except (TypeError, ValueError):
+                    user_id = None
+                timezone = str(row[1]).strip() if row[1] is not None else None
+
+        if user_id is None or not timezone:
+            return None
+        return user_id, timezone
 
     def _select_ping_channel(self, guild: discord.Guild) -> discord.TextChannel | None:
         """Pick a channel where the bot can ping users."""
@@ -194,7 +219,12 @@ class Scheduler(commands.Cog):
                 if not ping_channel:
                     continue
                     
-                for user_id, timezone in users:
+                for row in users:
+                    parsed = self._parse_user_timezone_row(row)
+                    if not parsed:
+                        logger.warning("Skipping malformed timezone row in guild %s: %r", guild.id, row)
+                        continue
+                    user_id, timezone = parsed
                     try:
                         tz = pytz.timezone(timezone)
                         local_now = datetime.now(tz)

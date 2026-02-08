@@ -153,8 +153,9 @@ If the user has permission and asks for a role or moderation action, respond ONL
 ```json
 {
   "action": "manage_role" | "moderate_user" | "manage_channel",
-  "sub_action": "create" | "give" | "remove" | "ban" | "unban" | "kick" | "timeout" | "mute"
-               | "create_category" | "create_text_channel" | "create_voice_channel",
+  "sub_action": "create" | "give" | "remove" | "delete" | "ban" | "unban" | "kick" | "timeout" | "mute"
+               | "create_category" | "create_text_channel" | "create_voice_channel"
+               | "delete_category" | "delete_text_channel" | "delete_voice_channel",
   "target_name": "Role name (if applicable)",
   "channel_name": "Channel or category name (if applicable)",
   "parent_name": "Category name to place channel under (optional)",
@@ -172,7 +173,7 @@ Notes:
 - If the user says "me", use the provided User ID for target_id.
 - If you need a target_id but it is missing, ask for a mention or numeric ID instead of refusing.
 - Agentic actions are administrative tasks. If agentic access is granted, comply regardless of affection level.
-- For channels, use manage_channel with create_category or create_text_channel/create_voice_channel and include parent_name or parent_id when asked.
+- For channels, use manage_channel with create/delete actions and include parent_name or parent_id when asked.
 
 If the user does NOT have permission, refuse politely and do NOT output JSON.
 """.strip()
@@ -300,6 +301,35 @@ def _extract_role_name_from_text(content: str) -> Optional[str]:
     return None
 
 
+def _extract_role_request(content: str) -> Optional[Dict[str, str]]:
+    if not content:
+        return None
+    lowered = content.lower()
+    if "role" not in lowered:
+        return None
+
+    quoted = re.findall(r"[\"â€œâ€'â€˜â€™]([^\"â€œâ€'â€˜â€™]+)[\"â€œâ€'â€˜â€™]", content)
+    quoted_name = quoted[0].strip() if quoted else ""
+
+    delete_patterns = [
+        r"(?:delete|remove)\s+(?:the\s+)?(.+?)\s+role(?:\s+from\s+server|\s+entirely|\s*$)",
+        r"(?:delete|remove)\s+role\s+(?:named|called)?\s*(.+?)\s*$",
+    ]
+    for pattern in delete_patterns:
+        match = re.search(pattern, content, flags=re.IGNORECASE)
+        if match:
+            role_name = match.group(1).strip() if match.group(1) else quoted_name
+            role_name = role_name or quoted_name
+            if role_name:
+                role_name = role_name.strip("\"'`“”‘’ ")
+                return {"sub_action": "delete", "target_name": role_name}
+
+    role_name = quoted_name or _extract_role_name_from_text(content)
+    if role_name:
+        return {"sub_action": "create", "target_name": role_name}
+    return None
+
+
 def _extract_target_member_id(message: discord.Message) -> Optional[int]:
     if not message.mentions:
         return None
@@ -319,9 +349,124 @@ def _clean_channel_name(name: str) -> str:
     return name.strip()
 
 
+def _extract_quoted_items(content: str) -> list[str]:
+    quotes = re.findall(r"[\"â€œâ€'â€˜â€™]([^\"â€œâ€'â€˜â€™]+)[\"â€œâ€'â€˜â€™]", content or "")
+    return [_clean_channel_name(item) for item in quotes if _clean_channel_name(item)]
+
+
 def _extract_channel_request(content: str) -> Optional[dict]:
+    return _extract_channel_request_v2(content)
+
+
+def _extract_channel_request_v2(content: str) -> Optional[dict]:
+    return _extract_channel_request_v3(content)
+
+
+def _extract_channel_request_v3(content: str) -> Optional[dict]:
+    return _extract_channel_request_resolved(content)
+
+
+def _extract_channel_request_resolved(content: str) -> Optional[dict]:
+    return _extract_channel_request_new(content)
+
+
+def _extract_channel_request_new(content: str) -> Optional[dict]:
     if not content:
         return None
+    content_lower = content.lower()
+    has_category = "category" in content_lower
+    has_voice = bool(re.search(r"\bvoice channel\b|\bvc\b", content_lower))
+    has_text = "text channel" in content_lower
+    has_channel = "channel" in content_lower or has_voice or has_text
+    if not has_category and not has_channel:
+        return None
+
+    quoted_items = _extract_quoted_items(content)
+
+    create_match = re.search(r"\b(create|make|add|setup|set up)\b", content_lower)
+    delete_match = re.search(r"\b(delete|remove)\b", content_lower)
+    is_delete = bool(delete_match and (not create_match or delete_match.start() <= create_match.start()))
+
+    if has_category:
+        channel_kind = "category"
+    elif has_voice:
+        channel_kind = "voice"
+    else:
+        channel_kind = "text"
+
+    if channel_kind == "category":
+        sub_action = "delete_category" if is_delete else "create_category"
+    elif channel_kind == "voice":
+        sub_action = "delete_voice_channel" if is_delete else "create_voice_channel"
+    else:
+        sub_action = "delete_text_channel" if is_delete else "create_text_channel"
+
+    channel_name: Optional[str] = None
+    parent_name: Optional[str] = None
+
+    if quoted_items:
+        if not is_delete and sub_action in {"create_text_channel", "create_voice_channel"} and len(quoted_items) >= 2:
+            channel_name = quoted_items[0]
+            parent_name = quoted_items[1]
+        else:
+            channel_name = quoted_items[0]
+
+    if not channel_name:
+        name_patterns = []
+        if is_delete:
+            if channel_kind == "category":
+                name_patterns.append(
+                    r"(?:delete|remove)\s+(?:the\s+)?(?:category\s+)?(?:named|called)?\s*([^\n,]+)"
+                )
+            elif channel_kind == "voice":
+                name_patterns.append(
+                    r"(?:delete|remove)\s+(?:the\s+)?(?:voice\s+channel|vc)\s+(?:named|called)?\s*([^\n,]+)"
+                )
+            else:
+                name_patterns.append(
+                    r"(?:delete|remove)\s+(?:the\s+)?(?:text\s+)?channel\s+(?:named|called)?\s*([^\n,]+)"
+                )
+        else:
+            if channel_kind == "category":
+                name_patterns.append(
+                    r"(?:create|make|add)\s+(?:a\s+)?category\s+(?:named|called)?\s*([^\n,]+)"
+                )
+            elif channel_kind == "voice":
+                name_patterns.append(
+                    r"(?:create|make|add)\s+(?:a\s+)?(?:voice\s+channel|vc)\s+(?:named|called)?\s*([^\n,]+)"
+                )
+            else:
+                name_patterns.append(
+                    r"(?:create|make|add)\s+(?:a\s+)?(?:text\s+)?channel\s+(?:named|called)?\s*([^\n,]+)"
+                )
+
+        for pattern in name_patterns:
+            match = re.search(pattern, content, flags=re.IGNORECASE)
+            if not match:
+                continue
+            candidate = _clean_channel_name(match.group(1))
+            candidate = re.split(r"\s+(?:under|in)\s+", candidate, maxsplit=1, flags=re.IGNORECASE)[0].strip()
+            if candidate:
+                channel_name = candidate
+                break
+
+    if not is_delete and sub_action in {"create_text_channel", "create_voice_channel"} and not parent_name:
+        parent_match = re.search(
+            r"(?:under|inside|in)\s+(?:the\s+)?(?:category\s+)?([#\w\-\s]+)$",
+            content,
+            flags=re.IGNORECASE,
+        )
+        if parent_match:
+            parent_name = _clean_channel_name(parent_match.group(1))
+
+    if not channel_name:
+        return None
+
+    return {
+        "sub_action": sub_action,
+        "channel_name": channel_name,
+        "parent_name": parent_name or None,
+    }
     content_lower = content.lower()
     has_category = "category" in content_lower
     has_channel = "channel" in content_lower
@@ -389,6 +534,68 @@ def _extract_channel_request(content: str) -> Optional[dict]:
     return None
 
 
+def _extract_starboard_request(content: str) -> Optional[Dict[str, Any]]:
+    text = (content or "").strip()
+    if not text:
+        return None
+    lowered = text.lower()
+    if "starboard" not in lowered:
+        return None
+    if not re.search(r"\b(set|setup|configure|enable|send|create)\b", lowered):
+        return None
+
+    params: Dict[str, Any] = {}
+    channel_match = re.search(r"<#(\d+)>", text)
+    if channel_match:
+        params["channel_id"] = int(channel_match.group(1))
+    elif "this channel" in lowered or "here" in lowered:
+        params["channel"] = "this channel"
+
+    if "any emoji" in lowered or re.search(r"\bany\b.*\bemoji\b", lowered):
+        params["emoji_mode"] = "any"
+    else:
+        custom_emoji_tokens = re.findall(r"<a?:\w+:\d+>", text)
+        if custom_emoji_tokens:
+            params["emoji_triggers"] = custom_emoji_tokens
+
+    threshold: Optional[int] = None
+    more_than_match = re.search(r"more than\s+(\d+)", lowered)
+    if more_than_match:
+        threshold = int(more_than_match.group(1)) + 1
+    else:
+        at_least_match = re.search(r"(?:at least|or more)\s+(\d+)", lowered)
+        if at_least_match:
+            threshold = int(at_least_match.group(1))
+        else:
+            bare_match = re.search(r"\b(\d+)\s*(?:stars?|reactions?)\b", lowered)
+            if bare_match:
+                threshold = int(bare_match.group(1))
+    if threshold is not None:
+        params["threshold"] = threshold
+
+    return params
+
+
+def _is_admin_intent_content(content: str) -> bool:
+    text = (content or "").lower()
+    if not text:
+        return False
+    admin_keywords = (
+        "starboard",
+        "modlog",
+        "moderation log",
+        "create channel",
+        "delete channel",
+        "create category",
+        "delete category",
+        "create role",
+        "delete role",
+        "remove role",
+        "staff role",
+    )
+    return any(keyword in text for keyword in admin_keywords)
+
+
 def _build_admin_confirmation_prompt(result: Dict[str, Any]) -> str:
     missing = result.get("missing") or []
     summary = result.get("summary") or ""
@@ -432,9 +639,13 @@ def _agentic_action_requires_level(action: str) -> int:
         "create",
         "give",
         "remove",
+        "delete",
         "create_category",
         "create_text_channel",
         "create_voice_channel",
+        "delete_category",
+        "delete_text_channel",
+        "delete_voice_channel",
     }:
         return 2
     return 2
@@ -475,9 +686,23 @@ async def _post_mod_log(
     await channel.send(embed=embed)
 
 
+def _is_destructive_agentic_sub_action(sub_action: str) -> bool:
+    return sub_action in {"delete", "delete_category", "delete_text_channel", "delete_voice_channel"}
+
+
+def _summarize_agentic_action(data: Dict[str, Any]) -> str:
+    action = (data.get("action") or "").strip()
+    sub_action = (data.get("sub_action") or "").strip()
+    target = (data.get("target_name") or data.get("channel_name") or "").strip()
+    if target:
+        return f"{action}:{sub_action} ({target})"
+    return f"{action}:{sub_action}"
+
+
 async def handle_agentic_actions(
     message: discord.Message,
     ai_response_text: str,
+    brain: Optional["AIBrain"] = None,
 ) -> Optional[discord.Message]:
     """Parse and execute agentic JSON actions. Returns sent reply if handled."""
     payload = _find_agentic_json_block(ai_response_text)
@@ -497,6 +722,7 @@ async def handle_agentic_actions(
         "create",
         "give",
         "remove",
+        "delete",
         "ban",
         "unban",
         "kick",
@@ -505,6 +731,9 @@ async def handle_agentic_actions(
         "create_category",
         "create_text_channel",
         "create_voice_channel",
+        "delete_category",
+        "delete_text_channel",
+        "delete_voice_channel",
     }:
         return None
 
@@ -516,6 +745,14 @@ async def handle_agentic_actions(
 
     if permission_level < required_level:
         return await message.reply("Nice try, but you don't have permission to do that.", mention_author=False)
+
+    if _is_destructive_agentic_sub_action(sub_action) and brain and not bool(data.get("_confirmed")):
+        brain._store_pending_agentic_action(message.channel.id, message.author.id, data)
+        summary = _summarize_agentic_action(data)
+        return await message.reply(
+            f"This is destructive: **{summary}**. Reply `confirm` to continue or `cancel`.",
+            mention_author=False,
+        )
 
     target_id = data.get("target_id")
     target_id_int: Optional[int] = None
@@ -577,6 +814,10 @@ async def handle_agentic_actions(
                 if not target_member:
                     return await message.reply("I couldn't find that member.", mention_author=False)
                 await target_member.remove_roles(role, reason=reason)
+            elif sub_action == "delete":
+                if not role:
+                    return await message.reply(f"I couldn't find the role '{role_name}'.", mention_author=False)
+                await role.delete(reason=reason)
             else:
                 return await message.reply("Unknown role action.", mention_author=False)
 
@@ -630,25 +871,26 @@ async def handle_agentic_actions(
             parent_id = data.get("parent_id")
             parent_name = (data.get("parent_name") or "").strip()
             category: Optional[discord.CategoryChannel] = None
-            if parent_id:
-                try:
-                    parent_id_int = int(parent_id)
-                except (TypeError, ValueError):
-                    parent_id_int = None
-                if parent_id_int:
-                    parent = guild.get_channel(parent_id_int)
-                    if isinstance(parent, discord.CategoryChannel):
-                        category = parent
-            if category is None and parent_name:
-                for item in guild.categories:
-                    if (item.name or "").lower() == parent_name.lower():
-                        category = item
-                        break
-                if category is None:
-                    category = await guild.create_category(
-                        name=parent_name,
-                        reason=f"Requested by {message.author}",
-                    )
+            if sub_action in {"create_text_channel", "create_voice_channel"}:
+                if parent_id:
+                    try:
+                        parent_id_int = int(parent_id)
+                    except (TypeError, ValueError):
+                        parent_id_int = None
+                    if parent_id_int:
+                        parent = guild.get_channel(parent_id_int)
+                        if isinstance(parent, discord.CategoryChannel):
+                            category = parent
+                if category is None and parent_name:
+                    for item in guild.categories:
+                        if (item.name or "").lower() == parent_name.lower():
+                            category = item
+                            break
+                    if category is None:
+                        category = await guild.create_category(
+                            name=parent_name,
+                            reason=f"Requested by {message.author}",
+                        )
 
             if sub_action == "create_category":
                 existing = next(
@@ -671,8 +913,55 @@ async def handle_agentic_actions(
                     category=category,
                     reason=f"Requested by {message.author}",
                 )
+            elif sub_action == "delete_category":
+                matches = [
+                    item for item in guild.categories
+                    if (item.name or "").lower() == channel_name.lower()
+                ]
+                if not matches:
+                    return await message.reply(f"I couldn't find category '{channel_name}'.", mention_author=False)
+                if len(matches) > 1:
+                    return await message.reply(
+                        f"I found multiple categories named '{channel_name}'. Please use an ID.",
+                        mention_author=False,
+                    )
+                await matches[0].delete(reason=reason)
+            elif sub_action == "delete_text_channel":
+                matches = [
+                    item for item in guild.text_channels
+                    if (item.name or "").lower() == channel_name.lower()
+                ]
+                if not matches:
+                    return await message.reply(f"I couldn't find text channel '{channel_name}'.", mention_author=False)
+                if len(matches) > 1:
+                    return await message.reply(
+                        f"I found multiple text channels named '{channel_name}'. Please use an ID.",
+                        mention_author=False,
+                    )
+                await matches[0].delete(reason=reason)
+            elif sub_action == "delete_voice_channel":
+                matches = [
+                    item for item in guild.voice_channels
+                    if (item.name or "").lower() == channel_name.lower()
+                ]
+                if not matches:
+                    return await message.reply(f"I couldn't find voice channel '{channel_name}'.", mention_author=False)
+                if len(matches) > 1:
+                    return await message.reply(
+                        f"I found multiple voice channels named '{channel_name}'. Please use an ID.",
+                        mention_author=False,
+                    )
+                await matches[0].delete(reason=reason)
             else:
                 return await message.reply("Unknown channel action.", mention_author=False)
+
+            await _post_mod_log(
+                guild,
+                message.author,
+                f"channel_{sub_action}",
+                None,
+                f"Channel: {channel_name}. {reason}",
+            )
         else:
             return await message.reply("Unknown agentic action.", mention_author=False)
 
@@ -711,8 +1000,22 @@ async def handle_admin_actions(
 
     action = data.get("action")
     params = data.get("params") or {}
+    if (
+        isinstance(params, dict)
+        and action == "STARBOARD_SETUP"
+        and not params.get("channel_id")
+        and ("this channel" in (message.content or "").lower() or "here" in (message.content or "").lower())
+    ):
+        params["channel"] = "this channel"
 
-    result = await execute_admin_action(action, params, message.guild, message.author, bot=brain.bot)
+    result = await execute_admin_action(
+        action,
+        params,
+        message.guild,
+        message.author,
+        bot=brain.bot,
+        current_channel_id=message.channel.id,
+    )
 
     if result.get("needs_confirmation"):
         brain._store_pending_admin_action(message.channel.id, message.author.id, action, params, result)
@@ -831,6 +1134,7 @@ class AIBrain(commands.Cog):
         self.chain_limit = CHAIN_MEMORY_LIMIT
         self._video_clients: Dict[str, tuple] = {}
         self.pending_admin_actions: Dict[tuple[int, int], Dict[str, Any]] = {}
+        self.pending_agentic_actions: Dict[tuple[int, int], Dict[str, Any]] = {}
         # Active conversations: (channel_id, user_id) -> {"remaining": int, "last_active": datetime}
         self.active_convos: Dict[tuple[int, int], dict] = {}
         self.reply_cooldowns: Dict[tuple[str, int], datetime] = {}
@@ -1065,6 +1369,59 @@ class AIBrain(commands.Cog):
             return None
         return pending
 
+    def _pending_agentic_key(self, channel_id: int, user_id: int) -> tuple[int, int]:
+        return (channel_id, user_id)
+
+    def _store_pending_agentic_action(
+        self,
+        channel_id: int,
+        user_id: int,
+        data: Dict[str, Any],
+    ) -> None:
+        self.pending_agentic_actions[self._pending_agentic_key(channel_id, user_id)] = {
+            "data": data,
+            "created_at": datetime.now(),
+        }
+
+    def _pop_pending_agentic_action(self, channel_id: int, user_id: int) -> Optional[Dict[str, Any]]:
+        return self.pending_agentic_actions.pop(self._pending_agentic_key(channel_id, user_id), None)
+
+    def _get_pending_agentic_action(self, channel_id: int, user_id: int) -> Optional[Dict[str, Any]]:
+        pending = self.pending_agentic_actions.get(self._pending_agentic_key(channel_id, user_id))
+        if not pending:
+            return None
+        created_at = pending.get("created_at")
+        if created_at and (datetime.now() - created_at).total_seconds() > ADMIN_PENDING_TTL_SECONDS:
+            self._pop_pending_agentic_action(channel_id, user_id)
+            return None
+        return pending
+
+    async def _handle_pending_agentic_confirmation(self, message: discord.Message) -> Optional[discord.Message]:
+        if not message.guild or not isinstance(message.author, discord.Member):
+            return None
+        content = (message.content or "").strip().lower()
+        if not content:
+            return None
+        pending = self._get_pending_agentic_action(message.channel.id, message.author.id)
+        if not pending:
+            return None
+
+        if content in ADMIN_CANCEL_TOKENS:
+            self._pop_pending_agentic_action(message.channel.id, message.author.id)
+            return await message.reply("Cancelled.", mention_author=False)
+
+        if content not in ADMIN_CONFIRM_TOKENS:
+            return None
+
+        payload_data = dict(pending.get("data") or {})
+        payload_data["_confirmed"] = True
+        self._pop_pending_agentic_action(message.channel.id, message.author.id)
+        payload = "```json\n" + json.dumps(payload_data, ensure_ascii=False) + "\n```"
+        sent = await handle_agentic_actions(message, payload, brain=self)
+        if sent:
+            return sent
+        return await message.reply("I couldn't execute that action.", mention_author=False)
+
     async def _handle_pending_admin_confirmation(self, message: discord.Message) -> Optional[discord.Message]:
         if not message.guild or not isinstance(message.author, discord.Member):
             return None
@@ -1094,7 +1451,14 @@ class AIBrain(commands.Cog):
         if "channel" in missing and not params.get("channel_id"):
             return await message.reply("Please provide the channel to use.", mention_author=False)
 
-        follow_up = await execute_admin_action(action, params, message.guild, message.author, bot=self.bot)
+        follow_up = await execute_admin_action(
+            action,
+            params,
+            message.guild,
+            message.author,
+            bot=self.bot,
+            current_channel_id=message.channel.id,
+        )
         if follow_up.get("needs_confirmation"):
             self._store_pending_admin_action(
                 message.channel.id,
@@ -1169,24 +1533,31 @@ class AIBrain(commands.Cog):
             )
             return False
 
-        if "voice" in content_lower or "vc" in content_lower:
-            sub_action = "create_voice_channel" if sub_action != "create_category" else sub_action
-
+        if sub_action == "create_category":
+            reply = f"Done! Created category '{channel_name}'."
+        elif sub_action == "create_voice_channel":
+            reply = f"Done! Created voice channel '{channel_name}'."
+        elif sub_action == "create_text_channel":
+            reply = f"Done! Created text channel '{channel_name}'."
+        elif sub_action == "delete_category":
+            reply = f"Done! Deleted category '{channel_name}'."
+        elif sub_action == "delete_voice_channel":
+            reply = f"Done! Deleted voice channel '{channel_name}'."
+        elif sub_action == "delete_text_channel":
+            reply = f"Done! Deleted text channel '{channel_name}'."
+        else:
+            reply = f"Done! Updated '{channel_name}'."
         payload = {
             "action": "manage_channel",
             "sub_action": sub_action,
             "channel_name": channel_name,
             "parent_name": parent_name,
             "reason": "User request",
-            "reply": (
-                f"Done! Created {channel_name}."
-                if sub_action == "create_category"
-                else f"Done! Created channel '{channel_name}'."
-            ),
+            "reply": reply,
         }
         logger.debug("Channel fallback: executing agentic payload %s", payload)
         response_text = "```json\n" + json.dumps(payload, ensure_ascii=False) + "\n```"
-        handled = await handle_agentic_actions(message, response_text)
+        handled = await handle_agentic_actions(message, response_text, brain=self)
         logger.debug("Channel fallback: handled=%s", handled is not None)
         return handled is not None
 
@@ -1206,15 +1577,19 @@ class AIBrain(commands.Cog):
             )
             return False
 
-        role_name = _extract_role_name_from_text(content)
-        if not role_name:
+        role_request = _extract_role_request(content)
+        if not role_request:
             logger.debug(
-                "Role fallback: skip (could not parse role name). content=%r",
+                "Role fallback: skip (could not parse role request). content=%r",
                 content,
             )
             return False
+        role_name = role_request.get("target_name")
+        sub_action = role_request.get("sub_action") or "create"
+        if not role_name:
+            return False
         logger.debug(
-            "Role fallback: parsed role name '%s' for user %s.",
+            "Role fallback: parsed role request '%s' for user %s.",
             role_name,
             message.author.id,
         )
@@ -1226,17 +1601,59 @@ class AIBrain(commands.Cog):
 
         payload = {
             "action": "manage_role",
-            "sub_action": "create",
+            "sub_action": sub_action,
             "target_name": role_name,
             "target_id": str(target_id) if target_id is not None else None,
             "reason": "User request",
-            "reply": f"Done! Created or assigned the role '{role_name}'.",
+            "reply": (
+                f"Done! Deleted the role '{role_name}'."
+                if sub_action == "delete"
+                else f"Done! Created or assigned the role '{role_name}'."
+            ),
         }
         logger.debug("Role fallback: executing agentic payload %s", payload)
         response_text = "```json\n" + json.dumps(payload, ensure_ascii=False) + "\n```"
-        handled = await handle_agentic_actions(message, response_text)
+        handled = await handle_agentic_actions(message, response_text, brain=self)
         logger.debug("Role fallback: handled=%s", handled is not None)
         return handled is not None
+
+    async def _maybe_handle_starboard_setup_request(self, message: discord.Message) -> bool:
+        if not message.guild or not isinstance(message.author, discord.Member):
+            return False
+        permission_level = await _get_agentic_permission_level(message.author)
+        if permission_level < 2:
+            return False
+
+        params = _extract_starboard_request(message.content or "")
+        if not params:
+            return False
+
+        result = await execute_admin_action(
+            "STARBOARD_SETUP",
+            params,
+            message.guild,
+            message.author,
+            bot=self.bot,
+            current_channel_id=message.channel.id,
+        )
+        if result.get("needs_confirmation"):
+            self._store_pending_admin_action(
+                message.channel.id,
+                message.author.id,
+                "STARBOARD_SETUP",
+                params,
+                result,
+            )
+            prompt = _build_admin_confirmation_prompt(result)
+            await message.reply(prompt, mention_author=False)
+            return True
+
+        if not result.get("success"):
+            await message.reply(result.get("error", "Starboard setup failed."), mention_author=False)
+            return True
+
+        await message.reply(result.get("message", "Starboard configured."), mention_author=False)
+        return True
 
     async def _get_recent_history(self, message: discord.Message, limit: int = 5) -> str:
         """Fetch recent messages before this one for additional context."""
@@ -1641,8 +2058,10 @@ class AIBrain(commands.Cog):
         return matched_genders.pop()
     
     async def _get_app_emojis(self, mode: str, guild: Optional[discord.Guild], limit: int = 50) -> str:
-        """Get a formatted list of guild emojis for AI use."""
-        emojis = await get_guild_emojis(self.bot, guild)
+        """Get a formatted list of guild + application emojis for AI use."""
+        guild_emojis = await get_guild_emojis(self.bot, guild)
+        app_emojis = await get_application_emojis(self.bot)
+        emojis = list(guild_emojis) + [emoji for emoji in app_emojis if emoji not in guild_emojis]
         if not emojis:
             return ""
 
@@ -2142,6 +2561,10 @@ You can explain these commands to the user if asked:
         if not message.guild:
             return
 
+        pending_agentic_reply = await self._handle_pending_agentic_confirmation(message)
+        if pending_agentic_reply is not None:
+            return
+
         pending_reply = await self._handle_pending_admin_confirmation(message)
         if pending_reply is not None:
             return
@@ -2197,17 +2620,28 @@ You can explain these commands to the user if asked:
         elif mentioned or has_current_trigger:
             self.auto_channel_counters.pop(auto_key, None)
 
+        admin_intent = False
+        if isinstance(message.author, discord.Member) and _is_admin_intent_content(message.content or ""):
+            permission_level = await _get_agentic_permission_level(message.author)
+            admin_intent = permission_level >= 2
+
         # Determine if we should respond
-        should_respond = mentioned or has_current_trigger or is_active or auto_triggered
-        if not mentioned and has_other_trigger and not has_current_trigger:
+        should_respond = mentioned or has_current_trigger or is_active or auto_triggered or admin_intent
+        if not mentioned and has_other_trigger and not has_current_trigger and not admin_intent:
             should_respond = False
-        if should_respond and whitelist_channel_ids and message.channel.id not in whitelist_channel_ids and not mentioned:
+        if (
+            should_respond
+            and whitelist_channel_ids
+            and message.channel.id not in whitelist_channel_ids
+            and not mentioned
+            and not admin_intent
+        ):
             should_respond = False
-        if should_respond and not mentioned and not has_current_trigger:
+        if should_respond and not mentioned and not has_current_trigger and not admin_intent:
             reply_chain_depth = await self._bot_reply_chain_depth(message)
             if reply_chain_depth >= self_reply_limit:
                 should_respond = False
-        if should_respond and reply_cooldown_seconds > 0 and not mentioned:
+        if should_respond and reply_cooldown_seconds > 0 and not mentioned and not admin_intent:
             on_cooldown, _remaining = check_reply_cooldown(
                 self.reply_cooldowns,
                 cooldown_type=reply_cooldown_type,
@@ -2223,6 +2657,19 @@ You can explain these commands to the user if asked:
         if not should_respond:
             if has_other_trigger and is_active:
                 self.active_convos.pop((message.channel.id, message.author.id), None)
+            _, reply_to_username = self._resolve_reply_to(message)
+            context.add_message(
+                message.id,
+                message.author.id,
+                message.author.display_name,
+                normalized_message_content,
+                reply_to_username=reply_to_username,
+                media=media_refs,
+            )
+            return
+
+        # Fast-path starboard setup requests for admins.
+        if await self._maybe_handle_starboard_setup_request(message):
             _, reply_to_username = self._resolve_reply_to(message)
             context.add_message(
                 message.id,
@@ -2446,7 +2893,7 @@ You can explain these commands to the user if asked:
                 "Please ask again with a narrower request."
             )
         if sent is None:
-            sent = await handle_agentic_actions(message, raw_response)
+            sent = await handle_agentic_actions(message, raw_response, brain=self)
         if sent is None:
             sent = await handle_admin_actions(self, message, raw_response)
         if sent is None:
