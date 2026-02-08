@@ -140,7 +140,7 @@ def build_emoji_lookup(emojis: Iterable) -> Dict[str, str]:
 
 _NAME_PATTERN = re.compile(r"(?<!<a)(?<!<):([a-zA-Z0-9_]+):")
 _NAME_ID_PATTERN = re.compile(r"(?<!<a:)(?<!<:)(?<!<)([a-zA-Z0-9_]+):([0-9]{5,})")
-_BROKEN_CUSTOM_TAG_PATTERN = re.compile(r"<a?:([A-Za-z0-9_]+)(?::)?>")
+_BROKEN_CUSTOM_TAG_PATTERN = re.compile(r"<a?:([^>]+)>")
 
 
 def replace_custom_emojis(
@@ -155,8 +155,6 @@ def replace_custom_emojis(
     if extra_emojis:
         combined.extend(list(extra_emojis))
     lookup = build_emoji_lookup(combined)
-    if not lookup:
-        return text
     id_lookup: Dict[str, str] = {}
     for emoji in combined:
         emoji_id = getattr(emoji, "id", None)
@@ -175,12 +173,22 @@ def replace_custom_emojis(
 
     def replace_broken_tag(match):
         name_raw = match.group(1)
+        if re.fullmatch(r"[A-Za-z0-9_]+:\d{5,}", name_raw.strip()):
+            return match.group(0)
         name = name_raw.lower()
         token = lookup.get(name)
         if token:
             return token
-        return f":{name_raw}:"
+        stripped = (name_raw or "").strip().strip(":")
+        if re.fullmatch(r"[A-Za-z0-9_]+", stripped):
+            return f":{stripped}:"
+        emoji_tail = re.sub(r"^[A-Za-z0-9_\-]+", "", stripped).strip()
+        if emoji_tail:
+            return emoji_tail
+        return stripped or name_raw
 
     text = _BROKEN_CUSTOM_TAG_PATTERN.sub(replace_broken_tag, text)
-    text = _NAME_ID_PATTERN.sub(replace_name_id, text)
-    return _NAME_PATTERN.sub(replace_name, text)
+    if lookup or id_lookup:
+        text = _NAME_ID_PATTERN.sub(replace_name_id, text)
+        text = _NAME_PATTERN.sub(replace_name, text)
+    return text

@@ -30,3 +30,10 @@ def test_replace_custom_emojis_name_id_falls_back_to_id_lookup():
     text = "WrongName:333333"
     replaced = replace_custom_emojis(text, emojis)
     assert replaced == "<:RealName:333333>"
+
+
+def test_replace_custom_emojis_repairs_mixed_broken_tag_to_unicode_tail():
+    emojis = []
+    text = "Ow <:e🙄>"
+    replaced = replace_custom_emojis(text, emojis)
+    assert replaced == "Ow 🙄"

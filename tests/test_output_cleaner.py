@@ -34,3 +34,16 @@ def test_clean_llm_output_removes_emoji_tags_when_disabled():
     cleaned = clean_llm_output(raw, emoji_usage_enabled=False)
     assert "<:wave:12345678901234567>" not in cleaned
 
+
+def test_clean_llm_output_repairs_malformed_custom_tag_with_emoji_tail():
+    raw = "Now <::e🙄> later <:f🥺>"
+    cleaned = clean_llm_output(raw, emoji_usage_enabled=True)
+    assert "🙄" in cleaned
+    assert "🥺" in cleaned
+    assert "<:f🥺>" not in cleaned
+
+
+def test_clean_llm_output_repairs_malformed_custom_tag_to_shortcode():
+    raw = "Hello <:WTAF>"
+    cleaned = clean_llm_output(raw, emoji_usage_enabled=True)
+    assert ":WTAF:" in cleaned

@@ -9,6 +9,8 @@ _INLINE_CODE_RE = re.compile(r"`[^`]*`")
 _CUSTOM_EMOJI_TAG_RE = re.compile(r"<a?:([^:>]+):\d{5,}>")
 _CUSTOM_EMOJI_ANY_TAG_RE = re.compile(r"<[^:>\s]*:([A-Za-z0-9_]+):(\d+)>")
 _RAW_EMOJI_TAG_RE = re.compile(r"<a?:[^:>]+:\d+>")
+_MALFORMED_CUSTOM_TAG_RE = re.compile(r"<a?:([^>]+)>")
+_VALID_CUSTOM_TAG_PAYLOAD_RE = re.compile(r"^[A-Za-z0-9_]+:\d{5,}$")
 
 
 def _protect_code(text: str) -> tuple[str, list[tuple[str, str]]]:
@@ -139,6 +141,24 @@ def clean_llm_output(
 
     protected, replacements = _protect_code(cleaned)
     protected = _CUSTOM_EMOJI_ANY_TAG_RE.sub(r"<:\1:\2>", protected)
+
+    def _repair_malformed_custom_tag(match: re.Match[str]) -> str:
+        payload = (match.group(1) or "").strip()
+        if not payload:
+            return ""
+        if _VALID_CUSTOM_TAG_PAYLOAD_RE.fullmatch(payload):
+            return match.group(0)
+        payload = payload.strip(":")
+        if not payload:
+            return ""
+        if re.fullmatch(r"[A-Za-z0-9_]+", payload):
+            return f":{payload}:"
+        emoji_tail = re.sub(r"^[A-Za-z0-9_\-]+", "", payload).strip()
+        if emoji_tail:
+            return emoji_tail
+        return payload
+
+    protected = _MALFORMED_CUSTOM_TAG_RE.sub(_repair_malformed_custom_tag, protected)
     if not emoji_usage_enabled:
         protected = _RAW_EMOJI_TAG_RE.sub("", protected)
 
@@ -150,4 +170,3 @@ def clean_llm_output(
     cleaned = _restore_code(protected, replacements)
     cleaned = re.sub(r"\s{2,}", " ", cleaned).strip()
     return cleaned
-
