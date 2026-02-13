@@ -10,9 +10,14 @@ from discord.ext import commands
 from utils.db_handler import (
     add_persona_attribute,
     add_sample_dialogue,
+    get_persona_attributes,
+    get_sample_dialogues,
+    replace_persona_attributes,
+    replace_sample_dialogues,
     set_personal_memory_opt_out,
     get_guild_config,
 )
+from utils.database_summarizer import DatabaseSummarizer
 from utils.rag_documents import extract_text_from_bytes
 from utils.rag_store import store_document
 from utils.i18n import get_locale_from_interaction, t
@@ -30,6 +35,7 @@ class Teach(commands.Cog):
 
     def __init__(self, bot: commands.Bot) -> None:
         self.bot = bot
+        self.db_summarizer = DatabaseSummarizer()
 
     @teach_group.command(name="attribute", description="Teach a persona attribute.")
     @app_commands.describe(attribute="Attribute name", value="Attribute value")
@@ -57,9 +63,42 @@ class Teach(commands.Cog):
                 ephemeral=True,
             )
             return
-        await add_persona_attribute(interaction.guild.id, attribute.strip(), value.strip(), interaction.user.id)
+        clean_attribute = attribute.strip()
+        clean_value = value.strip()
+        await interaction.response.defer(thinking=True, ephemeral=True)
+
+        existing = await get_persona_attributes(interaction.guild.id)
+        summarized = (
+            await self.db_summarizer.summarize_attributes(existing, clean_attribute, clean_value)
+            if existing
+            else None
+        )
+
+        if summarized:
+            validated_items: list[tuple[str, str]] = []
+            for item_attribute, item_value in summarized:
+                item_attr_validation = validate_attribute_content(item_attribute)
+                if not item_attr_validation.is_valid:
+                    await interaction.followup.send(
+                        get_memory_limit_error_message(item_attr_validation),
+                        ephemeral=True,
+                    )
+                    return
+                item_value_validation = validate_attribute_content(item_value)
+                if not item_value_validation.is_valid:
+                    await interaction.followup.send(
+                        get_memory_limit_error_message(item_value_validation),
+                        ephemeral=True,
+                    )
+                    return
+                validated_items.append((item_attribute, item_value))
+
+            await replace_persona_attributes(interaction.guild.id, validated_items, interaction.user.id)
+        else:
+            await add_persona_attribute(interaction.guild.id, clean_attribute, clean_value, interaction.user.id)
+
         locale = get_locale_from_interaction(interaction)
-        await interaction.response.send_message(t("teach.attribute.saved", locale), ephemeral=True)
+        await interaction.followup.send(t("teach.attribute.saved", locale), ephemeral=True)
 
     @teach_group.command(name="sampledialogue", description="Teach a sample dialogue line.")
     @app_commands.describe(speaker="Speaker name", dialogue="Dialogue line")
@@ -87,9 +126,42 @@ class Teach(commands.Cog):
                 ephemeral=True,
             )
             return
-        await add_sample_dialogue(interaction.guild.id, speaker.strip(), dialogue.strip(), interaction.user.id)
+        clean_speaker = speaker.strip()
+        clean_dialogue = dialogue.strip()
+        await interaction.response.defer(thinking=True, ephemeral=True)
+
+        existing = await get_sample_dialogues(interaction.guild.id)
+        summarized = (
+            await self.db_summarizer.summarize_sample_dialogues(existing, clean_speaker, clean_dialogue)
+            if existing
+            else None
+        )
+
+        if summarized:
+            validated_items: list[tuple[str, str]] = []
+            for item_speaker, item_dialogue in summarized:
+                item_speaker_validation = validate_attribute_content(item_speaker)
+                if not item_speaker_validation.is_valid:
+                    await interaction.followup.send(
+                        get_memory_limit_error_message(item_speaker_validation),
+                        ephemeral=True,
+                    )
+                    return
+                item_dialogue_validation = validate_sample_dialogue_content(item_dialogue)
+                if not item_dialogue_validation.is_valid:
+                    await interaction.followup.send(
+                        get_memory_limit_error_message(item_dialogue_validation),
+                        ephemeral=True,
+                    )
+                    return
+                validated_items.append((item_speaker, item_dialogue))
+
+            await replace_sample_dialogues(interaction.guild.id, validated_items, interaction.user.id)
+        else:
+            await add_sample_dialogue(interaction.guild.id, clean_speaker, clean_dialogue, interaction.user.id)
+
         locale = get_locale_from_interaction(interaction)
-        await interaction.response.send_message(t("teach.sampledialogue.saved", locale), ephemeral=True)
+        await interaction.followup.send(t("teach.sampledialogue.saved", locale), ephemeral=True)
 
     @teach_group.command(name="document", description="Upload a document for RAG memory.")
     @app_commands.describe(file="Text, markdown, or PDF file", title="Optional title")

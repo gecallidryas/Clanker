@@ -144,6 +144,25 @@ ADMIN_ACTION_PATTERN = re.compile(r"```admin_action\s*(\{.*?\})\s*```", re.DOTAL
 ADMIN_CONFIRM_TOKENS = {"confirm", "yes", "y", "ok", "okay"}
 ADMIN_CANCEL_TOKENS = {"cancel", "stop", "never mind", "nevermind"}
 ADMIN_PENDING_TTL_SECONDS = 180
+PROCESSING_ACK_MARKERS = (
+    "i am processing",
+    "i'm processing",
+    "processing the request",
+    "processing your request",
+    "working on your request",
+    "working on it",
+    "let me check",
+    "let me look",
+    "one moment",
+    "please wait",
+    "searching for",
+    "looking that up",
+)
+AUTO_CONTINUE_PROMPT = (
+    "Continue now and provide the final answer to the user. "
+    "Do not say that you are processing or working on it. "
+    "If a tool is required, output only a tool code block."
+)
 
 AGENTIC_TOOL_INSTRUCTIONS = """
 [AGENTIC TOOL USE]
@@ -260,6 +279,19 @@ def _strip_agentic_json_block(response_text: str) -> str:
     if AGENTIC_JSON_BARE_PATTERN.match(stripped):
         return ""
     return response_text
+
+
+def _is_processing_ack_response(response_text: str) -> bool:
+    text = (response_text or "").strip().lower()
+    if not text:
+        return False
+    if len(text) > 280:
+        return False
+    if "http://" in text or "https://" in text:
+        return False
+    if "\n" in text and len(text.splitlines()) > 2:
+        return False
+    return any(marker in text for marker in PROCESSING_ACK_MARKERS)
 
 
 def _should_assign_created_role(message: discord.Message) -> bool:
@@ -1294,6 +1326,20 @@ class AIBrain(commands.Cog):
 
         user = self.bot.get_user(user_id)
         return user_id, user.display_name if user else None
+
+    def _is_reply_to_bot(self, message: discord.Message) -> bool:
+        """Return True when the message is a direct reply to a bot-authored message."""
+        if not message.reference:
+            return False
+
+        resolved = message.reference.resolved
+        if isinstance(resolved, discord.Message):
+            return bool(getattr(getattr(resolved, "author", None), "id", None) == self.bot.user.id)
+
+        message_id = message.reference.message_id
+        if not message_id:
+            return False
+        return self.chain_memory.get(message_id) == self.bot.user.id
 
 
     def _is_active_conversation(self, channel_id: int, user_id: int) -> bool:
@@ -2542,6 +2588,77 @@ You can explain these commands to the user if asked:
         except Exception as e:
             logger.error("AI Error: %s", e, exc_info=True)
             return "Ah, something went wrong... Let me try again later! >.<"
+
+    async def _continue_after_processing_ack(
+        self,
+        *,
+        prompt: str,
+        guild_id: int,
+        allow_evil: bool,
+        system_instruction: Optional[str],
+        chat_messages: list[dict[str, str]],
+        prior_response: str,
+        message: discord.Message,
+        guild_config: dict[str, Any],
+    ) -> str:
+        """Run one automatic continuation pass after an interim processing-style response."""
+        continuation_messages = list(chat_messages)
+        continuation_messages.append({"role": "assistant", "content": prior_response})
+        continuation_messages.append({"role": "user", "content": AUTO_CONTINUE_PROMPT})
+        current_response = await self.generate_response(
+            prompt,
+            guild_id,
+            allow_evil=allow_evil,
+            system_instruction=system_instruction,
+            messages=continuation_messages,
+        )
+
+        tool_loops = 0
+        max_tool_loops = 4
+        while tool_loops < max_tool_loops:
+            tool_call = extract_tool_call(current_response)
+            if not tool_call:
+                break
+            tool_context = ToolContext(
+                bot=self.bot,
+                guild=message.guild,
+                channel=message.channel,
+                user=message.author,
+                message=message,
+                guild_config=guild_config,
+                locale="en",
+            )
+            tool_name = str(tool_call.get("tool") or "").strip()
+            result = await execute_tool(
+                tool_name,
+                tool_call.get("args") or {},
+                tool_context,
+            )
+            if result.skip_model:
+                return result.user_message or result.summary or "Done."
+
+            continuation_messages.append({"role": "assistant", "content": current_response})
+            continuation_messages.append(
+                {
+                    "role": "user",
+                    "content": f"Tool `{tool_name}` result:\n{result.to_prompt()}",
+                }
+            )
+            current_response = await self.generate_response(
+                prompt,
+                guild_id,
+                allow_evil=allow_evil,
+                system_instruction=system_instruction,
+                messages=continuation_messages,
+            )
+            tool_loops += 1
+
+        if tool_loops >= max_tool_loops and extract_tool_call(current_response):
+            return (
+                "I could not finish all requested tool steps safely in one response. "
+                "Please ask again with a narrower request."
+            )
+        return current_response
     
     @commands.Cog.listener()
     async def on_message(self, message: discord.Message):
@@ -2586,6 +2703,7 @@ You can explain these commands to the user if asked:
             ]
 
         mentioned = self.bot.user in message.mentions
+        replied_to_bot = self._is_reply_to_bot(message)
         mode = await get_server_mode(message.guild.id)
         guild_config = await get_guild_config(message.guild.id)
         normalized_message_content = normalize_custom_emojis_for_llm(message.content or "")
@@ -2595,8 +2713,6 @@ You can explain these commands to the user if asked:
         has_other_trigger = bool(triggered_modes - {mode})
         is_active = self._is_active_conversation(message.channel.id, message.author.id)
         whitelist_channel_ids = self._parse_id_list(guild_config.get("ai_channel_whitelist"))
-        auto_channel_ids = self._parse_id_list(guild_config.get("ai_auto_channels"))
-        auto_threshold = int(guild_config.get("ai_auto_threshold") or 0)
         reply_cooldown_seconds = max(0, int(guild_config.get("ai_reply_cooldown_seconds") or 0))
         reply_cooldown_type = normalize_cooldown_type(
             guild_config.get("ai_reply_cooldown_type") or "per_user"
@@ -2604,44 +2720,26 @@ You can explain these commands to the user if asked:
         self_reply_limit = max(1, int(guild_config.get("ai_self_reply_limit") or 3))
 
         auto_key = (message.channel.id, message.author.id)
-        auto_triggered = False
-        if (
-            auto_threshold > 0
-            and message.channel.id in auto_channel_ids
-            and not mentioned
-            and not has_current_trigger
-            and not is_active
-        ):
-            count = self.auto_channel_counters.get(auto_key, 0) + 1
-            self.auto_channel_counters[auto_key] = count
-            if count >= auto_threshold:
-                auto_triggered = True
-                self.auto_channel_counters[auto_key] = 0
-        elif mentioned or has_current_trigger:
+        if mentioned or has_current_trigger or replied_to_bot:
             self.auto_channel_counters.pop(auto_key, None)
 
-        admin_intent = False
-        if isinstance(message.author, discord.Member) and _is_admin_intent_content(message.content or ""):
-            permission_level = await _get_agentic_permission_level(message.author)
-            admin_intent = permission_level >= 2
-
         # Determine if we should respond
-        should_respond = mentioned or has_current_trigger or is_active or auto_triggered or admin_intent
-        if not mentioned and has_other_trigger and not has_current_trigger and not admin_intent:
+        should_respond = mentioned or has_current_trigger or replied_to_bot
+        if not mentioned and not replied_to_bot and has_other_trigger and not has_current_trigger:
             should_respond = False
         if (
             should_respond
             and whitelist_channel_ids
             and message.channel.id not in whitelist_channel_ids
             and not mentioned
-            and not admin_intent
+            and not replied_to_bot
         ):
             should_respond = False
-        if should_respond and not mentioned and not has_current_trigger and not admin_intent:
+        if should_respond and not mentioned and not has_current_trigger and not replied_to_bot:
             reply_chain_depth = await self._bot_reply_chain_depth(message)
             if reply_chain_depth >= self_reply_limit:
                 should_respond = False
-        if should_respond and reply_cooldown_seconds > 0 and not mentioned and not admin_intent:
+        if should_respond and reply_cooldown_seconds > 0 and not mentioned and not replied_to_bot:
             on_cooldown, _remaining = check_reply_cooldown(
                 self.reply_cooldowns,
                 cooldown_type=reply_cooldown_type,
@@ -2655,7 +2753,7 @@ You can explain these commands to the user if asked:
                 should_respond = False
 
         if not should_respond:
-            if has_other_trigger and is_active:
+            if is_active:
                 self.active_convos.pop((message.channel.id, message.author.id), None)
             _, reply_to_username = self._resolve_reply_to(message)
             context.add_message(
@@ -2832,6 +2930,7 @@ You can explain these commands to the user if asked:
 
         raw_response = response
         sent = None
+        interim_sent: Optional[discord.Message] = None
         pending_sticker_id: Optional[int] = None
         tool_loops = 0
         max_tool_loops = 4
@@ -2893,6 +2992,44 @@ You can explain these commands to the user if asked:
                 "Please ask again with a narrower request."
             )
         if sent is None:
+            interim_preview = strip_tool_call(raw_response)
+            interim_preview = _strip_agentic_json_block(interim_preview)
+            interim_preview = _strip_admin_action_block(interim_preview)
+            interim_preview = clean_llm_output(
+                interim_preview,
+                bot_name=getattr(self.bot.user, "display_name", "Tomori"),
+                emoji_usage_enabled=bool(guild_config.get("emoji_usage_enabled", 1)),
+            )
+            if _is_processing_ack_response(interim_preview):
+                interim_sent = await self._send_in_chunks(message, interim_preview)
+                try:
+                    async with message.channel.typing():
+                        continued_raw = await self._continue_after_processing_ack(
+                            prompt=prompt,
+                            guild_id=message.guild.id,
+                            allow_evil=allow_evil,
+                            system_instruction=system_instruction,
+                            chat_messages=chat_messages,
+                            prior_response=raw_response,
+                            message=message,
+                            guild_config=guild_config,
+                        )
+                    continued_preview = strip_tool_call(continued_raw)
+                    continued_preview = _strip_agentic_json_block(continued_preview)
+                    continued_preview = _strip_admin_action_block(continued_preview)
+                    continued_preview = clean_llm_output(
+                        continued_preview,
+                        bot_name=getattr(self.bot.user, "display_name", "Tomori"),
+                        emoji_usage_enabled=bool(guild_config.get("emoji_usage_enabled", 1)),
+                    )
+                    if continued_preview and continued_preview != interim_preview:
+                        raw_response = continued_raw
+                    else:
+                        sent = interim_sent
+                except Exception as exc:
+                    logger.warning("Auto continuation after processing ack failed: %s", exc)
+                    sent = interim_sent
+        if sent is None:
             sent = await handle_agentic_actions(message, raw_response, brain=self)
         if sent is None:
             sent = await handle_admin_actions(self, message, raw_response)
@@ -2919,6 +3056,8 @@ You can explain these commands to the user if asked:
                     evil_mode=evil_mode_enabled,
                 )
 
+            guild_emojis = []
+            app_emojis = []
             if message.guild:
                 try:
                     guild_emojis = await get_guild_emojis(self.bot, message.guild)
@@ -2930,6 +3069,9 @@ You can explain these commands to the user if asked:
             if emoji_manager:
                 response = emoji_manager.replace_shortcodes(response, strip_unknown=True)
             response = self._filter_recent_custom_emoji_reuse(response, context)
+            if guild_emojis or app_emojis:
+                # Final safety pass to repair any malformed tag fragments left by post-processing.
+                response = replace_custom_emojis(response, guild_emojis, app_emojis)
 
             sent = await self._send_in_chunks(message, response)
 
@@ -2949,9 +3091,6 @@ You can explain these commands to the user if asked:
                 message.author.id,
                 remaining_messages=self_reply_limit,
             )
-        elif is_active:
-            # Continuing active conversation - decrement remaining
-            self._continue_conversation(message.channel.id, message.author.id)
 
         if wellbeing_date:
             await set_last_wellbeing_date(message.guild.id, message.author.id, wellbeing_date)
@@ -2964,6 +3103,15 @@ You can explain these commands to the user if asked:
                 guild_id=message.guild.id,
                 channel_id=message.channel.id,
                 user_id=message.author.id,
+            )
+        if interim_sent and interim_sent.id != sent.id:
+            self._track_message_id(interim_sent.id, interim_sent.author.id)
+            context.add_message(
+                interim_sent.id,
+                interim_sent.author.id,
+                interim_sent.author.display_name,
+                normalize_custom_emojis_for_llm(interim_sent.content),
+                reply_to_username=message.author.display_name,
             )
         self._track_message_id(sent.id, sent.author.id)
         context.add_message(

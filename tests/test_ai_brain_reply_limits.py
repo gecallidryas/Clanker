@@ -135,6 +135,27 @@ class AIBrainReplyLimitTests(unittest.IsolatedAsyncioTestCase):
         self.assertNotIn((55, 1), self.brain.reply_cooldowns)
         self.assertNotIn((55, 1), self.brain.auto_channel_counters)
 
+    async def test_is_reply_to_bot_uses_chain_memory_reference(self):
+        bot_id = self.brain.bot.user.id
+        self.brain._track_message_id(5000, bot_id)
+        channel = _FakeChannel()
+        msg = _FakeMessage(
+            author_id=1234,
+            channel=channel,
+            reference=_FakeReference(message_id=5000, resolved=None),
+        )
+        self.assertTrue(self.brain._is_reply_to_bot(msg))
+
+    async def test_is_reply_to_bot_false_when_reference_not_bot(self):
+        self.brain._track_message_id(5001, 7777)
+        channel = _FakeChannel()
+        msg = _FakeMessage(
+            author_id=1234,
+            channel=channel,
+            reference=_FakeReference(message_id=5001, resolved=None),
+        )
+        self.assertFalse(self.brain._is_reply_to_bot(msg))
+
 
 if __name__ == "__main__":
     unittest.main()

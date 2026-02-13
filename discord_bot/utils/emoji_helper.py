@@ -3,8 +3,12 @@ from __future__ import annotations
 import re
 from typing import Iterable, List, Sequence, Set
 
-# Normalized custom emoji form used in prompts/context.
-CUSTOM_EMOJI_PATTERN = re.compile(r":[A-Za-z0-9_]+:")
+# Match full Discord custom emoji tags first, then shortcodes.
+DISCORD_CUSTOM_EMOJI_TAG = r"<a?:[A-Za-z0-9_]+:[0-9]{5,}>"
+CUSTOM_EMOJI_SHORTCODE = r":[A-Za-z0-9_]+:"
+CUSTOM_EMOJI_PATTERN = re.compile(
+    rf"{DISCORD_CUSTOM_EMOJI_TAG}|{CUSTOM_EMOJI_SHORTCODE}"
+)
 
 # Broad unicode emoji ranges (not exhaustive, but stable without extra deps).
 UNICODE_EMOJI_PATTERN = re.compile(
@@ -83,4 +87,3 @@ def filter_custom_emojis(text: str, emojis_to_remove: Set[str] | Iterable[str]) 
         filtered = re.sub(re.escape(emoji), "", filtered, flags=re.IGNORECASE)
     filtered = re.sub(r"\s{2,}", " ", filtered).strip()
     return filtered
-

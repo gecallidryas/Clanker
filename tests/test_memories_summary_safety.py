@@ -25,7 +25,7 @@ class _FakeResponse:
         self.deferred = False
         self.messages: list[str] = []
 
-    async def defer(self, thinking: bool = False):
+    async def defer(self, thinking: bool = False, ephemeral: bool = False):
         self.deferred = True
 
     async def send_message(self, message: str, ephemeral: bool = False):
@@ -94,6 +94,28 @@ def test_slash_remember_does_not_delete_when_summary_item_invalid():
 
         delete_mock.assert_not_awaited()
         add_mock.assert_not_awaited()
+        assert any("cannot be empty" in msg.lower() for msg in interaction.followup.messages)
+
+    asyncio.run(_run())
+
+
+def test_slash_remember_server_does_not_delete_when_summary_item_invalid():
+    async def _run():
+        cog = Memories(bot=None)
+        cog._summarize_facts = AsyncMock(return_value=["valid summary", " "])
+        interaction = _FakeInteraction()
+        delete_mock = AsyncMock()
+        add_server_mock = AsyncMock()
+
+        with (
+            patch("cogs.memories.get_server_memory", new=AsyncMock(return_value=["old server fact"])),
+            patch("cogs.memories.delete_facts", new=delete_mock),
+            patch("cogs.memories.add_server_memory", new=add_server_mock),
+        ):
+            await Memories.remember_server_slash.callback(cog, interaction, "new server fact")
+
+        delete_mock.assert_not_awaited()
+        add_server_mock.assert_not_awaited()
         assert any("cannot be empty" in msg.lower() for msg in interaction.followup.messages)
 
     asyncio.run(_run())

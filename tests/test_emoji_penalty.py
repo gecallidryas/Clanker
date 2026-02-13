@@ -35,3 +35,14 @@ def test_filter_duplicate_custom_emojis():
     assert ":cat:" not in result
     assert ":bird:" in result
 
+
+def test_filter_duplicate_custom_emojis_preserves_tag_shape():
+    recent = ["bot said <a:tada:123456>"]
+    result = filter_duplicate_custom_emojis(
+        "new response <a:tada:123456> <:bird:654321>",
+        recent,
+        config=UniqueEmojiConfig(enabled=True, lookback_count=5),
+    )
+    assert "<a:tada:123456>" not in result
+    assert "<:bird:654321>" in result
+    assert "<a123456>" not in result

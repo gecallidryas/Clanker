@@ -25,6 +25,7 @@ from utils.db_handler import (
     add_fact,
     add_server_memory,
     get_facts,
+    get_server_memory,
     delete_facts,
     get_user,
     create_user,
@@ -32,24 +33,12 @@ from utils.db_handler import (
     get_aliases,
     find_user_by_alias,
 )
-from utils.api_manager import get_gemini_summarize_manager, UserInputError
+from utils.database_summarizer import DatabaseSummarizer
 from utils.logger import get_logger
 from utils.i18n import get_locale_from_guild, get_locale_from_interaction, t
 from utils.memory_limits import get_memory_limit_error_message, validate_fact_content
 
 logger = get_logger(__name__)
-
-FACT_SUMMARY_PROMPT = """You are a database reconciler. Analyze the following user facts.
-If facts contradict (e.g., "User is X" and "User is not X"), delete both and replace with a neutral summary.
-Remove duplicates.
-Output a clean, bulleted list of current truths only.
-
-Facts:
-{existing_facts}
-
-New fact to add:
-{new_fact}
-"""
 
 
 class Memories(commands.Cog):
@@ -71,43 +60,19 @@ class Memories(commands.Cog):
 
     def __init__(self, bot: commands.Bot):
         self.bot = bot
-        try:
-            self.summarizer = get_gemini_summarize_manager()
-        except ValueError:
-            self.summarizer = None
+        self.db_summarizer = DatabaseSummarizer()
 
-    def _parse_fact_summary(self, summary_text: str) -> list[str]:
-        facts = []
-        for line in summary_text.splitlines():
-            stripped = line.strip()
-            if not stripped:
-                continue
-            if stripped[0] in ("-", "*"):
-                stripped = stripped[1:].strip()
-            if not stripped:
-                continue
-            facts.append(stripped)
-        # Deduplicate while preserving order
-        return list(dict.fromkeys(facts))
-
-    async def _summarize_facts(self, existing: list[str], new_fact: str) -> list[str] | None:
-        if not self.summarizer:
-            return None
-
-        prompt = FACT_SUMMARY_PROMPT.format(
-            existing_facts="\n".join(f"- {fact}" for fact in existing) or "(none)",
-            new_fact=new_fact,
+    async def _summarize_facts(
+        self,
+        existing: list[str],
+        new_fact: str,
+        scope_label: str = "user memory",
+    ) -> list[str] | None:
+        return await self.db_summarizer.summarize_fact_entries(
+            existing=existing,
+            new_entry=new_fact,
+            scope_label=scope_label,
         )
-        try:
-            summary, _ = await self.summarizer.generate(prompt)
-        except UserInputError:
-            return None
-        except Exception as exc:
-            logger.warning("Fact summarization failed: %s", exc)
-            return None
-
-        parsed = self._parse_fact_summary(summary)
-        return parsed or None
     
     @commands.command(name="set_timezone", aliases=["tz", "timezone"])
     async def set_user_timezone(self, ctx: commands.Context, *, timezone: str):
@@ -777,14 +742,50 @@ class Memories(commands.Cog):
             )
             return
 
+        await interaction.response.defer(thinking=True, ephemeral=True)
+
+        clean_fact = fact.strip()
+        existing = await get_server_memory(interaction.guild.id)
+        summarized = (
+            await self._summarize_facts(existing, clean_fact, scope_label="server memory")
+            if existing
+            else None
+        )
+
+        if summarized:
+            validated_items: list[str] = []
+            for item in summarized:
+                item_validation = validate_fact_content(item)
+                if not item_validation.is_valid:
+                    await interaction.followup.send(
+                        get_memory_limit_error_message(item_validation),
+                        ephemeral=True,
+                    )
+                    return
+                validated_items.append(item)
+
+            await delete_facts(interaction.guild.id, 0, memory_types=["server"])
+            for item in validated_items:
+                await add_server_memory(
+                    interaction.guild.id,
+                    item,
+                    source="manual",
+                    learned_from_user_id=interaction.user.id,
+                )
+            await interaction.followup.send(
+                f"Updated server memory with {len(validated_items)} reconciled fact(s).",
+                ephemeral=True,
+            )
+            return
+
         await add_server_memory(
             interaction.guild.id,
-            fact.strip(),
+            clean_fact,
             source="manual",
             learned_from_user_id=interaction.user.id,
         )
         locale = get_locale_from_interaction(interaction)
-        await interaction.response.send_message(
+        await interaction.followup.send(
             t("remember.server.saved", locale),
             ephemeral=True,
         )

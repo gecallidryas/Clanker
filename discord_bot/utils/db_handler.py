@@ -1138,6 +1138,26 @@ async def get_persona_attributes(guild_id: int) -> List[Dict[str, Any]]:
             return [dict(row) for row in rows]
 
 
+async def replace_persona_attributes(
+    guild_id: int,
+    items: List[tuple[str, str]],
+    created_by: int,
+) -> int:
+    """Replace all persona attributes for a guild with a reconciled list."""
+    async with guild_db(guild_id) as db:
+        await db.execute("DELETE FROM persona_attributes WHERE guild_id = ?", (guild_id,))
+        inserted = 0
+        for attribute, value in items:
+            await db.execute(
+                """INSERT INTO persona_attributes (guild_id, attribute, value, created_by)
+                   VALUES (?, ?, ?, ?)""",
+                (guild_id, attribute, value, created_by),
+            )
+            inserted += 1
+        await db.commit()
+        return inserted
+
+
 async def delete_persona_attribute(guild_id: int, attribute_id: int) -> bool:
     """Delete a persona attribute by ID."""
     async with guild_db(guild_id) as db:
@@ -1182,6 +1202,26 @@ async def get_sample_dialogues(guild_id: int) -> List[Dict[str, Any]]:
         ) as cursor:
             rows = await cursor.fetchall()
             return [dict(row) for row in rows]
+
+
+async def replace_sample_dialogues(
+    guild_id: int,
+    items: List[tuple[str, str]],
+    created_by: int,
+) -> int:
+    """Replace all sample dialogues for a guild with a reconciled list."""
+    async with guild_db(guild_id) as db:
+        await db.execute("DELETE FROM sample_dialogues WHERE guild_id = ?", (guild_id,))
+        inserted = 0
+        for speaker, dialogue in items:
+            await db.execute(
+                """INSERT INTO sample_dialogues (guild_id, speaker, dialogue, created_by)
+                   VALUES (?, ?, ?, ?)""",
+                (guild_id, speaker, dialogue, created_by),
+            )
+            inserted += 1
+        await db.commit()
+        return inserted
 
 
 async def delete_sample_dialogue(guild_id: int, dialogue_id: int) -> bool:
