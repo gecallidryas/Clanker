@@ -47,3 +47,10 @@ def test_clean_llm_output_repairs_malformed_custom_tag_to_shortcode():
     raw = "Hello <:WTAF>"
     cleaned = clean_llm_output(raw, emoji_usage_enabled=True)
     assert ":WTAF:" in cleaned
+
+
+def test_clean_llm_output_repairs_prefixed_malformed_custom_tag_to_balanced_shortcode():
+    raw = "Hello <:h:happyemoji:> and <:e:eyebrowflashsmirk:>"
+    cleaned = clean_llm_output(raw, emoji_usage_enabled=True)
+    assert ":happyemoji:" in cleaned
+    assert ":eyebrowflashsmirk:" in cleaned

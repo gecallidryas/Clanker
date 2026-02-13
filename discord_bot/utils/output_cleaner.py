@@ -11,6 +11,7 @@ _CUSTOM_EMOJI_ANY_TAG_RE = re.compile(r"<[^:>\s]*:([A-Za-z0-9_]+):(\d+)>")
 _RAW_EMOJI_TAG_RE = re.compile(r"<a?:[^:>]+:\d+>")
 _MALFORMED_CUSTOM_TAG_RE = re.compile(r"<a?:([^>]+)>")
 _VALID_CUSTOM_TAG_PAYLOAD_RE = re.compile(r"^[A-Za-z0-9_]+:\d{5,}$")
+_SHORTCODE_NO_TRAILING_COLON_RE = re.compile(r"^:([A-Za-z0-9_]+)$")
 
 
 def _protect_code(text: str) -> tuple[str, list[tuple[str, str]]]:
@@ -37,6 +38,16 @@ def _restore_code(text: str, replacements: list[tuple[str, str]]) -> str:
     for key, original in reversed(replacements):
         restored = restored.replace(key, original)
     return restored
+
+
+def _normalize_emoji_tail(emoji_tail: str) -> str:
+    compact = (emoji_tail or "").strip()
+    if not compact:
+        return ""
+    match = _SHORTCODE_NO_TRAILING_COLON_RE.fullmatch(compact)
+    if match:
+        return f":{match.group(1)}:"
+    return compact
 
 
 def normalize_custom_emojis_for_llm(text: str) -> str:
@@ -155,7 +166,7 @@ def clean_llm_output(
             return f":{payload}:"
         emoji_tail = re.sub(r"^[A-Za-z0-9_\-]+", "", payload).strip()
         if emoji_tail:
-            return emoji_tail
+            return _normalize_emoji_tail(emoji_tail)
         return payload
 
     protected = _MALFORMED_CUSTOM_TAG_RE.sub(_repair_malformed_custom_tag, protected)

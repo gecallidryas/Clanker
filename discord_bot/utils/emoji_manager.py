@@ -12,6 +12,7 @@ _EMOJI_TOKEN_PATTERN = re.compile(r"<a?:[A-Za-z0-9_]+:(\d+)>")
 _EMOJI_NAME_PATTERN = re.compile(r"<a?:([A-Za-z0-9_]+):\d+>")
 _EMOJI_IN_TEXT_PATTERN = re.compile(r"<a?:[A-Za-z0-9_]+:\d+>")
 _SHORTCODE_PATTERN = re.compile(r"(?<!<a)(?<!<):([A-Za-z0-9_]+):")
+_DANGLING_SHORTCODE_PATTERN = re.compile(r"(?<!<a)(?<!<):([A-Za-z0-9_]+)(?=$|[\s.,!?;)\]\}])")
 
 
 class EmojiManager:
@@ -270,4 +271,5 @@ class EmojiManager:
                 return token
             return name if strip_unknown else match.group(0)
 
-        return _SHORTCODE_PATTERN.sub(_replace, text)
+        text = _SHORTCODE_PATTERN.sub(_replace, text)
+        return _DANGLING_SHORTCODE_PATTERN.sub(_replace, text)

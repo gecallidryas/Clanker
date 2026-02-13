@@ -139,6 +139,7 @@ def build_emoji_lookup(emojis: Iterable) -> Dict[str, str]:
 
 
 _NAME_PATTERN = re.compile(r"(?<!<a)(?<!<):([a-zA-Z0-9_]+):")
+_NAME_NO_TRAIL_PATTERN = re.compile(r"(?<!<a)(?<!<):([a-zA-Z0-9_]+)(?=$|[\s.,!?;)\]\}])")
 _NAME_ID_PATTERN = re.compile(r"(?<!<a:)(?<!<:)(?<!<)([a-zA-Z0-9_]+):([0-9]{5,})")
 _BROKEN_CUSTOM_TAG_PATTERN = re.compile(r"<a?:([^>]+)>")
 
@@ -166,6 +167,10 @@ def replace_custom_emojis(
         name = match.group(1).lower()
         return lookup.get(name, match.group(0))
 
+    def replace_name_no_trailing_colon(match):
+        name = match.group(1).lower()
+        return lookup.get(name, match.group(0))
+
     def replace_name_id(match):
         name = match.group(1).lower()
         emoji_id = match.group(2)
@@ -184,6 +189,8 @@ def replace_custom_emojis(
             return f":{stripped}:"
         emoji_tail = re.sub(r"^[A-Za-z0-9_\-]+", "", stripped).strip()
         if emoji_tail:
+            if re.fullmatch(r":[A-Za-z0-9_]+", emoji_tail):
+                return f"{emoji_tail}:"
             return emoji_tail
         return stripped or name_raw
 
@@ -191,4 +198,5 @@ def replace_custom_emojis(
     if lookup or id_lookup:
         text = _NAME_ID_PATTERN.sub(replace_name_id, text)
         text = _NAME_PATTERN.sub(replace_name, text)
+        text = _NAME_NO_TRAIL_PATTERN.sub(replace_name_no_trailing_colon, text)
     return text
