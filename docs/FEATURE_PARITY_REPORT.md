@@ -1,295 +1,159 @@
-# Feature Parity Report: FemboiBot vs TomoriBot
-
-A comprehensive comparison of features between **FemboiBot** (Python/discord.py) and **TomoriBot** (TypeScript/discord.js).
-
----
-
-## Summary
-
-| Category | FemboiBot | TomoriBot | Parity |
-|----------|-----------|-----------|--------|
-| Core AI Chat | ✅ | ✅ | ✅ Match |
-| Memory System | ✅ Unified | ✅ Long/Short + /teach + RAG | ⚠️ TomoriBot more advanced |
-| Persona System | ✅ | ✅ | ✅ Match |
-| Multi-Provider AI | ⚠️ Gemini + OpenRouter | ✅ Gemini + OpenRouter + NovelAI (+ custom endpoint) | ⚠️ Partial |
-| Affection Tracking | ✅ Advanced | ❌ | ✅ FemboiBot ahead |
-| Image Analysis | ✅ Gemini Vision | ✅ | ✅ Match |
-| Image Generation | ❌ | ✅ Beta (imagegen tool) | ❌ Missing |
-| Web Search | ❌ | ✅ MCP + REST (Brave/DuckDuckGo/Fetch) | ❌ Missing |
-| Reminders | ✅ | ✅ | ✅ Match |
-| Starboard | ✅ | ❌ | ✅ FemboiBot ahead |
-| Automoderation | ✅ | ❌ | ✅ FemboiBot ahead |
-| YouTube Tool | ❌ | ✅ | ❌ Missing |
-| Sticker/GIF Tools | ❌ | ✅ Stickers + GIF tool (dev) | ❌ Missing |
-| Message Pinning | ❌ | ✅ pin_selected_message tool | ❌ Missing |
-| RAG/Document Memory | ❌ | ✅ pgvector + /teach document | ❌ Missing |
-| Localization | ❌ | ✅ i18n (en-US/ja) | ❌ Missing |
-
----
-
-## Detailed Feature Breakdown
-
-### 🧠 AI & Chat Features
-
-#### FemboiBot
-- **Core AI**: Gemini API integration with context management
-- **Context Window**: 30-minute rolling context (deque-based)
-- **Agentic Actions**: JSON-based admin actions (moderation, config changes)
-- **Evil Mode**: OpenRouter uncensored model switching
-- **Trigger**: Mentions or configurable trigger words
-
-#### TomoriBot
-- **Core AI**: Multi-provider (Google Gemini, OpenRouter, NovelAI; optional custom endpoint for self-hosting)
-- **Context**: Conversation history plus short/long-term memory updates
-- **Tool System**: Built-in tools + MCP servers + REST APIs (feature-flag gated)
-- **Streaming**: Real-time response streaming
-- **Trigger**: Configurable trigger words, mentions, and auto-message triggers
-
-> [!IMPORTANT]
-> TomoriBot uses a 3-tier tool system with 12 built-in function tools plus MCP and REST tools (availability depends on feature flags).
-
----
-
-### 💾 Memory Systems
-
-#### FemboiBot
-| Feature | Details |
-|---------|---------|
-| User Facts | Store personal info via `!remember` |
-| Timezones | IANA timezone storage |
-| Birthdays | Birthday tracking with upcoming view |
-| Aliases | User nickname management (`!aka`, `!whois`) |
-| AI Summarization | Facts are AI-summarized to remove conflicts |
-
-#### TomoriBot
-| Feature | Details |
-|---------|---------|
-| Short-term Memory | Conversation history + AI short-term memory updates |
-| Long-term Memory | `/teach memory` (personal/server) + self-teaching updates |
-| Behavioral Teaching | `/teach attribute` and `/teach sampledialogue` |
-| RAG Support | `/teach document` with pgvector (prod-on; local gated) |
-| Privacy/Export | `/forget` + `/data` export; personal memory opt-out |
-
-> [!NOTE]
-> FemboiBot has birthday and alias features that TomoriBot lacks.
-
----
-
-### 🎭 Persona & Mode System
-
-#### FemboiBot
-- **Built-in Modes**: Femboy, Tsundere, Oneesan
-- **Custom Personas**: Admin-created with:
-  - Custom name, avatar, banner
-  - Normal and "evil mode" prompts
-  - Rate-limited creation (3/hour, 5 per guild)
-- **Mode Lock**: Environment variable to lock bot to specific mode
-- **Server Avatar**: Changes bot avatar per mode
-
-#### TomoriBot
-- **Presets**: Pre-configured personalities with per-server setup
-- **Multi-Persona**: One main persona + multiple alters per server, each with triggers
-- **Custom Personas**: `/persona` create/import/export (character card style)
-- **Rendering**: Webhook-based alter replies with per-persona avatars
-- **Server Avatar**: `/server avatar` and persona/preset swaps can update guild avatar
-
----
-
-### 🛠️ Tools & Capabilities
-
-#### FemboiBot Tools
-```
-Vision Analysis     ✅ Gemini Vision for images
-Translation         ✅ AI-powered translation
-Summarization       ✅ Message history TLDR
-Reminders           ✅ Natural time parsing
-Embed Generation    ✅ AI-generated embeds
-```
-
-#### TomoriBot Tools (built-in function calls)
-```
-remember_this_fact           OK Self-teaching memory creation
-update_short_term_memory     OK Short-term memory summary
-update_long_term_memory      OK Update stored memories by ID
-set_channel_task_or_reminder OK Reminders/tasks
-select_sticker_for_response  OK Sticker usage
-process_youtube_video        OK YouTube processing (Gemini capability)
-pin_selected_message         OK Pin important messages
-peek_profile_picture         OK Profile picture analysis
-generate_image               OK Text-to-image (also image-to-image via refs)
-increase_media_context       OK Expand media context window
-process_gif                  OK GIF keyframes (dev only)
-review_capabilities          OK Self-capability review
-```
-
-#### TomoriBot MCP Servers
-```
-Brave Search        OK Web search (MCP + REST)
-DuckDuckGo Search   OK Web/search + fetch-url + url-metadata
-Fetch               OK Raw webpage content
-```
-
-> [!CAUTION]
-> FemboiBot is missing significant agentic capabilities: Image Generation, Web Search, YouTube processing, sticker tools, profile picture peek, RAG, and AI-controlled message pinning.
-
----
-
-### 👥 User Engagement
-
-#### FemboiBot Affection System
-| Level | Points | Behavior Context |
-|-------|--------|------------------|
-| Stranger | 0-49 | Distant, cautious |
-| Acquaintance | 50-199 | Friendly, warming up |
-| Friend | 200-499 | Comfortable, helpful |
-| Close Friend | 500-999 | More personal |
-| Beloved | 1000+ | Deep attachment |
-
-Additional features:
-- **Mood Tracking**: Happy, Neutral, Sad, Neglected states
-- **Mood Decay**: Automatic mood decay when inactive
-- **Interactions**: `!headpat`, `!hug` with rate limits
-- **Sentiment Analysis**: Message sentiment affects affection
-- **Mode-specific Traits**: Per-mode affection modifiers
-
-#### TomoriBot
-- No equivalent affection/mood system
-
----
-
-### ⚙️ Server Configuration
-
-#### FemboiBot
-- **API Keys**: Multi-slot Gemini keys (5 slots), OpenRouter keys (5 slots)
-- **Per-category Keys**: General, Translate, Vision, Profile, Uncensored
-- **Model Selection**: Per-category model configuration
-- **Password Protection**: Guild config password system
-- **Env Upload**: Upload `.env` file to configure
-
-#### TomoriBot
-- **API Keys**: Per-server encrypted key storage
-- **Provider Selection**: Switch between Gemini/OpenRouter/NovelAI (custom endpoint in self-hosted)
-- **Feature Toggles**: Self-teaching, sticker usage, web search, imagegen, pin messages
-- **Localization**: Multi-language support
-
----
-
-### 🛡️ Moderation Features
-
-#### FemboiBot (Unique)
-- **Starboard**: Customizable emoji triggers, thresholds, self-star toggle
-- **Automod**: Keyword rules with actions (delete/timeout/kick/ban)
-- **Spam Protection**: Configurable message rate limiting
-- **Mod Log**: Dedicated logging channel
-- **Staff Roles**: Designate staff exempt from automod
-- **Welcome System**: Customizable AI-powered welcome messages
-- **Autorole**: Automatic role assignment on join
-
-#### TomoriBot
-- `/server` commands for permission management
-- No built-in starboard or automod
-
----
-
-### 📊 Admin & Data Management
-
-#### FemboiBot
-- Reset user data (facts, affection, aliases)
-- View complete user profiles
-- Set/delete individual facts
-- Adjust affection points
-- Gender role mapping
-- Command sync management
-
-#### TomoriBot
-- `/data` commands for export/delete
-- `/forget` commands to remove memories
-- Personal privacy controls (opt out of personal memory)
-- Legal compliance (privacy policy, terms)
-
----
-
-## Gap Analysis: Features to Add to FemboiBot
-
-### High Priority (Core Parity)
-1. **Image Generation Tool**
-   - Provider: Use existing OpenRouter or add dedicated provider
-   - Implementation: New cog with `/generate image` command
-
-2. **Web Search Capability**
-   - Option A: MCP + REST integration like TomoriBot
-   - Option B: Direct API (Brave, DuckDuckGo, SerpAPI)
-   - Use case: AI can search for current information
-
-3. **YouTube Video Analysis**
-   - Fetch video metadata, transcripts
-   - AI can summarize/discuss videos
-
-### Medium Priority (Enhanced Features)
-4. **Long/Short Term Memory Separation**
-   - Short-term: Current context window
-   - Long-term: Persistent facts (already exists, needs tagging)
-
-5. **AI-Controlled Message Pinning**
-   - Let AI pin important messages when appropriate
-
-6. **Sticker/GIF Usage**
-   - AI can react with server stickers and emojis
-   - GIF responses
-
-7. **NovelAI Provider**
-   - Alternative for roleplay-focused generation
-
-### Lower Priority (Nice to Have)
-8. **Localization (i18n)**
-   - Multi-language command responses
-
-9. **RAG/Document Memory**
-   - pgvector integration for document retrieval
-
-10. **Profile Picture Viewing**
-    - AI can peek at user avatars for context
-
----
-
-## Features Where FemboiBot Leads
-
-1. **Affection & Mood System** - Deep relationship tracking
-2. **Starboard** - Community highlight feature  
-3. **Automoderation** - Keyword rules, spam protection
-4. **Birthday Tracking** - With upcoming birthdays view
-5. **User Aliases** - `!aka` and `!whois` for nicknames
-6. **Welcome System** - AI-powered custom welcomes
-7. **Autorole** - Automatic role assignment on join
-
----
-
-## Technical Comparison
-
-| Aspect | FemboiBot | TomoriBot |
-|--------|-----------|-----------|
-| Language | Python 3 | TypeScript |
-| Framework | discord.py | discord.js |
-| Database | SQLite (per-guild) | PostgreSQL |
-| AI Provider | Google Gemini, OpenRouter | Google Gemini, OpenRouter, NovelAI |
-| Encryption | AES (Fernet) | pgcrypto |
-| Deployment | Manual/Scripts | Docker Compose |
-| Monitoring | File logging | Grafana optional |
-
----
-
-## Recommendations
-
-### Short-term (1-2 weeks)
-1. Add web search capability (highest impact)
-2. Implement image generation tool
-
-### Medium-term (1 month)
-3. Add YouTube video tool
-4. Implement sticker/GIF usage
-5. Add AI message pinning
-
-### Long-term
-6. Consider PostgreSQL migration for RAG
-7. Add i18n support
-8. NovelAI provider integration
+# Feature Parity Report: femboibot vs femboibot-sanitized-with-holy-water vs TomoriBot
+
+Updated: 2026-04-02
+
+This report compares the current root `femboibot` repository against:
+
+- `femboibot-sanitized-with-holy-water`, the stripped deployment snapshot in this workspace
+- `tomoribot`, the TypeScript reference bot bundled alongside this repo
+
+The goal is to separate three different questions:
+
+1. How close is the sanitized copy to the current root runtime?
+2. How close is the current root runtime to TomoriBot's feature set?
+3. Which product still leads in each area?
+
+## Executive Summary
+
+- The current root `femboibot` has moved far beyond the older parity report. It now includes web search, image generation, YouTube tooling, pinning, profile peek, RAG, i18n, richer tool gating, and a broader admin/config surface.
+- `femboibot-sanitized-with-holy-water` is not a feature-equivalent twin anymore. A source-only comparison found 66 root-side files missing from the sanitized snapshot and no sanitized-only runtime files in return. The missing areas are concentrated in the newer tool runtime, streaming stack, native admin/persona panels, and related tests.
+- Against TomoriBot, the current root bot has reached parity on many practical AI-assistant features, but TomoriBot still leads in provider breadth, voice, Matrix bridging, SillyTavern-oriented persona workflows, and production infrastructure.
+- The current root bot still leads TomoriBot in community-management features such as affection/mood, automod, starboard, birthdays, aliases, guild auth, and AI-assisted welcome/autorole flows.
+
+## Source Basis
+
+- Root inventory: `docs/FEATURES.md`
+- Sanitized intent and scope: `femboibot-sanitized-with-holy-water/README.md`
+- TomoriBot capability references:
+  - `tomoribot/README.md`
+  - `tomoribot/docs/systems/tool-system.md`
+  - `tomoribot/docs/ai/providers.md`
+  - `tomoribot/docs/ai/rag.md`
+  - `tomoribot/docs/ai/multi-persona.md`
+  - `tomoribot/docs/integrations/voice-system.md`
+  - `tomoribot/docs/integrations/matrix-bridge.md`
+
+## High-Level Scorecard
+
+| Area | femboibot (root) | femboibot-sanitized-with-holy-water | TomoriBot | Current leader |
+| --- | --- | --- | --- | --- |
+| Core AI chat | Full | Full | Full | Tie |
+| Tool calling and web intelligence | Full | Partial | Full | Root/Tomori tie, Tomori broader |
+| Memory and RAG | Full | Full | Full | Tie, different strengths |
+| Persona system | Full | Full | Full | Tie, Tomori broader multi-persona orchestration |
+| Multimodal input | Full | Full | Full | Tie |
+| Multimodal output | Partial | Partial | Full | TomoriBot |
+| Provider breadth | Partial | Partial | Full | TomoriBot |
+| Moderation and community management | Full | Full | Partial | femboibot |
+| Native admin UX | Full | Partial | Full | Root/Tomori tie, different focus |
+| Deployment and ops | Partial | Partial | Full | TomoriBot |
+
+## Root vs Sanitized Snapshot
+
+The sanitized project is still a useful runnable package, but it is now a lagging subset of the root repo rather than a parity clone.
+
+### What still matches
+
+- Core Discord runtime under `discord_bot/`
+- Existing cogs for AI chat, memories, persona, reminders, automod, starboard, image generation, teach, utilities, and vision
+- Tests, deploy scripts, prompts, locales, and assets required for a basic deployment
+- The older tooling path in `discord_bot/utils/` for web search, image generation, pinning, profile peek, RAG helpers, and i18n
+
+### What is missing from the sanitized copy
+
+The root repo has 66 source files that are not present in the sanitized snapshot. The gaps are concentrated in four areas:
+
+| Missing area in sanitized copy | Root evidence |
+| --- | --- |
+| Tool runtime v2 and MCP control plane | `discord_bot/tools/*` |
+| Streaming response pipeline | `discord_bot/utils/streaming/*` |
+| Discord-native admin/config/persona panels | `discord_bot/utils/admin_panel_*`, `config_panel_ui.py`, `persona_panel_ui.py`, `native_config_panel.py`, `admin_views.py` |
+| Newer coverage for tools, streaming, panels, and memory redesign | `tests/test_tool_*`, `tests/test_stream_*`, `tests/test_admin_panel_*`, `tests/test_memory_redesign.py`, `tests/test_persona_panel.py` |
+
+### Practical interpretation
+
+- If the sanitized folder is meant to be a clean deployment artifact, it still works as a compact runtime package.
+- If it is meant to represent the current product at feature parity, it no longer does.
+- The root repo should be treated as the canonical feature surface.
+
+## Root femboibot vs TomoriBot
+
+### Areas where parity is now effectively reached
+
+| Capability | femboibot (root) | TomoriBot | Notes |
+| --- | --- | --- | --- |
+| Mention and trigger-based AI chat | Yes | Yes | Both support configurable conversational triggers |
+| Tool calling | Yes | Yes | Root now has a gated tool pipeline; Tomori has a more mature class-based registry plus MCP and REST tooling |
+| Web search and URL fetch | Yes | Yes | Root exposes DuckDuckGo, Brave, and URL fetch; Tomori exposes Brave, DuckDuckGo, and fetch through unified tooling |
+| Image analysis | Yes | Yes | Both support multimodal vision flows |
+| Image generation | Yes | Yes | Root supports Replicate/OpenRouter image generation; Tomori also supports provider-native image generation |
+| Reminders/tasks | Yes | Yes | Both provide AI or command-driven reminder workflows |
+| YouTube processing | Yes | Yes | Present in both stacks |
+| Message pinning | Yes | Yes | Present in both stacks |
+| Profile/avatar peek | Yes | Yes | Present in both stacks |
+| RAG document memory | Yes | Yes | Both support document upload plus vector retrieval when configured |
+| Localization | Yes | Yes | Root ships English/Japanese JSON locales; Tomori has a broader typed locale system |
+
+### Areas where femboibot still leads
+
+| Capability | femboibot (root) | TomoriBot | Why root leads |
+| --- | --- | --- | --- |
+| Affection and mood | Full | None | Root has explicit relationship state, decay, sentiment hooks, and mode-specific traits |
+| Starboard | Full | None | Root has configurable emoji triggers, thresholds, ignores, and delete handling |
+| Automod and spam protection | Full | Partial | Root has keyword actions, timeout/kick/ban flows, spam thresholds, mod log integration |
+| Birthday and alias memory | Full | None | Root tracks birthdays, aliases, and nickname resolution |
+| Guild auth and high-risk config gating | Full | Partial | Root has password/auth-session based admin flows plus audit-focused config surfaces |
+| Welcome and autorole | Full | Partial | Root has AI welcome flows, DM welcome support, and autorole configuration |
+
+### Areas where TomoriBot still leads
+
+| Capability | femboibot (root) | TomoriBot | Why Tomori leads |
+| --- | --- | --- | --- |
+| Provider breadth | Partial | Full | Tomori supports Google, OpenRouter, NovelAI, DeepSeek, Nvidia, Z.ai, Z.ai Coding, and custom OpenAI-compatible families |
+| Voice pipeline | None | Full | Tomori documents end-to-end ElevenLabs STT/TTS plus native Discord voice message output |
+| Matrix bridge | None | Full | Tomori ships a built-in Matrix appservice bridge |
+| Persona orchestration depth | Partial | Full | Root has built-in modes plus custom personas; Tomori supports one main persona plus multiple alters with shared orchestration |
+| SillyTavern-style workflows | Partial | Full | Tomori supports character-card import and preset-driven persona workflows |
+| Infrastructure maturity | Partial | Full | Tomori ships Docker Compose, Terraform, and Grafana-oriented deployment support |
+
+### Nuanced areas
+
+| Area | femboibot (root) | TomoriBot | Assessment |
+| --- | --- | --- | --- |
+| Memory model | User facts, aliases, birthdays, server memories, teach flows, optional RAG | Short-term memory, long-term memory, teach flows, optional/production RAG | Tie overall; root is more social/personal, Tomori is more agent-memory oriented |
+| Admin UX | Rich slash config, tool status, quick toggle UI, newer native admin panel work | Large slash-command surface with interactive configuration | Different strengths rather than a clear winner |
+| Tooling architecture | Newer Python tool runtime plus legacy utils path | More mature unified registry and provider adapter model | Tomori still cleaner architecturally |
+
+## Recommended Conclusions
+
+### If the goal is sanitized parity
+
+- Sync the missing 66 source files from the root repo into `femboibot-sanitized-with-holy-water`.
+- At minimum, bring over:
+  - `discord_bot/tools/`
+  - `discord_bot/utils/streaming/`
+  - native admin/persona/config panel helpers
+  - the newer tests that cover those systems
+
+### If the goal is TomoriBot parity
+
+The highest-value remaining gaps are:
+
+1. Provider expansion beyond Gemini/OpenRouter/custom endpoint.
+2. Voice input/output support.
+3. Bridge/integration features such as Matrix.
+4. Persona orchestration features closer to Tomori's main-plus-alters model.
+5. More production-ready container and infrastructure support.
+
+### If the goal is product differentiation
+
+Keep leaning into the areas where femboibot is already stronger:
+
+- affection and mood
+- moderation and starboard
+- guild-admin safety/auth controls
+- social memory such as birthdays, aliases, and relationship context
+
+## Bottom Line
+
+The old parity report understated the current root `femboibot`. The root repo is now much closer to TomoriBot on day-to-day assistant features than the previous report suggested. The bigger immediate parity problem is no longer `femboibot` versus TomoriBot; it is the feature drift between the current root repo and `femboibot-sanitized-with-holy-water`.

@@ -13,6 +13,7 @@ _EMOJI_NAME_PATTERN = re.compile(r"<a?:([A-Za-z0-9_]+):\d+>")
 _EMOJI_IN_TEXT_PATTERN = re.compile(r"<a?:[A-Za-z0-9_]+:\d+>")
 _SHORTCODE_PATTERN = re.compile(r"(?<!<a)(?<!<):([A-Za-z0-9_]+):")
 _DANGLING_SHORTCODE_PATTERN = re.compile(r"(?<!<a)(?<!<):([A-Za-z0-9_]+)(?=$|[\s.,!?;)\]\}])")
+_SHORTCODE_IN_TEXT_PATTERN = re.compile(r"(?<!<a)(?<!<):[A-Za-z0-9_]+:")
 
 
 class EmojiManager:
@@ -117,17 +118,24 @@ class EmojiManager:
 
         lines = [
             "# Custom Emojis",
-            "You may use these custom Discord emojis in your responses:",
+            "Use ONLY shortcode format `:name:` for custom emojis.",
+            "Never output raw Discord tags like `<:name:id>` or `<a:name:id>`.",
+            "You may use these custom emojis when context and tone match:",
             "",
         ]
 
-        for info in available.values():
-            lines.append(f"- {info['emoji']} -> {info['usage']}")
+        for name, info in available.items():
+            lines.append(f"- :{name}: -> {info['usage']}")
 
         if self._validated_general:
+            general_shortcodes = []
+            for token in self._validated_general:
+                match = _EMOJI_NAME_PATTERN.match(token)
+                if match:
+                    general_shortcodes.append(f":{match.group(1)}:")
             lines.append("")
             lines.append("General emojis (no restrictions):")
-            lines.append(" ".join(self._validated_general))
+            lines.append(" ".join(general_shortcodes))
 
         lines.extend([
             "",
@@ -151,6 +159,7 @@ class EmojiManager:
 
         response_lower = (response_text or "").lower()
         user_lower = (user_text or "").lower()
+        combined = f"{user_lower} {response_lower}"
 
         def _has_any(text: str, phrases: List[str]) -> bool:
             for phrase in phrases:
@@ -171,44 +180,55 @@ class EmojiManager:
             if token and token not in selected:
                 selected.append(token)
 
-        if _has_any(user_lower, ["femmy", "yumi"]):
-            _add("tada")
-        if "femmy" in user_lower:
-            _add("sneakpeekcat")
+        greeting_cues = ["hi", "hello", "hey", "yo", "sup", "good morning", "good night"]
+        positive_cues = ["thanks", "thank you", "nice", "good", "great", "love", "cute"]
+        excitement_cues = ["yay", "woo", "let's go", "excited", "hype", "omg", "yesss"]
+        affection_cues = ["love you", "love u", "my love", "darling", "sweetheart", "kiss"]
+        shock_cues = ["wtf", "what the", "no way", "holy", "shocking", "what?!", "bruh"]
+        sarcasm_cues = ["dramatic", "sarcastic", "sarcasm", "sure...", "yeah right", "as if"]
+        hostile_cues = ["rude", "stupid", "idiot", "trash", "hate you", "shut up", "dumb"]
+        annoyed_cues = ["annoy", "annoying", "angry", "mad", "grr", "frustrated"]
+        flirty_cues = ["horny", "sexy", "naughty", "kiss", "bed", "make out"]
+        ban_cues = ["ban", "banned", "banning"]
 
-        if _has_any(user_lower, ["ban", "banned", "banning"]):
+        is_hostile = _has_any(combined, hostile_cues)
+        is_annoyed = _has_any(combined, annoyed_cues)
+        is_sarcastic = _has_any(combined, sarcasm_cues)
+        is_shocked = _has_any(combined, shock_cues)
+        is_affectionate = _has_any(combined, affection_cues)
+        is_excited = _has_any(combined, excitement_cues)
+        is_positive = _has_any(combined, positive_cues)
+        is_greeting = _has_any(user_lower, greeting_cues)
+        is_flirty = _has_any(combined, flirty_cues)
+
+        if _has_any(combined, ban_cues):
             _add("ban")
 
-        if _has_any(user_lower, ["wtf", "what the", "no way", "holy", "shocking"]):
+        if is_hostile:
+            _add("thisisfinefrog")
+        if is_annoyed:
+            _add("pout")
+        if is_sarcastic and not is_hostile:
+            _add("mikucinema")
+        if is_shocked and not is_hostile:
             _add("what")
 
-        if _has_any(user_lower, ["dramatic", "sarcastic", "sarcasm", "sure...", "yeah right"]):
-            _add("mikucinema")
-
-        if _has_any(user_lower, ["rude", "stupid", "idiot", "trash", "hate you", "shut up"]):
-            _add("thisisfinefrog")
-
-        if _has_any(user_lower, ["annoy", "annoying", "angry", "mad", "grr"]):
-            _add("pout")
-
-        if affection >= 800 and _has_any(
-            user_lower + " " + response_lower,
-            ["love you", "love u", "my love", "darling", "sweetheart"],
-        ):
+        if affection >= 800 and is_affectionate and not (is_hostile or is_annoyed):
             _add("inlovehearts")
 
-        if affection >= 500 and _has_any(
-            user_lower + " " + response_lower,
-            ["yay", "woo", "let's go", "excited", "hype", "omg"],
-        ):
+        if affection >= 500 and is_excited and not (is_hostile or is_annoyed):
             _add("twin_spin")
 
-        if evil_mode and _has_any(
-            user_lower + " " + response_lower,
-            ["horny", "sexy", "naughty", "kiss", "bed"],
-        ):
+        if evil_mode and is_flirty and not (is_hostile or is_annoyed):
             _add("horny")
             _add("aah_openingmouth_horny")
+
+        mentioned_name = _has_any(user_lower, ["femmy", "yumi"])
+        positive_mention = is_greeting or is_excited or is_affectionate or is_positive
+        if mentioned_name and positive_mention and not is_hostile:
+            _add("tada")
+        if "femmy" in user_lower and positive_mention and not (is_hostile or is_annoyed):
+            _add("sneakpeekcat")
 
         return selected[:max_emojis]
 
@@ -225,7 +245,8 @@ class EmojiManager:
             return response_text
 
         existing = _EMOJI_IN_TEXT_PATTERN.findall(response_text)
-        remaining = max(0, max_emojis - len(existing))
+        existing_shortcodes = _SHORTCODE_IN_TEXT_PATTERN.findall(response_text)
+        remaining = max(0, max_emojis - len(existing) - len(existing_shortcodes))
         if remaining <= 0:
             return response_text
 

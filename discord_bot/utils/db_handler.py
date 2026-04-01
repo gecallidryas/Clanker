@@ -2160,7 +2160,7 @@ def _parse_starboard_triggers(raw: Any) -> List[str]:
                 return [str(item) for item in parsed if str(item).strip()]
         except json.JSONDecodeError:
             pass
-    return [token for token in re.split(r"[\\s,]+", text) if token]
+    return [token for token in re.split(r"[\s,]+", text) if token]
 
 
 async def get_starboard_settings(guild_id: int) -> Optional[Dict[str, Any]]:

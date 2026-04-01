@@ -58,7 +58,6 @@ from utils.api_manager import UserInputError
 from utils.app_emojis import (
     clean_emoji_name,
     filter_emojis_by_prefix,
-    format_custom_emoji,
     get_application_emojis,
     get_guild_emojis,
     replace_custom_emojis,
@@ -2121,11 +2120,11 @@ class AIBrain(commands.Cog):
 
         lines = []
         for emoji in emojis[:limit]:
-            token = format_custom_emoji(emoji)
-            if not token:
+            emoji_name = (getattr(emoji, "name", "") or "").strip()
+            if not emoji_name or not re.fullmatch(r"[A-Za-z0-9_]+", emoji_name):
                 continue
-            display_name = clean_emoji_name(getattr(emoji, "name", ""))
-            lines.append(f"{token} ({display_name})")
+            display_name = clean_emoji_name(emoji_name)
+            lines.append(f":{emoji_name}: ({display_name})")
 
         return "\n".join(lines)
 
@@ -2356,8 +2355,9 @@ You can explain these commands to the user if asked:
             else "[Wellbeing check: NO. Do NOT ask about wellbeing, meals, or sleep today.]"
         )
         emoji_policy_note = (
-            "[Emoji policy: If you use custom emojis, use ONLY the CUSTOM EMOJIS list and "
-            "the SERVER EMOJIS list. Unicode emojis are allowed.]"
+            "[Emoji policy: If you use custom emojis, output ONLY shortcode format :name: "
+            "(never raw <:name:id> or <a:name:id>). Use only names from CUSTOM EMOJIS and "
+            "SERVER EMOJIS. Unicode emojis are allowed.]"
         )
 
         tools_section = ""
