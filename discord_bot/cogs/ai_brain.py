@@ -18,10 +18,11 @@ Usage:
 
 from collections import deque
 import asyncio
+from dataclasses import dataclass
 from datetime import datetime, timedelta
 from io import BytesIO
 from pathlib import Path
-from typing import Any, Dict, Optional
+from typing import Any, AsyncIterator, Dict, Optional
 import json
 import os
 import re
@@ -34,7 +35,6 @@ from discord.ext import commands
 
 from utils.db_handler import (
     get_server_mode,
-    get_facts,
     increment_stat,
     get_affection_by_mode,
     get_evil_mode,
@@ -51,57 +51,72 @@ from utils.db_handler import (
     get_sample_dialogues,
     get_guild_custom_personas,
     delete_short_term_facts_for_channel,
-    get_short_term_facts_for_channel,
-    get_facts_detailed,
+    get_channel_recency_summary,
+    get_guild_recency_summary,
+    get_personal_memories,
+    get_mention_lookup_personal_memories,
 )
-from utils.api_manager import UserInputError
-from utils.app_emojis import (
-    clean_emoji_name,
-    filter_emojis_by_prefix,
-    get_application_emojis,
-    get_guild_emojis,
-    replace_custom_emojis,
-    FEMMY_EMOJI_PREFIX,
-    YUMI_EMOJI_PREFIX,
-)
+try:
+    from utils.db_handler import get_active_persona_modes
+except ImportError:  # Backward-compatible fallback until persona runtime config is present.
+    get_active_persona_modes = None
+from utils.api_manager import UserInputError, stream_events_from_text
+from utils.expression_cache import ExpressionService, get_expression_service
 from utils.guild_ai import (
     generate_guild_gemini_text,
     generate_guild_gemini_vision,
     generate_guild_openrouter_text,
     generate_guild_custom_text,
+    stream_guild_gemini_text,
+    stream_guild_openrouter_text,
+    stream_guild_custom_text,
     get_guild_gemini_keys,
     get_guild_gemini_model,
     GuildConfigError,
 )
 from utils.admin_actions import execute_admin_action
 from modes import get_mode_profile, get_all_modes
-from utils.rate_limiter import ai_limiter, get_rate_limit_message
-from utils.logger import get_logger
+from utils.rate_limiter import StreamSendBudget, ai_limiter, get_rate_limit_message
+from utils.logger import get_logger, log_stream_event, log_stream_result
 from utils.tool_registry import (
     register_builtin_tools,
     execute_tool,
-    get_available_tools,
-    render_tool_definitions,
 )
-from utils.tool_parser import extract_tool_call, strip_tool_call
 from utils.tool_context import ToolContext
+from tools.contracts import ToolCallEnvelope, ToolInvocationMode, ToolTurnContext
+from tools.executor import execute_tool_envelope
+from tools.transports.prompt_emulated import (
+    build_prompt_tool_schemas,
+    parse_prompt_tool_call,
+    render_prompt_tool_definitions,
+    strip_prompt_tool_call,
+)
 from utils.rag_store import get_rag_context
 from utils.text_splitter import split_message
 from utils.context_builder import (
     build_structured_prompt,
+    build_memory_context_sections,
     section_from_lines,
     section_from_text,
     ContextSection,
 )
 from utils.emoji_penalty import filter_duplicate_custom_emojis
 from utils.output_cleaner import clean_llm_output, normalize_custom_emojis_for_llm
-from utils.memory_id import format_memory_with_id
 from utils.message_cooldown import (
     check_reply_cooldown,
     clear_channel_scoped_reply_cooldowns,
     normalize_cooldown_type,
     set_reply_cooldown,
 )
+from utils.streaming.discord_sender import DiscordReplySession
+from utils.streaming.buffer import SemanticBuffer
+from utils.streaming.orchestrator import StreamOrchestrator
+from utils.streaming.session_registry import ChannelStreamBusyError, ChannelStreamRegistry
+from utils.streaming.thought_logger import ThoughtLogger
+from utils.streaming.types import DiscordSendPolicy, StreamEvent, ThoughtLogSettings
+from utils.streaming.typing_manager import TypingKeepalive
+from utils.persona_queue import PersonaInvocationJob, PersonaQueueManager
+from utils.webhook_identity import ChannelWebhookIdentityManager, build_persona_webhook_context
 
 # Context window: stores last 20 messages within 30 minutes
 MAX_CONTEXT_SIZE = 20
@@ -143,6 +158,7 @@ ADMIN_ACTION_PATTERN = re.compile(r"```admin_action\s*(\{.*?\})\s*```", re.DOTAL
 ADMIN_CONFIRM_TOKENS = {"confirm", "yes", "y", "ok", "okay"}
 ADMIN_CANCEL_TOKENS = {"cancel", "stop", "never mind", "nevermind"}
 ADMIN_PENDING_TTL_SECONDS = 180
+CUSTOM_EMOJI_CANDIDATE_PATTERN = re.compile(r"<a?:[^>]+>|(?<!<a)(?<!<):[A-Za-z0-9_]+:?|[A-Za-z0-9_]+:\d{5,}")
 PROCESSING_ACK_MARKERS = (
     "i am processing",
     "i'm processing",
@@ -240,6 +256,35 @@ DEFAULT_ROLE_PERMISSIONS = discord.Permissions(
     use_external_emojis=True,
 )
 
+def _select_relevant_lines(
+    items: list[str],
+    query: str,
+    *,
+    limit: int,
+) -> list[str]:
+    query_tokens = {token for token in re.findall(r"\w+", (query or "").lower()) if len(token) > 2}
+    if not items:
+        return []
+    if not query_tokens:
+        return items[:limit]
+
+    scored: list[tuple[int, int, str]] = []
+    for index, item in enumerate(items):
+        item_tokens = set(re.findall(r"\w+", (item or "").lower()))
+        overlap = len(query_tokens & item_tokens)
+        scored.append((overlap, -index, item))
+    scored.sort(reverse=True)
+    selected = [item for score, _neg_index, item in scored if score > 0][:limit]
+    if len(selected) < limit:
+        seen = set(selected)
+        for item in items:
+            if item in seen:
+                continue
+            selected.append(item)
+            if len(selected) >= limit:
+                break
+    return selected
+
 
 def _find_agentic_json_block(response_text: str) -> Optional[str]:
     if not response_text:
@@ -291,6 +336,29 @@ def _is_processing_ack_response(response_text: str) -> bool:
     if "\n" in text and len(text.splitlines()) > 2:
         return False
     return any(marker in text for marker in PROCESSING_ACK_MARKERS)
+
+
+def _apply_bot_controlled_custom_emojis(
+    response_text: str,
+    user_text: str,
+    emoji_manager,
+    *,
+    emoji_usage_enabled: bool,
+    mode: str,
+    affection: int,
+    evil_mode: bool,
+) -> str:
+    if not response_text or not emoji_manager or not emoji_usage_enabled:
+        return response_text
+
+    stripped = emoji_manager.strip_known_shortcodes(response_text)
+    return emoji_manager.append_contextual_emoji(
+        response_text=stripped,
+        user_text=user_text,
+        mode=mode,
+        affection=affection,
+        evil_mode=evil_mode,
+    )
 
 
 def _should_assign_created_role(message: discord.Message) -> bool:
@@ -1158,6 +1226,8 @@ class AIBrain(commands.Cog):
     
     def __init__(self, bot: commands.Bot):
         self.bot = bot
+        if get_expression_service(self.bot) is None:
+            self.bot.expression_service = ExpressionService(self.bot)
         register_builtin_tools()
         self.contexts: Dict[int, ConversationContext] = {}  # channel_id -> context
         self.chain_memory: Dict[int, int] = {}  # message_id -> user_id
@@ -1171,6 +1241,9 @@ class AIBrain(commands.Cog):
         self.reply_cooldowns: Dict[tuple[str, int], datetime] = {}
         self.auto_channel_counters: Dict[tuple[int, int], int] = {}
         self.context_reset_markers: Dict[int, int] = {}
+        self.stream_sessions = ChannelStreamRegistry()
+        self.persona_queue = PersonaQueueManager()
+        self.webhook_identities = ChannelWebhookIdentityManager()
     
     def get_context(self, channel_id: int) -> ConversationContext:
         """Get or create context for a channel."""
@@ -1291,6 +1364,420 @@ class AIBrain(commands.Cog):
         for part in parts[1:]:
             await message.channel.send(part)
         return first
+
+    async def _build_stream_sender(
+        self,
+        message: discord.Message,
+        guild_config: dict[str, Any],
+        mode: str,
+    ) -> DiscordReplySession:
+        send_policy = DiscordSendPolicy(
+            chunk_limit=1900,
+            warmup_edit_window_seconds=float(
+                guild_config.get("ai_stream_warmup_edit_window_seconds") or 2.0
+            ),
+            interruption_hint="Interrupted, ask me to continue.",
+        )
+        budget = StreamSendBudget(
+            max_messages=max(1, int(guild_config.get("ai_stream_max_messages") or 6)),
+            max_total_chars=max(500, int(guild_config.get("ai_stream_max_total_chars") or 6000)),
+            min_flush_chars=max(20, int(guild_config.get("ai_stream_min_flush_chars") or 120)),
+            min_flush_interval=max(0.0, float(guild_config.get("ai_stream_min_interval_seconds") or 1.0)),
+        )
+        webhook_context = None
+        if bool(guild_config.get("ai_persona_webhooks_enabled", 1)):
+            try:
+                webhook_context = await build_persona_webhook_context(
+                    message.guild.id,
+                    mode,
+                    manager=self.webhook_identities,
+                )
+            except Exception as exc:
+                logger.warning("Failed to prepare persona webhook identity for %s: %s", mode, exc)
+        return DiscordReplySession(
+            source_message=message,
+            send_policy=send_policy,
+            budget=budget,
+            webhook_context=webhook_context,
+        )
+
+    def _clean_stream_chunk(self, text: str, guild_config: dict[str, Any]) -> str:
+        cleaned = clean_llm_output(
+            text,
+            bot_name=getattr(self.bot.user, "display_name", "Femmy"),
+            emoji_usage_enabled=False,
+        )
+        emoji_manager = getattr(self.bot, "emoji_manager", None)
+        if emoji_manager:
+            return emoji_manager.strip_known_shortcodes(cleaned)
+        return cleaned
+
+    async def _build_stream_tool_schemas(
+        self,
+        *,
+        message: discord.Message,
+        guild_config: dict[str, Any],
+    ) -> list[dict[str, Any]]:
+        tool_context = self._build_tool_context(message=message, guild_config=guild_config)
+        prompt_schemas = await build_prompt_tool_schemas(tool_context)
+        return [
+            {
+                "type": "function",
+                "function": schema,
+            }
+            for schema in prompt_schemas
+        ]
+
+    async def _run_non_stream_tool_loop(
+        self,
+        *,
+        prompt: str,
+        message: discord.Message,
+        guild_config: dict[str, Any],
+        allow_evil: bool,
+        system_instruction: Optional[str],
+        chat_messages: list[dict[str, str]],
+    ) -> tuple[str, Optional[discord.Message], Optional[int], int]:
+        raw_response = await self.generate_response(
+            prompt,
+            message.guild.id,
+            allow_evil=allow_evil,
+            system_instruction=system_instruction,
+            messages=chat_messages,
+        )
+        sent: Optional[discord.Message] = None
+        pending_sticker_id: Optional[int] = None
+        tool_loops = 0
+        max_tool_loops = 4
+
+        while tool_loops < max_tool_loops:
+            envelope = parse_prompt_tool_call(raw_response, invocation_mode=ToolInvocationMode.MODEL)
+            if not envelope:
+                break
+            tool_context = self._build_tool_context(
+                message=message,
+                guild_config=guild_config,
+            )
+            result = await execute_tool_envelope(
+                envelope,
+                tool_context,
+            )
+            tool_name = envelope.tool_name
+            if (
+                tool_name == "select_sticker_for_response"
+                and result.ok
+                and isinstance(result.data, dict)
+                and result.data.get("sticker_id")
+            ):
+                try:
+                    pending_sticker_id = int(result.data.get("sticker_id"))
+                except (TypeError, ValueError):
+                    pending_sticker_id = None
+
+            if result.skip_model:
+                reply_text = result.user_message or result.summary or "Done."
+                sent = await self._send_in_chunks(message, reply_text)
+                raw_response = ""
+                break
+
+            chat_messages.append({"role": "assistant", "content": raw_response})
+            chat_messages.append(
+                {
+                    "role": "user",
+                    "content": f"Tool `{tool_name}` result:\n{result.to_prompt()}",
+                }
+            )
+            raw_response = await self.generate_response(
+                prompt,
+                message.guild.id,
+                allow_evil=allow_evil,
+                system_instruction=system_instruction,
+                messages=chat_messages,
+            )
+            tool_loops += 1
+
+        if tool_loops >= max_tool_loops and parse_prompt_tool_call(raw_response, invocation_mode=ToolInvocationMode.MODEL):
+            raw_response = (
+                "I could not finish all requested tool steps safely in one response. "
+                "Please ask again with a narrower request."
+            )
+
+        return raw_response, sent, pending_sticker_id, tool_loops
+
+    async def _log_stream_thoughts(
+        self,
+        *,
+        message: discord.Message,
+        guild_config: dict[str, Any],
+        finish_reason: str,
+        partial: bool,
+        tool_loops: int,
+        raw_text: str,
+        reasoning_text: str,
+    ) -> None:
+        settings = ThoughtLogSettings(
+            level=str(guild_config.get("ai_thought_log_level") or "off").lower(),
+            channel_id=guild_config.get("ai_thought_channel_id"),
+            allow_mod_log_reuse=bool(guild_config.get("ai_thought_log_allow_mod_log") or 0),
+            mod_log_channel_id=guild_config.get("mod_log_channel_id"),
+        )
+        thought_logger = ThoughtLogger(guild=message.guild, settings=settings)
+        if settings.level == "off":
+            return
+        summary_lines = [
+            f"guild={message.guild.id}",
+            f"channel={message.channel.id}",
+            f"message={message.id}",
+            f"finish_reason={finish_reason}",
+            f"partial={partial}",
+            f"tool_loops={tool_loops}",
+        ]
+        payload = reasoning_text if settings.level == "raw_debug" and reasoning_text else raw_text[:1500]
+        await thought_logger.log_summary(" | ".join(summary_lines), payload)
+
+    async def generate_response_stream(
+        self,
+        prompt: str,
+        guild_id: int,
+        *,
+        allow_evil: bool = True,
+        system_instruction: Optional[str] = None,
+        messages: Optional[list[dict[str, str]]] = None,
+        tools: Optional[list[dict[str, Any]]] = None,
+    ) -> AsyncIterator[StreamEvent]:
+        if tools:
+            yield StreamEvent.provider_error(
+                "Prompt-emulated tool calling remains the active runtime standard; streaming provider-native tools are disabled."
+            )
+            return
+        evil_mode = allow_evil and await get_evil_mode(guild_id) if guild_id else False
+        try:
+            if evil_mode:
+                try:
+                    async for event in stream_guild_openrouter_text(
+                        guild_id,
+                        prompt,
+                        messages=messages,
+                        system_instruction=system_instruction,
+                        tools=tools,
+                    ):
+                        yield event
+                    return
+                except GuildConfigError as exc:
+                    async for event in stream_events_from_text(
+                        "Evil mode is enabled, but OpenRouter isn't configured for this server. "
+                        "Ask an admin to upload keys with /config env upload."
+                    ):
+                        yield event
+                    return
+                except UserInputError:
+                    raise
+                except Exception as exc:
+                    logger.warning("OpenRouter stream failed, falling back to Gemini/custom: %s", exc)
+
+            try:
+                async for event in stream_guild_custom_text(
+                    guild_id,
+                    prompt,
+                    messages=messages,
+                    system_instruction=system_instruction,
+                    tools=tools,
+                ):
+                    yield event
+                return
+            except GuildConfigError:
+                pass
+            except UserInputError:
+                raise
+            except Exception as exc:
+                logger.warning("Custom endpoint stream failed, falling back to Gemini: %s", exc)
+
+            if tools:
+                raise RuntimeError("Native streaming tool events are unavailable for the selected provider.")
+
+            async for event in stream_guild_gemini_text(
+                guild_id,
+                prompt,
+                messages=messages,
+                system_instruction=system_instruction,
+                tools=tools,
+            ):
+                yield event
+        except UserInputError:
+            async for event in stream_events_from_text("Sorry, I can't help with that request."):
+                yield event
+        except GuildConfigError:
+            async for event in stream_events_from_text(
+                "This server hasn't configured Gemini keys yet. "
+                "Ask an admin to upload keys with /config env upload."
+            ):
+                yield event
+        except Exception as exc:
+            logger.warning("Streaming generation failed before visible output: %s", exc)
+            yield StreamEvent.provider_error(str(exc))
+
+    async def _handle_streaming_turn(
+        self,
+        *,
+        message: discord.Message,
+        prompt: str,
+        guild_config: dict[str, Any],
+        mode: str,
+        affection_points: int,
+        allow_evil: bool,
+        system_instruction: str,
+        chat_messages: list[dict[str, str]],
+        tool_schemas: Optional[list[dict[str, Any]]] = None,
+    ) -> tuple[Optional[discord.Message], str, Optional[int], int]:
+        sender = await self._build_stream_sender(message, guild_config, mode)
+        pending_sticker_id: Optional[int] = None
+        raw_response = ""
+        tool_loops = 0
+        max_tool_loops = 4
+        current_messages = list(chat_messages)
+
+        async with self.stream_sessions.claim(message.channel.id):
+            async with TypingKeepalive(message.channel):
+                while tool_loops < max_tool_loops:
+                    orchestrator = StreamOrchestrator(
+                        sender=sender,
+                        interruption_hint="Interrupted, ask me to continue.",
+                        text_transform=lambda chunk: self._clean_stream_chunk(chunk, guild_config),
+                        buffer=SemanticBuffer(
+                            min_flush_chars=max(20, int(guild_config.get("ai_stream_min_flush_chars") or 120)),
+                            target_flush_chars=max(40, int(guild_config.get("ai_stream_min_flush_chars") or 120)),
+                            max_buffer_chars=max(200, int(guild_config.get("ai_stream_min_flush_chars") or 120) * 4),
+                        ),
+                        stall_timeout_seconds=max(
+                            0.0,
+                            float(guild_config.get("ai_stream_stall_seconds") or 0.0),
+                        )
+                        or None,
+                    )
+                    result = await orchestrator.run(
+                        self.generate_response_stream(
+                            prompt,
+                            message.guild.id,
+                            allow_evil=allow_evil,
+                            system_instruction=system_instruction,
+                            messages=current_messages,
+                            tools=tool_schemas,
+                        )
+                    )
+                    log_stream_result(
+                        __name__,
+                        channel_id=message.channel.id,
+                        finish_reason=result.finish_reason,
+                        partial=result.partial,
+                        should_fallback=result.should_fallback,
+                        tool_loops=tool_loops,
+                    )
+                    raw_response = result.raw_text
+                    if result.should_fallback:
+                        raw_response, sent, pending_sticker_id, tool_loops = await self._run_non_stream_tool_loop(
+                            prompt=prompt,
+                            message=message,
+                            guild_config=guild_config,
+                            allow_evil=allow_evil,
+                            system_instruction=system_instruction,
+                            chat_messages=current_messages,
+                        )
+                        return sent or sender.first_message, raw_response, pending_sticker_id, tool_loops
+
+                    tool_call = result.tool_call
+                    if not tool_call:
+                        emoji_manager = getattr(self.bot, "emoji_manager", None)
+                        emoji_usage_enabled = bool(guild_config.get("emoji_usage_enabled", 1))
+                        if emoji_manager and emoji_usage_enabled:
+                            evil_mode_enabled = False
+                            if allow_evil:
+                                evil_mode_enabled = await get_evil_mode(message.guild.id)
+                            cleaned_response = self._clean_stream_chunk(result.raw_text, guild_config)
+                            emoji_suffix = emoji_manager.pick_contextual_emoji(
+                                response_text=cleaned_response,
+                                user_text=message.content,
+                                mode=mode,
+                                affection=affection_points,
+                                evil_mode=evil_mode_enabled,
+                            )
+                            if emoji_suffix:
+                                emoji_suffix = self._filter_recent_custom_emoji_reuse(
+                                    emoji_suffix,
+                                    self.get_context(message.channel.id),
+                                )
+                            if emoji_suffix:
+                                await sender.append_interruption_hint(emoji_suffix)
+                        await self._log_stream_thoughts(
+                            message=message,
+                            guild_config=guild_config,
+                            finish_reason=result.finish_reason,
+                            partial=result.partial,
+                            tool_loops=tool_loops,
+                            raw_text=result.raw_text,
+                            reasoning_text=result.reasoning_text,
+                        )
+                        return sender.first_message, raw_response, pending_sticker_id, tool_loops
+
+                    tool_context = self._build_tool_context(
+                        message=message,
+                        guild_config=guild_config,
+                    )
+                    envelope = ToolCallEnvelope(
+                        call_id=tool_call.get("call_id"),
+                        tool_name=str(
+                            tool_call.get("tool")
+                            or tool_call.get("name")
+                            or ""
+                        ).strip(),
+                        arguments=tool_call.get("args") or tool_call.get("arguments") or {},
+                        invocation_mode=ToolInvocationMode.MODEL,
+                        raw_payload=tool_call,
+                    )
+                    result_tool = await execute_tool_envelope(
+                        envelope,
+                        tool_context,
+                    )
+                    tool_name = envelope.tool_name
+                    if (
+                        tool_name == "select_sticker_for_response"
+                        and result_tool.ok
+                        and isinstance(result_tool.data, dict)
+                        and result_tool.data.get("sticker_id")
+                    ):
+                        try:
+                            pending_sticker_id = int(result_tool.data.get("sticker_id"))
+                        except (TypeError, ValueError):
+                            pending_sticker_id = None
+
+                    if result_tool.skip_model:
+                        reply_text = result_tool.user_message or result_tool.summary or "Done."
+                        await sender.send_text(self._clean_stream_chunk(reply_text, guild_config))
+                        await self._log_stream_thoughts(
+                            message=message,
+                            guild_config=guild_config,
+                            finish_reason="tool_skip_model",
+                            partial=False,
+                            tool_loops=tool_loops,
+                            raw_text=reply_text,
+                            reasoning_text="",
+                        )
+                        return sender.first_message, raw_response, pending_sticker_id, tool_loops
+
+                    current_messages.append({"role": "assistant", "content": raw_response})
+                    current_messages.append(
+                        {
+                            "role": "user",
+                            "content": f"Tool `{tool_name}` result:\n{result_tool.to_prompt()}",
+                        }
+                    )
+                    tool_loops += 1
+
+        if tool_loops >= max_tool_loops and parse_prompt_tool_call(raw_response, invocation_mode=ToolInvocationMode.MODEL):
+            raw_response = (
+                "I could not finish all requested tool steps safely in one response. "
+                "Please ask again with a narrower request."
+            )
+        return sender.first_message, raw_response, pending_sticker_id, tool_loops
 
     def _track_message_id(self, message_id: int, user_id: int) -> None:
         """Track message attribution for chain memory."""
@@ -2011,11 +2498,27 @@ class AIBrain(commands.Cog):
             return [token.strip().lower() for token in re.split(r"[,\\n]+", data) if token.strip()]
         return []
 
-    async def _get_triggered_modes(self, guild_id: int, content: str) -> set[str]:
-        triggered: set[str] = set()
+    def _find_first_trigger_position(self, content: str, triggers: tuple[str, ...] | list[str]) -> Optional[int]:
+        normalized = self._normalize_trigger_text(content)
+        if not normalized:
+            return None
+        positions: list[int] = []
+        for trigger in triggers:
+            token = self._normalize_trigger_text(trigger)
+            if not token:
+                continue
+            pattern = r"\b" + re.escape(token) + r"\b"
+            match = re.search(pattern, normalized, flags=re.IGNORECASE)
+            if match:
+                positions.append(match.start())
+        return min(positions) if positions else None
+
+    async def _get_triggered_modes_in_order(self, guild_id: int, content: str) -> list[str]:
+        matches: list[tuple[int, str]] = []
         for profile in get_all_modes():
-            if self._has_any_trigger(content, profile.triggers):
-                triggered.add(profile.key)
+            position = self._find_first_trigger_position(content, profile.triggers)
+            if position is not None:
+                matches.append((position, profile.key))
         try:
             personas = await get_guild_custom_personas(guild_id)
         except Exception:
@@ -2026,11 +2529,47 @@ class AIBrain(commands.Cog):
             triggers = [name] + aliases if name else aliases
             if not triggers:
                 continue
-            if self._has_any_trigger(content, tuple(triggers)):
-                mode_key = persona.get("mode_key")
-                if mode_key:
-                    triggered.add(mode_key)
-        return triggered
+            position = self._find_first_trigger_position(content, triggers)
+            if position is None:
+                continue
+            mode_key = persona.get("mode_key")
+            if mode_key:
+                matches.append((position, mode_key))
+
+        matches.sort(key=lambda item: (item[0], item[1]))
+        ordered: list[str] = []
+        seen: set[str] = set()
+        for _position, mode_key in matches:
+            if mode_key in seen:
+                continue
+            ordered.append(mode_key)
+            seen.add(mode_key)
+        return ordered
+
+    async def _get_triggered_modes(self, guild_id: int, content: str) -> set[str]:
+        return set(await self._get_triggered_modes_in_order(guild_id, content))
+
+    def _build_persona_jobs(
+        self,
+        *,
+        primary_mode_key: str,
+        active_mode_keys: list[str],
+        triggered_mode_keys: list[str],
+        multi_persona_enabled: bool,
+        triggered_persona_limit: int,
+    ) -> list[PersonaInvocationJob]:
+        if multi_persona_enabled:
+            active_set = set(active_mode_keys)
+            selected: list[PersonaInvocationJob] = []
+            for mode_key in triggered_mode_keys:
+                if mode_key not in active_set:
+                    continue
+                selected.append(PersonaInvocationJob(mode_key=mode_key))
+                if len(selected) >= max(1, triggered_persona_limit):
+                    break
+            if selected:
+                return selected
+        return [PersonaInvocationJob(mode_key=primary_mode_key)]
 
     async def _get_wellbeing_prompt(
         self,
@@ -2102,45 +2641,30 @@ class AIBrain(commands.Cog):
             return "confused"
         return matched_genders.pop()
     
-    async def _get_app_emojis(self, mode: str, guild: Optional[discord.Guild], limit: int = 50) -> str:
-        """Get a formatted list of guild + application emojis for AI use."""
-        guild_emojis = await get_guild_emojis(self.bot, guild)
-        app_emojis = await get_application_emojis(self.bot)
-        emojis = list(guild_emojis) + [emoji for emoji in app_emojis if emoji not in guild_emojis]
-        if not emojis:
-            return ""
-
-        if mode == "mode_femboy":
-            emojis = filter_emojis_by_prefix(emojis, FEMMY_EMOJI_PREFIX)
-        elif mode == "mode_oneesan":
-            emojis = filter_emojis_by_prefix(emojis, YUMI_EMOJI_PREFIX)
-
-        if not emojis:
-            return ""
-
-        lines = []
-        for emoji in emojis[:limit]:
-            emoji_name = (getattr(emoji, "name", "") or "").strip()
-            if not emoji_name or not re.fullmatch(r"[A-Za-z0-9_]+", emoji_name):
-                continue
-            display_name = clean_emoji_name(emoji_name)
-            lines.append(f":{emoji_name}: ({display_name})")
-
-        return "\n".join(lines)
-
-    def _build_sticker_knowledge(self, guild: Optional[discord.Guild], limit: int = 30) -> list[str]:
-        if not guild:
-            return []
-        lines: list[str] = []
-        for sticker in list(getattr(guild, "stickers", []))[:limit]:
-            format_obj = getattr(sticker, "format", None)
-            format_name = getattr(format_obj, "name", str(format_obj)) if format_obj is not None else "unknown"
-            description = (getattr(sticker, "description", "") or "").strip()
-            base = f"{sticker.name} (id={sticker.id}, format={format_name})"
-            if description:
-                base += f" -> {description}"
-            lines.append(base)
-        return lines
+    async def _build_expression_prompt_context(
+        self,
+        *,
+        guild: Optional[discord.Guild],
+        message_text: str,
+        mode: str,
+        affection_points: int,
+        recent_context_text: str,
+    ) -> tuple[list[str], list[str], list[str]]:
+        service = get_expression_service(self.bot)
+        if service is None or guild is None:
+            return [], [], []
+        prompt_context = await service.build_prompt_context(
+            guild,
+            message_text=message_text,
+            mode=mode,
+            affection_points=affection_points,
+            recent_context_text=recent_context_text,
+        )
+        return (
+            list(prompt_context.summary_lines),
+            list(prompt_context.emoji_lines),
+            list(prompt_context.sticker_lines),
+        )
 
     def _prompt_to_chat_payload(self, prompt: str) -> tuple[str, list[dict[str, str]]]:
         marker = "\n\n=== CURRENT MESSAGE ===\n\n"
@@ -2163,6 +2687,367 @@ class AIBrain(commands.Cog):
                 continue
             recent_bot_messages.append(str(item.get("content") or ""))
         return filter_duplicate_custom_emojis(response_text, recent_bot_messages) or response_text
+
+    def _build_tool_context(
+        self,
+        *,
+        message: discord.Message,
+        guild_config: dict[str, Any],
+    ) -> ToolContext:
+        return ToolContext(
+            bot=self.bot,
+            guild=message.guild,
+            channel=message.channel,
+            user=message.author,
+            message=message,
+            guild_config=guild_config,
+            locale="en",
+        )
+
+    def _build_turn_tool_context(
+        self,
+        *,
+        guild_id: int,
+        channel_id: Optional[int],
+        member: Optional[discord.Member],
+        guild_config: dict[str, Any],
+    ) -> ToolTurnContext:
+        guild = member.guild if member and getattr(member, "guild", None) else self.bot.get_guild(guild_id)
+        channel = guild.get_channel(channel_id) if guild and channel_id else None
+        return ToolTurnContext(
+            request_id=None,
+            turn_id=None,
+            guild_id=guild_id,
+            channel_id=channel_id,
+            thread_id=None,
+            user_id=getattr(member, "id", None),
+            guild=guild,
+            channel=channel,
+            member=member,
+            guild_config=guild_config,
+        )
+
+    async def _prepare_response_text(
+        self,
+        *,
+        message: discord.Message,
+        response_text: str,
+        guild_config: dict[str, Any],
+        mode: str,
+        affection_points: int,
+        context: ConversationContext,
+        allow_evil: bool,
+        apply_trigger_emojis: bool = True,
+    ) -> str:
+        emoji_manager = getattr(self.bot, "emoji_manager", None)
+        emoji_usage_enabled = bool(guild_config.get("emoji_usage_enabled", 1))
+        response = clean_llm_output(
+            response_text,
+            bot_name=getattr(self.bot.user, "display_name", "Femmy"),
+            emoji_usage_enabled=False,
+        )
+
+        evil_mode_enabled = False
+        if allow_evil:
+            evil_mode_enabled = await get_evil_mode(message.guild.id)
+
+        if apply_trigger_emojis:
+            response = _apply_bot_controlled_custom_emojis(
+                response_text=response,
+                user_text=message.content,
+                emoji_manager=emoji_manager,
+                emoji_usage_enabled=emoji_usage_enabled,
+                mode=mode,
+                affection=affection_points,
+                evil_mode=evil_mode_enabled,
+            )
+        response = self._filter_recent_custom_emoji_reuse(response, context)
+        return response
+
+    async def _send_sticker_with_recovery(
+        self,
+        *,
+        message: discord.Message,
+        sticker_id: int,
+        caption: str = "",
+        as_reply: bool,
+    ) -> Optional[discord.Message]:
+        if not message.guild:
+            return None
+        expression_service = get_expression_service(self.bot)
+        sticker = None
+        if expression_service is not None:
+            sticker = await expression_service.resolve_sticker_for_send(message.guild, int(sticker_id))
+        else:
+            sticker = discord.utils.get(message.guild.stickers, id=int(sticker_id))
+        if not sticker:
+            return None
+
+        async def _dispatch(selected_sticker):
+            if as_reply:
+                if caption:
+                    return await message.reply(caption, stickers=[selected_sticker], mention_author=False)
+                return await message.reply(stickers=[selected_sticker], mention_author=False)
+            if caption:
+                return await message.channel.send(caption, stickers=[selected_sticker])
+            return await message.channel.send(stickers=[selected_sticker])
+
+        try:
+            return await _dispatch(sticker)
+        except Exception as exc:
+            logger.warning("Failed to send sticker %s on first attempt: %s", sticker_id, exc)
+            if expression_service is None:
+                return None
+            try:
+                expression_service.mark_guild_suspect(message.guild.id)
+                sticker = await expression_service.resolve_sticker_for_send(message.guild, int(sticker_id))
+                if not sticker:
+                    return None
+                return await _dispatch(sticker)
+            except Exception as retry_exc:
+                logger.warning("Failed to send sticker %s after refresh retry: %s", sticker_id, retry_exc)
+                return None
+
+    async def _resolve_active_persona_modes(
+        self,
+        guild_id: int,
+        primary_mode_key: str,
+    ) -> list[str]:
+        if get_active_persona_modes is None:
+            return [primary_mode_key]
+        try:
+            modes = await get_active_persona_modes(guild_id)
+        except Exception:
+            logger.warning("Failed to load active persona modes for guild %s", guild_id, exc_info=True)
+            return [primary_mode_key]
+        if not modes:
+            return [primary_mode_key]
+        return [str(mode_key) for mode_key in modes if str(mode_key).strip()]
+
+    async def _execute_persona_invocation(
+        self,
+        *,
+        message: discord.Message,
+        context: ConversationContext,
+        guild_config: dict[str, Any],
+        mode: str,
+        content_for_prompt: str,
+        context_snapshot: str,
+        refresh_conversation: bool,
+        remaining_messages: int,
+        apply_reply_cooldown_update: bool,
+        reply_cooldown_seconds: int,
+        reply_cooldown_type: str,
+        track_stats: bool,
+    ) -> Optional[discord.Message]:
+        if mode == "mode_default":
+            affection_data = {
+                "affection_level": "stranger",
+                "affection_points": 0,
+                "total_interactions": 0,
+            }
+        else:
+            affection_data = await get_affection_by_mode(message.guild.id, message.author.id, mode)
+        affection_points = affection_data.get("affection_points", 0)
+        allow_evil = affection_points >= 500
+        if mode == "mode_default":
+            allow_evil = False
+
+        wellbeing_prompt, wellbeing_date = await self._get_wellbeing_prompt(
+            message.author,
+            message.guild.id,
+            mode,
+        )
+
+        prompt = await self.build_prompt(
+            message.guild.id,
+            message.author.id,
+            content_for_prompt,
+            context_snapshot,
+            channel_id=message.channel.id,
+            member=message.author,
+            wellbeing_prompt=wellbeing_prompt,
+            affection_data=affection_data,
+            allow_evil=allow_evil,
+            mode_override=mode,
+        )
+        system_instruction, chat_messages = self._prompt_to_chat_payload(prompt)
+        stream_tool_schemas = await self._build_stream_tool_schemas(
+            message=message,
+            guild_config=guild_config,
+        )
+
+        raw_response = ""
+        sent: Optional[discord.Message] = None
+        interim_sent: Optional[discord.Message] = None
+        pending_sticker_id: Optional[int] = None
+        streaming_enabled = bool(guild_config.get("ai_streaming_enabled", 1))
+
+        if streaming_enabled:
+            try:
+                sent, raw_response, pending_sticker_id, _tool_loops = await self._handle_streaming_turn(
+                    message=message,
+                    prompt=prompt,
+                    guild_config=guild_config,
+                    mode=mode,
+                    affection_points=affection_points,
+                    allow_evil=allow_evil,
+                    system_instruction=system_instruction,
+                    chat_messages=chat_messages,
+                    tool_schemas=stream_tool_schemas,
+                )
+            except ChannelStreamBusyError:
+                if track_stats:
+                    await message.reply(
+                        "I already have an active AI reply in this channel. Give me a moment to finish.",
+                        mention_author=False,
+                    )
+                else:
+                    logger.warning(
+                        "Skipping queued persona job for channel %s because a stream is already active.",
+                        message.channel.id,
+                    )
+                return None
+        else:
+            async with message.channel.typing():
+                raw_response, sent, pending_sticker_id, tool_loops = await self._run_non_stream_tool_loop(
+                    prompt=prompt,
+                    message=message,
+                    guild_config=guild_config,
+                    allow_evil=allow_evil,
+                    system_instruction=system_instruction,
+                    chat_messages=chat_messages,
+                )
+            if sent is None:
+                interim_preview = strip_prompt_tool_call(raw_response)
+                interim_preview = _strip_agentic_json_block(interim_preview)
+                interim_preview = _strip_admin_action_block(interim_preview)
+                interim_preview = clean_llm_output(
+                    interim_preview,
+                    bot_name=getattr(self.bot.user, "display_name", "Femmy"),
+                    emoji_usage_enabled=bool(guild_config.get("emoji_usage_enabled", 1)),
+                )
+                if _is_processing_ack_response(interim_preview):
+                    interim_sent = await self._send_in_chunks(message, interim_preview)
+                    try:
+                        async with message.channel.typing():
+                            continued_raw = await self._continue_after_processing_ack(
+                                prompt=prompt,
+                                guild_id=message.guild.id,
+                                allow_evil=allow_evil,
+                                system_instruction=system_instruction,
+                                chat_messages=chat_messages,
+                                prior_response=raw_response,
+                                message=message,
+                                guild_config=guild_config,
+                            )
+                        continued_preview = strip_prompt_tool_call(continued_raw)
+                        continued_preview = _strip_agentic_json_block(continued_preview)
+                        continued_preview = _strip_admin_action_block(continued_preview)
+                        continued_preview = clean_llm_output(
+                            continued_preview,
+                            bot_name=getattr(self.bot.user, "display_name", "Femmy"),
+                            emoji_usage_enabled=bool(guild_config.get("emoji_usage_enabled", 1)),
+                        )
+                        if continued_preview and continued_preview != interim_preview:
+                            raw_response = continued_raw
+                        else:
+                            sent = interim_sent
+                    except Exception as exc:
+                        logger.warning("Auto continuation after processing ack failed: %s", exc)
+                        sent = interim_sent
+
+        if sent is None:
+            sent = await handle_agentic_actions(message, raw_response, brain=self)
+        if sent is None:
+            sent = await handle_admin_actions(self, message, raw_response)
+        if sent is None:
+            response = strip_prompt_tool_call(raw_response)
+            response = _strip_agentic_json_block(response)
+            response = _strip_admin_action_block(response)
+            prepared_response = await self._prepare_response_text(
+                message=message,
+                response_text=response,
+                guild_config=guild_config,
+                mode=mode,
+                affection_points=affection_points,
+                context=context,
+                allow_evil=allow_evil,
+                apply_trigger_emojis=True,
+            )
+            sent = await self._send_in_chunks(message, prepared_response)
+
+        if pending_sticker_id and message.guild:
+            await self._send_sticker_with_recovery(
+                message=message,
+                sticker_id=int(pending_sticker_id),
+                as_reply=False,
+            )
+
+        if refresh_conversation:
+            self._refresh_conversation(
+                message.channel.id,
+                message.author.id,
+                remaining_messages=remaining_messages,
+            )
+
+        if wellbeing_date:
+            await set_last_wellbeing_date(message.guild.id, message.author.id, wellbeing_date)
+
+        if apply_reply_cooldown_update and reply_cooldown_seconds > 0 and reply_cooldown_type != "off":
+            set_reply_cooldown(
+                self.reply_cooldowns,
+                cooldown_type=reply_cooldown_type,
+                guild_id=message.guild.id,
+                channel_id=message.channel.id,
+                user_id=message.author.id,
+            )
+
+        if interim_sent and interim_sent.id != sent.id:
+            self._track_message_id(interim_sent.id, interim_sent.author.id)
+            context.add_message(
+                interim_sent.id,
+                interim_sent.author.id,
+                interim_sent.author.display_name,
+                normalize_custom_emojis_for_llm(interim_sent.content),
+                reply_to_username=message.author.display_name,
+            )
+        self._track_message_id(sent.id, sent.author.id)
+        context.add_message(
+            sent.id,
+            sent.author.id,
+            sent.author.display_name,
+            normalize_custom_emojis_for_llm(sent.content),
+            reply_to_username=message.author.display_name,
+        )
+
+        if track_stats:
+            try:
+                await increment_stat("messages_processed", guild_id=message.guild.id)
+            except Exception as exc:
+                logger.warning("Failed to increment messages_processed: %s", exc)
+
+        return sent
+
+    async def _run_queued_persona_job(self, job: PersonaInvocationJob) -> None:
+        message = job.source_message
+        if message is None:
+            return
+        context = self.get_context(message.channel.id)
+        await self._execute_persona_invocation(
+            message=message,
+            context=context,
+            guild_config=dict(job.guild_config),
+            mode=job.mode_key,
+            content_for_prompt=job.content_for_prompt,
+            context_snapshot=job.context_snapshot,
+            refresh_conversation=False,
+            remaining_messages=max(1, int(job.guild_config.get("ai_self_reply_limit") or 3)),
+            apply_reply_cooldown_update=False,
+            reply_cooldown_seconds=0,
+            reply_cooldown_type="off",
+            track_stats=False,
+        )
     
     async def build_prompt(
         self,
@@ -2176,6 +3061,7 @@ class AIBrain(commands.Cog):
         affection_data: Optional[Dict[str, int]] = None,
         allow_evil: bool = True,
         allow_tools: bool = True,
+        mode_override: Optional[str] = None,
     ) -> str:
         """
         Build the full prompt for Gemini.
@@ -2190,22 +3076,18 @@ class AIBrain(commands.Cog):
             - [ ] Add server-specific customizations
             - [ ] Implement fact relevance scoring
         """
-        mode = await get_server_mode(guild_id)
+        mode = mode_override or await get_server_mode(guild_id)
         evil_mode = allow_evil and await get_evil_mode(guild_id)
         persona = await self._load_persona(guild_id, mode, evil_mode)
         guild_config = await get_guild_config(guild_id)
 
-        personal_facts = await get_facts(guild_id, user_id, ["personal"])
-        if channel_id is not None:
-            short_term_facts = await get_short_term_facts_for_channel(guild_id, user_id, channel_id)
-        else:
-            short_term_facts = await get_facts(guild_id, user_id, ["short_term"])
-        long_term_rows = await get_facts_detailed(guild_id, user_id)
-        long_term_facts = [
-            format_memory_with_id(int(item["id"]), str(item["fact"]))
-            for item in long_term_rows
-            if str(item.get("memory_type") or "") == "long_term"
-        ]
+        personal_facts = await get_personal_memories(guild_id, user_id, limit=5)
+        channel_summary = (
+            await get_channel_recency_summary(guild_id, channel_id)
+            if channel_id is not None
+            else []
+        )
+        guild_summary = await get_guild_recency_summary(guild_id)
 
         mentioned_ids = set(re.findall(r"<@!?(\d+)>", message))
         mentioned_user_lines: list[str] = []
@@ -2217,11 +3099,16 @@ class AIBrain(commands.Cog):
             user_obj = self.bot.get_user(uid)
             name = user_obj.display_name if user_obj else f"User {uid}"
             mentioned_user_lines.append(f"{name} ({uid})")
-            other_facts = await get_facts(guild_id, uid, ["personal"])
-            for fact in other_facts[:5]:
+            other_facts = await get_mention_lookup_personal_memories(guild_id, uid, limit=3)
+            for fact in other_facts:
                 mentioned_fact_lines.append(f"{name}: {fact}")
 
         server_memory = await get_server_memory(guild_id)
+        selected_server_memory = _select_relevant_lines(server_memory, message, limit=5)
+        selected_personal_facts = _select_relevant_lines(personal_facts, message, limit=5)
+        selected_mentioned_facts = _select_relevant_lines(mentioned_fact_lines, message, limit=3)
+        selected_channel_summary = _select_relevant_lines(channel_summary, message, limit=1)
+        selected_guild_summary = _select_relevant_lines(guild_summary, message, limit=1)
         attributes = await get_persona_attributes(guild_id)
         dialogues = await get_sample_dialogues(guild_id)
 
@@ -2332,40 +3219,38 @@ You can explain these commands to the user if asked:
 - !stats / !ping: Bot status
 """.strip()
 
+        expression_summary_lines: list[str] = []
         emoji_lines: list[str] = []
+        sticker_lines: list[str] = []
         if member and guild_id:
-            emojis = await self._get_app_emojis(mode, member.guild)
-            if emojis:
-                emoji_lines.extend(emojis.splitlines())
-
-        custom_emoji_section = ""
-        emoji_manager = getattr(self.bot, "emoji_manager", None)
-        if emoji_manager:
-            custom_emojis = emoji_manager.build_prompt_section(
+            (
+                expression_summary_lines,
+                emoji_lines,
+                sticker_lines,
+            ) = await self._build_expression_prompt_context(
+                guild=member.guild,
+                message_text=message,
                 mode=mode,
-                affection=affection_points,
-                evil_mode=evil_mode,
+                affection_points=affection_points,
+                recent_context_text=context,
             )
-            if custom_emojis:
-                custom_emoji_section = custom_emojis
 
         wellbeing_note = (
             f"[Wellbeing check: YES. {wellbeing_prompt}]"
             if wellbeing_prompt
             else "[Wellbeing check: NO. Do NOT ask about wellbeing, meals, or sleep today.]"
         )
-        emoji_policy_note = (
-            "[Emoji policy: If you use custom emojis, output ONLY shortcode format :name: "
-            "(never raw <:name:id> or <a:name:id>). Use only names from CUSTOM EMOJIS and "
-            "SERVER EMOJIS. Unicode emojis are allowed.]"
-        )
 
         tools_section = ""
         tool_instructions = ""
         if allow_tools:
-            available_tools = get_available_tools(guild_config)
-            if available_tools:
-                tools_section = render_tool_definitions(available_tools)
+            availability_context = self._build_turn_tool_context(
+                guild_id=guild_id,
+                channel_id=channel_id,
+                member=member,
+                guild_config=guild_config,
+            )
+            tools_section = await render_prompt_tool_definitions(availability_context)
             tool_instructions = TOOL_CALL_INSTRUCTIONS
         else:
             tool_instructions = "[TOOLS DISABLED] Do not call tools."
@@ -2392,21 +3277,21 @@ You can explain these commands to the user if asked:
 
         section_order: list[ContextSection] = []
 
+        system_lines = [
+            f"Active mode: {mode}",
+            f"Evil mode enabled for this request: {'yes' if evil_mode else 'no'}",
+            f"User affection: {affection_level.replace('_', ' ').upper()} ({affection_points} points)",
+            "Warmth/compliance must match affection level exactly.",
+            gender_note,
+            address_note,
+            wellbeing_note,
+            agentic_note,
+            user_id_note,
+            admin_note,
+        ]
         section_system = section_from_lines(
             "SYSTEM / HUMANIZER RULES",
-            [
-                f"Active mode: {mode}",
-                f"Evil mode enabled for this request: {'yes' if evil_mode else 'no'}",
-                f"User affection: {affection_level.replace('_', ' ').upper()} ({affection_points} points)",
-                "Warmth/compliance must match affection level exactly.",
-                gender_note,
-                address_note,
-                wellbeing_note,
-                agentic_note,
-                user_id_note,
-                admin_note,
-                emoji_policy_note,
-            ],
+            system_lines,
         )
         if section_system:
             section_order.append(section_system)
@@ -2420,56 +3305,58 @@ You can explain these commands to the user if asked:
         section_affection = section_from_text("RELATIONSHIP MODEL", affection_context)
         if section_affection:
             section_order.append(section_affection)
-
-        section_server = section_from_lines(
-            "SERVER INFO + LONG-TERM SERVER MEMORY",
-            [
-                f"Guild ID: {guild_id}",
-                f"Guild: {member.guild.name}" if member and member.guild else "",
-                *[f"Memory: {fact}" for fact in server_memory[:10]],
-            ],
-        )
-        if section_server:
-            section_order.append(section_server)
-
-        section_emoji = section_from_text("SERVER EMOJI KNOWLEDGE", "\n".join(emoji_lines))
-        if section_emoji:
-            section_order.append(section_emoji)
-        section_custom_emoji = section_from_text("CUSTOM EMOJI KNOWLEDGE", custom_emoji_section)
-        if section_custom_emoji:
-            section_order.append(section_custom_emoji)
-        section_sticker = section_from_lines(
-            "SERVER STICKER KNOWLEDGE",
-            self._build_sticker_knowledge(member.guild if member else None),
-        )
-        if section_sticker:
-            section_order.append(section_sticker)
-
-        if rag_context:
-            section_order.append(ContextSection("DOCUMENT RAG CHUNKS", rag_context))
-
-        users_in_convo_lines = [
-            f"Current user: {member.display_name} ({user_id})" if member else f"Current user id: {user_id}",
-            *[f"Mentioned: {entry}" for entry in mentioned_user_lines],
-            *[f"Mentioned fact: {entry}" for entry in mentioned_fact_lines],
-        ]
-        section_users = section_from_lines("USERS IN CONVERSATION", users_in_convo_lines)
-        if section_users:
-            section_order.append(section_users)
-
-        section_short = section_from_lines("SHORT-TERM MEMORY", short_term_facts[:10])
-        if section_short:
-            section_order.append(section_short)
-        section_long = section_from_lines("LONG-TERM/PERSONAL MEMORY", personal_facts[:10] + long_term_facts[:10])
-        if section_long:
-            section_order.append(section_long)
-
         section_dialogues = section_from_lines(
             "SAMPLE DIALOGUES",
             [f"{item['speaker']}: {item['dialogue']}" for item in dialogues[:10]],
         )
         if section_dialogues:
             section_order.append(section_dialogues)
+
+        section_server = section_from_lines(
+            "GUILD CONTEXT",
+            [
+                f"Guild ID: {guild_id}",
+                f"Guild: {member.guild.name}" if member and member.guild else "",
+            ],
+        )
+        if section_server:
+            section_order.append(section_server)
+
+        section_expression_summary = section_from_lines(
+            "SERVER EXPRESSION SUMMARY",
+            expression_summary_lines,
+        )
+        if section_expression_summary:
+            section_order.append(section_expression_summary)
+        section_emoji = section_from_text("SERVER EMOJI SHORTLIST", "\n".join(emoji_lines))
+        if section_emoji:
+            section_order.append(section_emoji)
+        section_sticker = section_from_lines(
+            "SERVER STICKER SHORTLIST",
+            sticker_lines,
+        )
+        if section_sticker:
+            section_order.append(section_sticker)
+
+        users_in_convo_lines = [
+            f"Current user: {member.display_name} ({user_id})" if member else f"Current user id: {user_id}",
+            *[f"Mentioned: {entry}" for entry in mentioned_user_lines],
+        ]
+        section_users = section_from_lines("USERS IN CONVERSATION", users_in_convo_lines)
+        if section_users:
+            section_order.append(section_users)
+
+        section_order.extend(
+            build_memory_context_sections(
+                server_memory=[f"Memory: {fact}" for fact in selected_server_memory],
+                current_user_memory=selected_personal_facts,
+                mentioned_user_memory=selected_mentioned_facts,
+                channel_summary=selected_channel_summary,
+                guild_summary=selected_guild_summary,
+                rag_chunks=[rag_context] if rag_context else [],
+                conversation_timeline=context,
+            )
+        )
 
         section_commands = section_from_text("COMMAND REFERENCE", commands_help)
         if section_commands:
@@ -2487,10 +3374,6 @@ You can explain these commands to the user if asked:
         section_admin = section_from_text("ADMIN CONFIG INSTRUCTIONS", admin_instructions)
         if section_admin:
             section_order.append(section_admin)
-
-        section_history = section_from_text("CONVERSATION TIMELINE", context)
-        if section_history:
-            section_order.append(section_history)
 
         end_hint_lines = [
             "When a stable personal preference appears, consider remember_this_fact/update_long_term_memory.",
@@ -2616,24 +3499,18 @@ You can explain these commands to the user if asked:
         tool_loops = 0
         max_tool_loops = 4
         while tool_loops < max_tool_loops:
-            tool_call = extract_tool_call(current_response)
-            if not tool_call:
+            envelope = parse_prompt_tool_call(current_response, invocation_mode=ToolInvocationMode.MODEL)
+            if not envelope:
                 break
-            tool_context = ToolContext(
-                bot=self.bot,
-                guild=message.guild,
-                channel=message.channel,
-                user=message.author,
+            tool_context = self._build_tool_context(
                 message=message,
                 guild_config=guild_config,
-                locale="en",
             )
-            tool_name = str(tool_call.get("tool") or "").strip()
-            result = await execute_tool(
-                tool_name,
-                tool_call.get("args") or {},
+            result = await execute_tool_envelope(
+                envelope,
                 tool_context,
             )
+            tool_name = envelope.tool_name
             if result.skip_model:
                 return result.user_message or result.summary or "Done."
 
@@ -2653,7 +3530,7 @@ You can explain these commands to the user if asked:
             )
             tool_loops += 1
 
-        if tool_loops >= max_tool_loops and extract_tool_call(current_response):
+        if tool_loops >= max_tool_loops and parse_prompt_tool_call(current_response, invocation_mode=ToolInvocationMode.MODEL):
             return (
                 "I could not finish all requested tool steps safely in one response. "
                 "Please ask again with a narrower request."
@@ -2704,13 +3581,21 @@ You can explain these commands to the user if asked:
 
         mentioned = self.bot.user in message.mentions
         replied_to_bot = self._is_reply_to_bot(message)
-        mode = await get_server_mode(message.guild.id)
+        primary_mode = await get_server_mode(message.guild.id)
         guild_config = await get_guild_config(message.guild.id)
         normalized_message_content = normalize_custom_emojis_for_llm(message.content or "")
-
-        triggered_modes = await self._get_triggered_modes(message.guild.id, message.content)
-        has_current_trigger = mode in triggered_modes
-        has_other_trigger = bool(triggered_modes - {mode})
+        triggered_mode_keys = await self._get_triggered_modes_in_order(message.guild.id, message.content)
+        active_mode_keys = await self._resolve_active_persona_modes(message.guild.id, primary_mode)
+        persona_jobs = self._build_persona_jobs(
+            primary_mode_key=primary_mode,
+            active_mode_keys=active_mode_keys,
+            triggered_mode_keys=triggered_mode_keys,
+            multi_persona_enabled=bool(guild_config.get("ai_multi_persona_enabled", 0)),
+            triggered_persona_limit=max(1, int(guild_config.get("ai_triggered_persona_limit") or 1)),
+        )
+        mode = persona_jobs[0].mode_key
+        triggered_modes = set(triggered_mode_keys)
+        has_selected_trigger = any(job.mode_key in triggered_modes for job in persona_jobs)
         is_active = self._is_active_conversation(message.channel.id, message.author.id)
         whitelist_channel_ids = self._parse_id_list(guild_config.get("ai_channel_whitelist"))
         reply_cooldown_seconds = max(0, int(guild_config.get("ai_reply_cooldown_seconds") or 0))
@@ -2720,26 +3605,25 @@ You can explain these commands to the user if asked:
         self_reply_limit = max(1, int(guild_config.get("ai_self_reply_limit") or 3))
 
         auto_key = (message.channel.id, message.author.id)
-        if mentioned or has_current_trigger or replied_to_bot:
+        if mentioned or has_selected_trigger or replied_to_bot:
             self.auto_channel_counters.pop(auto_key, None)
 
         # Determine if we should respond
-        should_respond = mentioned or has_current_trigger or replied_to_bot
-        if not mentioned and not replied_to_bot and has_other_trigger and not has_current_trigger:
-            should_respond = False
+        should_respond = mentioned or has_selected_trigger or replied_to_bot
         if (
             should_respond
             and whitelist_channel_ids
             and message.channel.id not in whitelist_channel_ids
             and not mentioned
             and not replied_to_bot
+            and not has_selected_trigger
         ):
             should_respond = False
-        if should_respond and not mentioned and not has_current_trigger and not replied_to_bot:
+        if should_respond and not mentioned and not has_selected_trigger and not replied_to_bot:
             reply_chain_depth = await self._bot_reply_chain_depth(message)
             if reply_chain_depth >= self_reply_limit:
                 should_respond = False
-        if should_respond and reply_cooldown_seconds > 0 and not mentioned and not replied_to_bot:
+        if should_respond and reply_cooldown_seconds > 0 and not mentioned and not replied_to_bot and not has_selected_trigger:
             on_cooldown, _remaining = check_reply_cooldown(
                 self.reply_cooldowns,
                 cooldown_type=reply_cooldown_type,
@@ -2878,254 +3762,45 @@ You can explain these commands to the user if asked:
             )
             return
 
-        if mode == "mode_default":
-            affection_data = {
-                "affection_level": "stranger",
-                "affection_points": 0,
-                "total_interactions": 0,
-            }
-        else:
-            affection_data = await get_affection_by_mode(message.guild.id, message.author.id, mode)
-        affection_points = affection_data.get("affection_points", 0)
-        allow_evil = affection_points >= 500
-        if mode == "mode_default":
-            allow_evil = False
-
-        wellbeing_prompt, wellbeing_date = await self._get_wellbeing_prompt(
-            message.author,
-            message.guild.id,
-            mode,
-        )
-
         # Get reply context if user is replying to a message
         reply_context = await self._get_reply_context(message)
         if reply_context:
             content_for_prompt = f"{reply_context}\n{content_for_prompt}"
 
-        # Show typing indicator
-        async with message.channel.typing():
-            # Build and send prompt
-            context_snapshot = context.get_context(
-                min_message_id=self.context_reset_markers.get(message.channel.id)
-            )
-            prompt = await self.build_prompt(
-                message.guild.id,
-                message.author.id,
-                content_for_prompt,
-                context_snapshot,
-                channel_id=message.channel.id,
-                member=message.author,
-                wellbeing_prompt=wellbeing_prompt,
-                affection_data=affection_data,
-                allow_evil=allow_evil
-            )
-            system_instruction, chat_messages = self._prompt_to_chat_payload(prompt)
-            response = await self.generate_response(
-                prompt,
-                message.guild.id,
-                allow_evil=allow_evil,
-                system_instruction=system_instruction,
-                messages=chat_messages,
-            )
-
-        raw_response = response
-        sent = None
-        interim_sent: Optional[discord.Message] = None
-        pending_sticker_id: Optional[int] = None
-        tool_loops = 0
-        max_tool_loops = 4
-        while tool_loops < max_tool_loops:
-            tool_call = extract_tool_call(raw_response)
-            if not tool_call:
-                break
-            tool_context = ToolContext(
-                bot=self.bot,
-                guild=message.guild,
-                channel=message.channel,
-                user=message.author,
-                message=message,
-                guild_config=guild_config,
-                locale="en",
-            )
-            tool_name = str(tool_call.get("tool") or "").strip()
-            result = await execute_tool(
-                tool_name,
-                tool_call.get("args") or {},
-                tool_context,
-            )
-            if (
-                tool_name == "select_sticker_for_response"
-                and result.ok
-                and isinstance(result.data, dict)
-                and result.data.get("sticker_id")
-            ):
-                try:
-                    pending_sticker_id = int(result.data.get("sticker_id"))
-                except (TypeError, ValueError):
-                    pending_sticker_id = None
-
-            if result.skip_model:
-                reply_text = result.user_message or result.summary or "Done."
-                sent = await self._send_in_chunks(message, reply_text)
-                raw_response = ""
-                break
-
-            chat_messages.append({"role": "assistant", "content": raw_response})
-            chat_messages.append(
-                {
-                    "role": "user",
-                    "content": f"Tool `{tool_name}` result:\n{result.to_prompt()}",
-                }
-            )
-            raw_response = await self.generate_response(
-                prompt,
-                message.guild.id,
-                allow_evil=allow_evil,
-                system_instruction=system_instruction,
-                messages=chat_messages,
-            )
-            tool_loops += 1
-
-        if tool_loops >= max_tool_loops and extract_tool_call(raw_response):
-            raw_response = (
-                "I could not finish all requested tool steps safely in one response. "
-                "Please ask again with a narrower request."
-            )
-        if sent is None:
-            interim_preview = strip_tool_call(raw_response)
-            interim_preview = _strip_agentic_json_block(interim_preview)
-            interim_preview = _strip_admin_action_block(interim_preview)
-            interim_preview = clean_llm_output(
-                interim_preview,
-                bot_name=getattr(self.bot.user, "display_name", "Tomori"),
-                emoji_usage_enabled=bool(guild_config.get("emoji_usage_enabled", 1)),
-            )
-            if _is_processing_ack_response(interim_preview):
-                interim_sent = await self._send_in_chunks(message, interim_preview)
-                try:
-                    async with message.channel.typing():
-                        continued_raw = await self._continue_after_processing_ack(
-                            prompt=prompt,
-                            guild_id=message.guild.id,
-                            allow_evil=allow_evil,
-                            system_instruction=system_instruction,
-                            chat_messages=chat_messages,
-                            prior_response=raw_response,
-                            message=message,
-                            guild_config=guild_config,
-                        )
-                    continued_preview = strip_tool_call(continued_raw)
-                    continued_preview = _strip_agentic_json_block(continued_preview)
-                    continued_preview = _strip_admin_action_block(continued_preview)
-                    continued_preview = clean_llm_output(
-                        continued_preview,
-                        bot_name=getattr(self.bot.user, "display_name", "Tomori"),
-                        emoji_usage_enabled=bool(guild_config.get("emoji_usage_enabled", 1)),
-                    )
-                    if continued_preview and continued_preview != interim_preview:
-                        raw_response = continued_raw
-                    else:
-                        sent = interim_sent
-                except Exception as exc:
-                    logger.warning("Auto continuation after processing ack failed: %s", exc)
-                    sent = interim_sent
-        if sent is None:
-            sent = await handle_agentic_actions(message, raw_response, brain=self)
-        if sent is None:
-            sent = await handle_admin_actions(self, message, raw_response)
-        if sent is None:
-            response = strip_tool_call(raw_response)
-            response = _strip_agentic_json_block(response)
-            response = _strip_admin_action_block(response)
-            evil_mode_enabled = allow_evil and await get_evil_mode(message.guild.id)
-
-            emoji_manager = getattr(self.bot, "emoji_manager", None)
-            emoji_usage_enabled = bool(guild_config.get("emoji_usage_enabled", 1))
-            response = clean_llm_output(
-                response,
-                bot_name=getattr(self.bot.user, "display_name", "Tomori"),
-                emoji_usage_enabled=emoji_usage_enabled,
-            )
-
-            if emoji_manager and emoji_usage_enabled:
-                response = emoji_manager.apply_trigger_emojis(
-                    response_text=response,
-                    user_text=message.content,
-                    mode=mode,
-                    affection=affection_points,
-                    evil_mode=evil_mode_enabled,
-                )
-
-            guild_emojis = []
-            app_emojis = []
-            if message.guild:
-                try:
-                    guild_emojis = await get_guild_emojis(self.bot, message.guild)
-                    app_emojis = await get_application_emojis(self.bot)
-                    response = replace_custom_emojis(response, guild_emojis, app_emojis)
-                except Exception as exc:
-                    logger.warning("Failed to normalize emojis: %s", exc)
-
-            if emoji_manager:
-                response = emoji_manager.replace_shortcodes(response, strip_unknown=True)
-            response = self._filter_recent_custom_emoji_reuse(response, context)
-            if guild_emojis or app_emojis:
-                # Final safety pass to repair any malformed tag fragments left by post-processing.
-                response = replace_custom_emojis(response, guild_emojis, app_emojis)
-
-            sent = await self._send_in_chunks(message, response)
-
-        if pending_sticker_id and message.guild:
-            sticker = discord.utils.get(message.guild.stickers, id=pending_sticker_id)
-            if sticker:
-                try:
-                    await message.channel.send(stickers=[sticker])
-                except Exception as exc:
-                    logger.warning("Failed to send pending sticker %s: %s", pending_sticker_id, exc)
-
-        # Manage conversation state
-        if mentioned or has_current_trigger:
-            # Fresh trigger - activate/refresh conversation
-            self._refresh_conversation(
-                message.channel.id,
-                message.author.id,
-                remaining_messages=self_reply_limit,
-            )
-
-        if wellbeing_date:
-            await set_last_wellbeing_date(message.guild.id, message.author.id, wellbeing_date)
-
-        # Track bot response for chain memory and context
-        if reply_cooldown_seconds > 0 and reply_cooldown_type != "off":
-            set_reply_cooldown(
-                self.reply_cooldowns,
-                cooldown_type=reply_cooldown_type,
-                guild_id=message.guild.id,
-                channel_id=message.channel.id,
-                user_id=message.author.id,
-            )
-        if interim_sent and interim_sent.id != sent.id:
-            self._track_message_id(interim_sent.id, interim_sent.author.id)
-            context.add_message(
-                interim_sent.id,
-                interim_sent.author.id,
-                interim_sent.author.display_name,
-                normalize_custom_emojis_for_llm(interim_sent.content),
-                reply_to_username=message.author.display_name,
-            )
-        self._track_message_id(sent.id, sent.author.id)
-        context.add_message(
-            sent.id,
-            sent.author.id,
-            sent.author.display_name,
-            normalize_custom_emojis_for_llm(sent.content),
-            reply_to_username=message.author.display_name
+        context_snapshot = context.get_context(
+            min_message_id=self.context_reset_markers.get(message.channel.id)
         )
+        primary_job = persona_jobs[0]
+        sent = await self._execute_persona_invocation(
+            message=message,
+            context=context,
+            guild_config=dict(guild_config),
+            mode=primary_job.mode_key,
+            content_for_prompt=content_for_prompt,
+            context_snapshot=context_snapshot,
+            refresh_conversation=mentioned or has_selected_trigger,
+            remaining_messages=self_reply_limit,
+            apply_reply_cooldown_update=True,
+            reply_cooldown_seconds=reply_cooldown_seconds,
+            reply_cooldown_type=reply_cooldown_type,
+            track_stats=True,
+        )
+        if sent is None:
+            return
 
-        try:
-            await increment_stat("messages_processed", guild_id=message.guild.id)
-        except Exception as e:
-            logger.warning("Failed to increment messages_processed: %s", e)
+        for queued_job in persona_jobs[1:]:
+            queued_job.source_message = message
+            queued_job.guild_config = dict(guild_config)
+            queued_job.content_for_prompt = content_for_prompt
+            queued_job.context_snapshot = context_snapshot
+            queued_job.media_refs = media_refs
+            await self.persona_queue.enqueue(message.channel.id, queued_job)
+
+        if persona_jobs[1:]:
+            self.persona_queue.schedule_drain(
+                message.channel.id,
+                self._run_queued_persona_job,
+            )
 
 
 async def setup(bot: commands.Bot):

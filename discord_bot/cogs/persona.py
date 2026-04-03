@@ -22,9 +22,11 @@ from utils.db_handler import (
     create_custom_persona,
     delete_custom_persona,
     delete_persona_traits,
+    get_active_persona_modes,
     get_custom_persona_by_name,
     get_guild_custom_personas,
     sanitize_persona_name,
+    set_active_persona_modes,
     update_custom_persona,
     get_server_mode,
     set_server_mode,
@@ -40,6 +42,12 @@ from utils.image_downloader import (
 )
 from utils.server_avatar import set_custom_avatar, set_mode_avatar
 from utils.logger import get_logger
+from utils.persona_panel_ui import (
+    MANAGE_GUIDANCE,
+    delete_persona_with_fallback,
+    open_persona_manage_panel,
+)
+from modes import resolve_mode_key
 
 logger = get_logger(__name__)
 
@@ -719,6 +727,52 @@ class Persona(commands.Cog):
         self._pending_edits: dict[tuple[int, int], PendingPersonaEdit] = {}
         self._creation_log: dict[tuple[int, int], list[datetime]] = {}
 
+    async def _resolve_active_persona_mode_keys(
+        self,
+        guild_id: int,
+        values: list[str],
+    ) -> list[str]:
+        personas = await get_guild_custom_personas(guild_id)
+        custom_by_name = {
+            str(persona.get("name") or "").strip().lower(): str(persona.get("mode_key") or "")
+            for persona in personas
+            if persona.get("name") and persona.get("mode_key")
+        }
+        custom_by_mode_key = {
+            str(persona.get("mode_key") or "").strip(): str(persona.get("mode_key") or "").strip()
+            for persona in personas
+            if persona.get("mode_key")
+        }
+
+        resolved: list[str] = []
+        for raw_value in values:
+            token = str(raw_value or "").strip()
+            if not token:
+                continue
+            lowered = token.lower()
+            mode_key = custom_by_mode_key.get(token)
+            if not mode_key and lowered.startswith("mode_"):
+                mode_key = lowered
+            if not mode_key and lowered.startswith("custom_"):
+                mode_key = token
+            if not mode_key:
+                mode_key = resolve_mode_key(lowered)
+            if not mode_key:
+                mode_key = custom_by_name.get(lowered)
+            if not mode_key:
+                raise ValueError(f"Unknown persona selection: {token}")
+            resolved.append(mode_key)
+        return resolved
+
+    async def _set_active_persona_modes_for_guild(
+        self,
+        guild_id: int,
+        values: list[str],
+    ) -> list[str]:
+        resolved = await self._resolve_active_persona_mode_keys(guild_id, values)
+        await set_active_persona_modes(guild_id, resolved)
+        return await get_active_persona_modes(guild_id)
+
     def _prune_pending(self) -> None:
         cutoff = datetime.utcnow() - timedelta(seconds=PENDING_TTL_SECONDS)
         stale_keys = [
@@ -789,6 +843,23 @@ class Persona(commands.Cog):
             return
 
         modal = PersonaBasicModal(self, interaction.guild.id, interaction.user.id)
+        await interaction.response.send_modal(modal)
+
+    async def _open_edit_modal_by_mode_key(
+        self,
+        interaction: discord.Interaction,
+        mode_key: str,
+    ) -> None:
+        if not interaction.guild:
+            await interaction.response.send_message("Use this command in a server.", ephemeral=True)
+            return
+
+        persona = await get_custom_persona_by_mode_key(interaction.guild.id, mode_key)
+        if not persona:
+            await interaction.response.send_message("Persona not found.", ephemeral=True)
+            return
+
+        modal = PersonaEditModal(self, interaction.guild.id, interaction.user.id, persona)
         await interaction.response.send_modal(modal)
 
     async def finalize_pending_persona(
@@ -903,9 +974,14 @@ class Persona(commands.Cog):
         self.record_creation(guild_id, user_id)
 
         await interaction.followup.send(
-            f"Custom persona **{pending.name}** created! Use `!mode {pending.name}` or `/mode {pending.name}`.",
+            f"Custom persona **{pending.name}** created! Use `!mode {pending.name}` or `/mode {pending.name}`. {MANAGE_GUIDANCE}",
             ephemeral=True,
         )
+
+    @persona_group.command(name="manage", description="Open the persona and presentation admin panel.")
+    @app_commands.checks.has_permissions(manage_guild=True)
+    async def manage_personas(self, interaction: discord.Interaction):
+        await open_persona_manage_panel(interaction, bot=self.bot)
 
     @persona_group.command(name="create", description="Create a custom persona.")
     @app_commands.checks.has_permissions(manage_guild=True)
@@ -940,6 +1016,8 @@ class Persona(commands.Cog):
 
         if len(personas) > 10:
             embed.set_footer(text=f"And {len(personas) - 10} more...")
+        else:
+            embed.set_footer(text=MANAGE_GUIDANCE)
 
         await interaction.response.send_message(embed=embed, ephemeral=True)
 
@@ -975,6 +1053,7 @@ class Persona(commands.Cog):
             value="Yes" if persona.get("evil_prompt") else "No",
             inline=True,
         )
+        embed.set_footer(text=MANAGE_GUIDANCE)
 
         await interaction.response.send_message(embed=embed, ephemeral=True)
 
@@ -990,8 +1069,7 @@ class Persona(commands.Cog):
             await interaction.response.send_message("Persona not found.", ephemeral=True)
             return
 
-        modal = PersonaEditModal(self, interaction.guild.id, interaction.user.id, persona)
-        await interaction.response.send_modal(modal)
+        await self._open_edit_modal_by_mode_key(interaction, persona["mode_key"])
 
     @persona_group.command(name="delete", description="Delete a custom persona.")
     @app_commands.checks.has_permissions(manage_guild=True)
@@ -1010,49 +1088,18 @@ class Persona(commands.Cog):
             await interaction.response.send_message("Persona mode key missing.", ephemeral=True)
             return
 
-        current_mode = await get_server_mode(interaction.guild.id)
-        if current_mode == mode_key:
-            await set_server_mode(interaction.guild.id, "mode_default")
-            await set_evil_mode(interaction.guild.id, False)
-            await set_guild_avatar_path(interaction.guild.id, None)
-            social = self.bot.get_cog("Social")
-            if social and hasattr(social, "_apply_mode_profile_updates"):
-                try:
-                    await social._apply_mode_profile_updates(interaction.guild.id, "mode_default", None)
-                except Exception as exc:
-                    logger.warning("Failed to reset mode profile on persona delete: %s", exc)
-            else:
-                try:
-                    await set_mode_avatar(
-                        self.bot,
-                        interaction.guild.id,
-                        "mode_default",
-                        evil_mode=False,
-                        force=True,
-                    )
-                except Exception as exc:
-                    logger.warning("Failed to reset avatar on persona delete: %s", exc)
-
-        deleted = await delete_custom_persona(interaction.guild.id, mode_key)
+        deleted = await delete_persona_with_fallback(
+            bot=self.bot,
+            guild_id=interaction.guild.id,
+            user_id=interaction.user.id,
+            mode_key=mode_key,
+        )
         if not deleted:
             await interaction.response.send_message("Failed to delete persona.", ephemeral=True)
             return
 
-        try:
-            await delete_persona_traits(interaction.guild.id, mode_key)
-        except Exception as exc:
-            logger.warning("Failed to delete persona traits: %s", exc)
-
-        for path_value in (persona.get("avatar_path"), persona.get("banner_path")):
-            if not path_value:
-                continue
-            try:
-                Path(path_value).unlink(missing_ok=True)
-            except OSError:
-                logger.warning("Failed to remove persona asset: %s", path_value)
-
         await interaction.response.send_message(
-            f"Persona **{persona.get('name', name)}** deleted.",
+            f"Persona **{persona.get('name', name)}** deleted. {MANAGE_GUIDANCE}",
             ephemeral=True,
         )
 

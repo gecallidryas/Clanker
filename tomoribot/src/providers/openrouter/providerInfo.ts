@@ -1,0 +1,24 @@
+import type { ProviderInfo } from "@/types/provider/interfaces";
+
+export const openrouterProviderInfo: ProviderInfo = {
+	name: "openrouter",
+	displayName: "OpenRouter",
+	aliases: ["or"],
+	supportedModels: [],
+	requiresApiKey: true,
+	supportsStreaming: true,
+	supportsFunctionCalling: true,
+	supportsImages: true,
+	supportsVideos: true,
+	apiFamily: "openrouter",
+	featureSupport: {
+		nativeImageGeneration: true,
+		embeddings: true,
+		structuredOutput: true,
+		presetGeneration: true,
+		expressionInitialization: true,
+		liveTokenCounting: true,
+		conversationCompaction: true,
+		historyExtraction: true,
+	},
+};

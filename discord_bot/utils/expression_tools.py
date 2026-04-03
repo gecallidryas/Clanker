@@ -4,6 +4,7 @@ from typing import Any, Optional
 
 import discord
 
+from utils.expression_cache import get_expression_service
 from utils.expression_picker import pick_emoji, pick_sticker
 from utils.tool_context import ToolContext
 from utils.tool_registry import ToolDefinition, ToolResult
@@ -11,7 +12,7 @@ from utils.tool_registry import ToolDefinition, ToolResult
 
 async def _handle_select_sticker(context: ToolContext, args: dict[str, Any]) -> ToolResult:
     query = (args.get("query") or "").strip()
-    sticker = pick_sticker(context.guild, query if query else None)
+    sticker = await pick_sticker(context.bot, context.guild, query if query else None)
     if not sticker:
         return ToolResult(ok=False, summary="No stickers available.")
     return ToolResult(
@@ -40,22 +41,42 @@ async def _handle_react_with_emoji(context: ToolContext, args: dict[str, Any]) -
     except Exception:
         return ToolResult(ok=False, summary="Message not found.")
 
-    emoji = None
-    if emoji_query:
-        emoji = discord.utils.get(context.guild.emojis, name=emoji_query)
-    if not emoji:
-        emoji = pick_emoji(context.guild, emoji_query if emoji_query else None)
+    emoji = await pick_emoji(context.bot, context.guild, emoji_query if emoji_query else None)
     if not emoji:
         return ToolResult(ok=False, summary="No emoji available.")
 
+    reaction = discord.PartialEmoji(
+        name=emoji.name,
+        id=int(emoji.id),
+        animated=bool(emoji.animated),
+    )
+
     try:
-        await message.add_reaction(emoji)
+        await message.add_reaction(reaction)
     except discord.Forbidden:
         return ToolResult(ok=False, summary="Missing permission to add reactions.")
     except discord.HTTPException:
-        return ToolResult(ok=False, summary="Failed to add reaction.")
+        service = get_expression_service(context.bot)
+        if service is None:
+            return ToolResult(ok=False, summary="Failed to add reaction.")
+        try:
+            await service.refresh_guild_snapshot(context.guild, force_fetch=True)
+            emoji = await pick_emoji(context.bot, context.guild, emoji_query if emoji_query else None)
+            if not emoji:
+                return ToolResult(ok=False, summary="Emoji became unavailable.")
+            refreshed_reaction = discord.PartialEmoji(
+                name=emoji.name,
+                id=int(emoji.id),
+                animated=bool(emoji.animated),
+            )
+            await message.add_reaction(refreshed_reaction)
+            reaction = refreshed_reaction
+        except discord.Forbidden:
+            return ToolResult(ok=False, summary="Missing permission to add reactions.")
+        except Exception:
+            return ToolResult(ok=False, summary="Failed to add reaction.")
 
-    return ToolResult(ok=True, summary=f"Reacted with {emoji}.", data={"emoji": str(emoji)})
+    return ToolResult(ok=True, summary=f"Reacted with {reaction}.", data={"emoji": str(reaction)})
 
 
 tool_select_sticker_for_response = ToolDefinition(

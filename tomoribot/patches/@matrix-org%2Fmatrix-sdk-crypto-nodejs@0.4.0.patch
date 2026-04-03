@@ -1,0 +1,34 @@
+diff --git a/index.js b/index.js
+index 59901c4557a337a76de6ab3de38831059f1098ff..8bcf0764a6682f39efb2a7fd9e6b2d40a41d120e 100644
+--- a/index.js
++++ b/index.js
+@@ -304,11 +304,19 @@ switch (platform) {
+ }
+ 
+ if (!nativeBinding) {
+-  if (loadError) {
+-    throw loadError
++  // TomoriBot patch: the native Windows binary is not published to npm.
++  // The Matrix bridge only relays plaintext messages and never calls E2E crypto
++  // functions, so we export lazy-throw stubs instead of crashing at module load.
++  // Any accidental crypto call will still throw explicitly.
++  const _unavailable = (name) => () => {
++    throw loadError || new Error(`@matrix-org/matrix-sdk-crypto-nodejs: native binding unavailable — ${name} cannot be called without E2E encryption support`)
+   }
+-  throw new Error(`Failed to load native binding`)
+-}
++  const _stubNames = ['Attachment','EncryptedAttachment','BackupDecryptionKey','MegolmV1BackupKey','RoomKeyCounts','BackupKeys','EncryptionAlgorithm','EncryptionSettings','ShieldColor','ShieldStateCode','ShieldState','HistoryVisibility','UserId','DeviceId','DeviceKeyId','DeviceKeyAlgorithm','DeviceKeyAlgorithmName','RoomId','ServerName','StoreType','OlmMachine','CrossSigningStatus','KeysUploadRequest','KeysQueryRequest','KeysClaimRequest','ToDeviceRequest','SignatureUploadRequest','RoomMessageRequest','KeysBackupRequest','RequestType','DecryptedRoomEvent','DeviceLists','Signatures','Signature','MaybeSignature','SignatureVerification','SignatureState','Ed25519PublicKey','Ed25519Signature','Curve25519PublicKey','IdentityKeys','Versions','getVersions']
++  for (const name of _stubNames) { module.exports[name] = _unavailable(name) }
++  // eslint-disable-next-line no-console
++  console.warn('[matrix-sdk-crypto-nodejs] Native binding unavailable — E2E encryption disabled (plaintext bridge only)')
++  // Skip the destructuring below — stubs are already assigned above
++} else {
+ 
+ const { Attachment, EncryptedAttachment, BackupDecryptionKey, MegolmV1BackupKey, RoomKeyCounts, BackupKeys, EncryptionAlgorithm, EncryptionSettings, ShieldColor, ShieldStateCode, ShieldState, HistoryVisibility, UserId, DeviceId, DeviceKeyId, DeviceKeyAlgorithm, DeviceKeyAlgorithmName, RoomId, ServerName, StoreType, OlmMachine, CrossSigningStatus, KeysUploadRequest, KeysQueryRequest, KeysClaimRequest, ToDeviceRequest, SignatureUploadRequest, RoomMessageRequest, KeysBackupRequest, RequestType, DecryptedRoomEvent, DeviceLists, Signatures, Signature, MaybeSignature, SignatureVerification, SignatureState, Ed25519PublicKey, Ed25519Signature, Curve25519PublicKey, IdentityKeys, Versions, getVersions } = nativeBinding
+ 
+@@ -355,3 +363,5 @@ module.exports.Curve25519PublicKey = Curve25519PublicKey
+ module.exports.IdentityKeys = IdentityKeys
+ module.exports.Versions = Versions
+ module.exports.getVersions = getVersions
++
++} // end else (nativeBinding available)

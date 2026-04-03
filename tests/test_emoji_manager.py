@@ -11,20 +11,20 @@ def _make_manager() -> EmojiManager:
     manager = EmojiManager(bot=object())
     manager.config = {
         "emojis": {
-            "tada": {"usage": "name call excitement", "modes": ["all"], "conditions": {}},
-            "sneakpeekcat": {"usage": "femmy mention", "modes": ["all"], "conditions": {}},
-            "ban": {"usage": "ban action", "modes": ["all"], "conditions": {}},
-            "mikucinema": {"usage": "sarcastic response", "modes": ["all"], "conditions": {}},
-            "thisisfinefrog": {"usage": "user is rude", "modes": ["all"], "conditions": {}},
-            "pout": {"usage": "annoyed", "modes": ["all"], "conditions": {}},
-            "what": {"usage": "shocked response", "modes": ["all"], "conditions": {}},
+            "tada": {"usage": "celebrating success, hype, and excited wins", "modes": ["all"], "conditions": {}},
+            "sneakpeekcat": {"usage": "playful cute teasing when femmy is mentioned", "modes": ["all"], "conditions": {}},
+            "ban": {"usage": "moderation or banning someone", "modes": ["all"], "conditions": {}},
+            "mikucinema": {"usage": "sarcastic dramatic or smug reaction", "modes": ["all"], "conditions": {}},
+            "thisisfinefrog": {"usage": "annoyed or hostile reaction when someone is rude", "modes": ["all"], "conditions": {}},
+            "pout": {"usage": "mildly annoyed pouty reaction", "modes": ["all"], "conditions": {}},
+            "what": {"usage": "shocked surprised confused reaction", "modes": ["all"], "conditions": {}},
             "inlovehearts": {
-                "usage": "very affectionate",
+                "usage": "warm affectionate loving reaction",
                 "modes": ["all"],
                 "conditions": {"min_affection": 800},
             },
             "twin_spin": {
-                "usage": "excited response",
+                "usage": "very excited celebratory energy",
                 "modes": ["all"],
                 "conditions": {"min_affection": 500},
             },
@@ -45,56 +45,66 @@ def _make_manager() -> EmojiManager:
     return manager
 
 
-def test_build_prompt_section_uses_shortcode_format_only():
+def test_pick_contextual_emoji_returns_none_for_neutral_reply():
     manager = _make_manager()
-    manager._validated_general = ["<:erm:123123>"]
-    prompt = manager.build_prompt_section(mode="mode_femboy", affection=0, evil_mode=False)
 
-    assert ":tada:" in prompt
-    assert ":erm:" in prompt
-    assert "<a:tada:111111>" not in prompt
-    assert "<:erm:123123>" not in prompt
-
-
-def test_select_trigger_emojis_prefers_negative_context_over_name_mention():
-    manager = _make_manager()
-    selected = manager.select_trigger_emojis(
-        response_text="Please stop being rude.",
-        user_text="femmy you're stupid",
+    selected = manager.pick_contextual_emoji(
+        response_text="I updated the channel setting.",
+        user_text="can you change the setting",
         mode="mode_femboy",
         affection=0,
         evil_mode=False,
-        max_emojis=2,
     )
 
-    assert "<:thisisfinefrog:555555>" in selected
-    assert "<a:tada:111111>" not in selected
+    assert selected == ""
 
 
-def test_select_trigger_emojis_includes_affectionate_match_when_high_affection():
+def test_pick_contextual_emoji_prefers_celebratory_match():
     manager = _make_manager()
-    selected = manager.select_trigger_emojis(
-        response_text="Aww love you too",
-        user_text="love you femmy",
+
+    selected = manager.pick_contextual_emoji(
+        response_text="We actually did it! Let's go!",
+        user_text="omg femmy you actually did it",
         mode="mode_femboy",
-        affection=900,
+        affection=600,
         evil_mode=False,
-        max_emojis=2,
     )
 
-    assert "<:inlovehearts:888888>" in selected
-    assert "<:thisisfinefrog:555555>" not in selected
+    assert selected in {"<a:tada:111111>", "<a:twin_spin:999999>"}
 
 
-def test_apply_trigger_emojis_respects_existing_shortcode_quota():
+def test_pick_contextual_emoji_prefers_annoyed_match_over_positive_name_mention():
     manager = _make_manager()
-    response = manager.apply_trigger_emojis(
-        response_text="Already has :tada:",
-        user_text="wow femmy omg",
+
+    selected = manager.pick_contextual_emoji(
+        response_text="Watch your tone.",
+        user_text="femmy you're so annoying and rude",
         mode="mode_femboy",
-        affection=900,
+        affection=0,
         evil_mode=False,
-        max_emojis=1,
     )
 
-    assert response == "Already has :tada:"
+    assert selected == "<:thisisfinefrog:555555>"
+
+
+def test_strip_known_shortcodes_removes_bot_owned_custom_emoji_names():
+    manager = _make_manager()
+    manager._validated_general = ["<:erm:777777>"]
+
+    stripped = manager.strip_known_shortcodes("still learning :erm: and :tada: today")
+
+    assert stripped == "still learning and today"
+
+
+def test_append_contextual_emoji_adds_one_validated_token():
+    manager = _make_manager()
+
+    response = manager.append_contextual_emoji(
+        response_text="That was adorable, not gonna lie.",
+        user_text="femmy did you see that",
+        mode="mode_femboy",
+        affection=0,
+        evil_mode=False,
+    )
+
+    assert response.endswith("<a:sneakpeekcat:222222>")

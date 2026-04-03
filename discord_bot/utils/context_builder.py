@@ -33,6 +33,34 @@ def section_from_text(title: str, text: str) -> ContextSection | None:
     return ContextSection(title=title, body=content)
 
 
+def build_memory_context_sections(
+    *,
+    server_memory: Iterable[str] = (),
+    current_user_memory: Iterable[str] = (),
+    mentioned_user_memory: Iterable[str] = (),
+    channel_summary: Iterable[str] = (),
+    guild_summary: Iterable[str] = (),
+    rag_chunks: Iterable[str] = (),
+    conversation_timeline: str = "",
+) -> list[ContextSection]:
+    sections: list[ContextSection] = []
+    for title, lines in [
+        ("SERVER MEMORY", server_memory),
+        ("CURRENT USER PERSONAL MEMORY", current_user_memory),
+        ("MENTIONED USER PERSONAL MEMORY", mentioned_user_memory),
+        ("SHORT-TERM CHANNEL SUMMARY", channel_summary),
+        ("SHORT-TERM GUILD RECENCY SUMMARY", guild_summary),
+        ("DOCUMENT RAG CHUNKS", rag_chunks),
+    ]:
+        section = section_from_lines(title, lines)
+        if section:
+            sections.append(section)
+    timeline_section = section_from_text("CONVERSATION TIMELINE", conversation_timeline)
+    if timeline_section:
+        sections.append(timeline_section)
+    return sections
+
+
 def render_structured_context(sections: Iterable[ContextSection]) -> str:
     blocks: List[str] = []
     for section in sections:

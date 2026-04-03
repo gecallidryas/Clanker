@@ -1,0 +1,159 @@
+import type {
+  ChatInputCommandInteraction,
+  ButtonInteraction,
+  Client,
+  SlashCommandSubcommandBuilder,
+} from "discord.js";
+import { MessageFlags } from "discord.js";
+import type { UserRow, TomoriState } from "@/types/db/schema";
+import { log, ColorCode } from "@/utils/misc/logger";
+import {
+  replyInfoEmbed,
+  replyPaginatedPersonaChoicesV2,
+} from "@/utils/discord/interactionHelper";
+import {
+  getCachedTomoriState,
+  invalidateTomoriStateCache,
+} from "@/utils/cache/tomoriStateCache";
+import { loadAllPersonasForServer } from "@/utils/db/dbRead";
+import { sql } from "@/utils/db/client";
+import { localizer } from "@/utils/text/localizer";
+
+export const configureSubcommand = (
+  subcommand: SlashCommandSubcommandBuilder,
+) =>
+  subcommand
+    .setName("personaprompt")
+    .setDescription(
+      localizer("en-US", "commands.forget.personaprompt.description"),
+    );
+
+export async function execute(
+  _client: Client,
+  interaction: ChatInputCommandInteraction,
+  _userData: UserRow,
+  locale: string,
+): Promise<void> {
+  if (!interaction.channel) {
+    await replyInfoEmbed(interaction, locale, {
+      titleKey: "general.errors.channel_only_title",
+      descriptionKey: "general.errors.channel_only_description",
+      color: ColorCode.ERROR,
+      flags: MessageFlags.Ephemeral,
+    });
+    return;
+  }
+
+  if (interaction.guild) {
+    const hasPermission =
+      interaction.memberPermissions?.has("ManageGuild") ?? false;
+    if (!hasPermission) {
+      await replyInfoEmbed(interaction, locale, {
+        titleKey: "commands.forget.personaprompt.no_permission_title",
+        descriptionKey:
+          "commands.forget.personaprompt.no_permission_description",
+        color: ColorCode.ERROR,
+        flags: MessageFlags.Ephemeral,
+      });
+      return;
+    }
+  }
+
+  let tomoriState: TomoriState | null = null;
+  let personaSelectionInteraction: ButtonInteraction | null = null;
+  try {
+    const serverDiscId = interaction.guild?.id ?? interaction.user.id;
+    tomoriState = await getCachedTomoriState(serverDiscId);
+    if (!tomoriState) {
+      await replyInfoEmbed(interaction, locale, {
+        titleKey: "general.errors.tomori_not_setup_title",
+        descriptionKey: "general.errors.tomori_not_setup_description",
+        color: ColorCode.ERROR,
+        flags: MessageFlags.Ephemeral,
+      });
+      return;
+    }
+
+    const allPersonas = await loadAllPersonasForServer(serverDiscId);
+    if (allPersonas.length === 0) {
+      await replyInfoEmbed(interaction, locale, {
+        titleKey: "general.errors.tomori_not_setup_title",
+        descriptionKey: "general.errors.tomori_not_setup_description",
+        color: ColorCode.ERROR,
+        flags: MessageFlags.Ephemeral,
+      });
+      return;
+    }
+
+    const personaSelection = await replyPaginatedPersonaChoicesV2(
+      interaction,
+      locale,
+      {
+        personas: allPersonas,
+        color: ColorCode.INFO,
+        preserveSelectedInteraction: true,
+        onSelect: async () => {},
+      },
+    );
+
+    if (
+      !personaSelection.success ||
+      personaSelection.selectedIndex === undefined ||
+      !personaSelection.interaction
+    ) {
+      return;
+    }
+
+    personaSelectionInteraction = personaSelection.interaction;
+    const selectedPersona = allPersonas[personaSelection.selectedIndex] ?? null;
+
+    if (!selectedPersona?.tomori_id) {
+      await replyInfoEmbed(personaSelectionInteraction, locale, {
+        titleKey: "general.errors.invalid_option_title",
+        descriptionKey: "general.errors.invalid_option_description",
+        color: ColorCode.ERROR,
+      });
+      return;
+    }
+
+    await sql`
+			INSERT INTO persona_configs (tomori_id, trigger_words, persona_prompt)
+			VALUES (${selectedPersona.tomori_id}, ARRAY[]::text[], NULL)
+			ON CONFLICT (tomori_id) DO UPDATE
+			SET persona_prompt = NULL
+		`;
+
+    invalidateTomoriStateCache(serverDiscId);
+
+    await replyInfoEmbed(personaSelectionInteraction, locale, {
+      titleKey: "commands.forget.personaprompt.success_title",
+      descriptionKey: "commands.forget.personaprompt.success_description",
+      descriptionVars: { persona_name: selectedPersona.tomori_nickname },
+      color: ColorCode.SUCCESS,
+    });
+  } catch (error) {
+    await log.error("Error in /forget personaprompt command", error, {
+      serverId: tomoriState?.server_id,
+      tomoriId: tomoriState?.tomori_id,
+      errorType: "CommandExecutionError",
+      metadata: {
+        command: "forget personaprompt",
+        guildId: interaction.guild?.id,
+        userId: interaction.user.id,
+      },
+    });
+
+    const errorReplyTarget =
+      personaSelectionInteraction &&
+      !personaSelectionInteraction.deferred &&
+      !personaSelectionInteraction.replied
+        ? personaSelectionInteraction
+        : interaction;
+    await replyInfoEmbed(errorReplyTarget, locale, {
+      titleKey: "general.errors.unknown_error_title",
+      descriptionKey: "general.errors.unknown_error_description",
+      color: ColorCode.ERROR,
+      flags: MessageFlags.Ephemeral,
+    });
+  }
+}

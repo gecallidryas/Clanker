@@ -3,14 +3,18 @@ from __future__ import annotations
 import os
 from typing import Optional
 
-import asyncpg
-from pgvector.asyncpg import register_vector
+try:
+    import asyncpg
+    from pgvector.asyncpg import register_vector
+except ModuleNotFoundError:  # pragma: no cover - exercised in test environments without pg deps
+    asyncpg = None
+    register_vector = None
 
 from utils.logger import get_logger
 
 logger = get_logger(__name__)
 
-_pool: Optional[asyncpg.Pool] = None
+_pool: Optional["asyncpg.Pool"] = None
 _schema_ready = False
 
 
@@ -25,15 +29,19 @@ def _build_dsn() -> Optional[str]:
     return f"postgresql://{user}:{password or ''}@{host}:{port}/{db_name}"
 
 
-async def _init_connection(conn: asyncpg.Connection) -> None:
+async def _init_connection(conn: "asyncpg.Connection") -> None:
+    if register_vector is None:
+        return
     await conn.execute("CREATE EXTENSION IF NOT EXISTS vector")
     await register_vector(conn)
 
 
-async def get_pg_pool() -> Optional[asyncpg.Pool]:
+async def get_pg_pool() -> Optional["asyncpg.Pool"]:
     global _pool
     if _pool is not None:
         return _pool
+    if asyncpg is None:
+        return None
     dsn = _build_dsn()
     if not dsn:
         return None
@@ -45,6 +53,8 @@ async def ensure_pg_schema() -> bool:
     global _schema_ready
     if _schema_ready:
         return True
+    if asyncpg is None:
+        return False
     pool = await get_pg_pool()
     if pool is None:
         return False

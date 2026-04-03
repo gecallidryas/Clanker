@@ -25,6 +25,9 @@ from utils.db_handler import (
     add_fact,
     add_server_memory,
     get_facts,
+    get_personal_memories,
+    get_mention_lookup_personal_memories,
+    get_personal_memory_opt_out,
     get_server_memory,
     delete_facts,
     get_user,
@@ -180,9 +183,20 @@ class Memories(commands.Cog):
                     break
         return target, fact_text
 
+    @staticmethod
+    def _can_override_personal_memory(actor: discord.abc.User) -> bool:
+        permissions = getattr(actor, "guild_permissions", None)
+        return bool(getattr(permissions, "manage_guild", False))
+
     async def _remember_fact_for(self, ctx: commands.Context, target: discord.Member, fact: str) -> None:
         if not ctx.guild:
             await ctx.send(t("facts.server_only", get_locale_from_guild(ctx.guild)))
+            return
+        if target.id != ctx.author.id and not self._can_override_personal_memory(ctx.author):
+            await ctx.send(
+                "You can only save durable personal memory for yourself. "
+                "A moderator or admin must use an explicit override flow for another user."
+            )
             return
         validation = validate_fact_content(fact)
         if not validation.is_valid:
@@ -190,8 +204,11 @@ class Memories(commands.Cog):
             return
 
         await create_user(ctx.guild.id, target.id)
+        if await get_personal_memory_opt_out(ctx.guild.id, target.id):
+            await ctx.send(f"{target.display_name} has opted out of personal memory in this server.")
+            return
 
-        existing = await get_facts(ctx.guild.id, target.id)
+        existing = await get_personal_memories(ctx.guild.id, target.id, include_private=True)
         summarized = await self._summarize_facts(existing, fact) if existing else None
 
         if summarized:
@@ -262,9 +279,9 @@ class Memories(commands.Cog):
         if scope_value in {"short", "short_term"}:
             memory_types = ["short_term"]
         elif scope_value in {"long", "long_term"}:
-            memory_types = ["long_term"]
+            memory_types = ["personal"]
         elif scope_value in {"all"}:
-            memory_types = ["personal", "short_term", "long_term"]
+            memory_types = ["personal", "short_term"]
         elif scope_value in {"server"}:
             if not ctx.author.guild_permissions.manage_guild:
                 await ctx.send("You need Manage Server to clear server memory.")
@@ -293,7 +310,7 @@ class Memories(commands.Cog):
             return
 
         user = await get_user(ctx.guild.id, ctx.author.id)
-        facts = await get_facts(ctx.guild.id, ctx.author.id)
+        facts = await get_personal_memories(ctx.guild.id, ctx.author.id, include_private=True)
         
         # Build embed
         embed = discord.Embed(
@@ -445,7 +462,7 @@ class Memories(commands.Cog):
             await ctx.send("Usage: `!aboutuser @user`")
             return
 
-        facts = await get_facts(ctx.guild.id, member.id)
+        facts = await get_mention_lookup_personal_memories(ctx.guild.id, member.id, limit=10)
         if not facts:
             await ctx.send(f"I don't have any facts stored about {member.display_name}.")
             return
@@ -683,10 +700,23 @@ class Memories(commands.Cog):
             return
 
         target = member or interaction.user
+        if target.id != interaction.user.id and not self._can_override_personal_memory(interaction.user):
+            await interaction.response.send_message(
+                "You can only save durable personal memory for yourself. "
+                "A moderator or admin must use an explicit override flow for another user.",
+                ephemeral=True,
+            )
+            return
         await interaction.response.defer(thinking=True)
 
         await create_user(interaction.guild.id, target.id)
-        existing = await get_facts(interaction.guild.id, target.id)
+        if await get_personal_memory_opt_out(interaction.guild.id, target.id):
+            await interaction.followup.send(
+                f"{target.display_name} has opted out of personal memory in this server.",
+                ephemeral=True,
+            )
+            return
+        existing = await get_personal_memories(interaction.guild.id, target.id, include_private=True)
         summarized = await self._summarize_facts(existing, fact) if existing else None
 
         if summarized:
@@ -795,7 +825,6 @@ class Memories(commands.Cog):
     @app_commands.choices(scope=[
         app_commands.Choice(name="personal", value="personal"),
         app_commands.Choice(name="short_term", value="short_term"),
-        app_commands.Choice(name="long_term", value="long_term"),
         app_commands.Choice(name="all", value="all"),
         app_commands.Choice(name="server", value="server"),
         app_commands.Choice(name="document", value="document"),
@@ -818,10 +847,8 @@ class Memories(commands.Cog):
 
         if scope_value == "short_term":
             memory_types = ["short_term"]
-        elif scope_value == "long_term":
-            memory_types = ["long_term"]
         elif scope_value == "all":
-            memory_types = ["personal", "short_term", "long_term"]
+            memory_types = ["personal", "short_term"]
         elif scope_value == "server":
             if not interaction.user.guild_permissions.manage_guild:
                 await interaction.response.send_message(
@@ -869,7 +896,7 @@ class Memories(commands.Cog):
             return
 
         user = await get_user(interaction.guild.id, interaction.user.id)
-        facts = await get_facts(interaction.guild.id, interaction.user.id)
+        facts = await get_personal_memories(interaction.guild.id, interaction.user.id, include_private=True)
 
         embed = discord.Embed(
             title=f"📋 {interaction.user.display_name}'s Profile",
@@ -998,7 +1025,7 @@ class Memories(commands.Cog):
             await interaction.response.send_message("Usage: `/aboutuser @user`", ephemeral=True)
             return
 
-        facts = await get_facts(interaction.guild.id, member.id)
+        facts = await get_mention_lookup_personal_memories(interaction.guild.id, member.id, limit=10)
         if not facts:
             await interaction.response.send_message(
                 f"I don't have any facts stored about {member.display_name}.",

@@ -29,6 +29,7 @@ _MAX_MESSAGES = int(os.getenv("SHORT_TERM_MEMORY_MAX_MESSAGES_PER_CHANNEL", "10"
 _MAX_SUMMARY_LENGTH = int(os.getenv("SHORT_TERM_MEMORY_MAX_SUMMARY_LENGTH", "1500"))
 
 _cache: Dict[tuple[int, int], ShortTermMemoryEntry] = {}
+_guild_summary_cache: Dict[int, ShortTermMemoryEntry] = {}
 
 
 def _is_expired(entry: ShortTermMemoryEntry) -> bool:
@@ -93,6 +94,31 @@ def get_short_term_memories_for_user(
     return results
 
 
+def store_guild_recency_summary(server_id: int, summary: str) -> None:
+    _guild_summary_cache[server_id] = ShortTermMemoryEntry(
+        user_id=0,
+        channel_id=0,
+        server_id=server_id,
+        messages=[],
+        summary=(summary or "").strip()[:_MAX_SUMMARY_LENGTH] or None,
+        last_updated=datetime.now(),
+    )
+
+
+def get_guild_recency_summary(server_id: int) -> Optional[str]:
+    entry = _guild_summary_cache.get(server_id)
+    if not entry:
+        return None
+    if _is_expired(entry):
+        _guild_summary_cache.pop(server_id, None)
+        return None
+    return entry.summary
+
+
+def clear_guild_recency_summary(server_id: int) -> bool:
+    return _guild_summary_cache.pop(server_id, None) is not None
+
+
 def clear_short_term_memory_for_channel(channel_id: int) -> int:
     removed = 0
     for key, entry in list(_cache.items()):
@@ -117,9 +143,12 @@ def clear_expired_entries() -> int:
         if _is_expired(entry):
             _cache.pop(key, None)
             removed += 1
+    for key, entry in list(_guild_summary_cache.items()):
+        if _is_expired(entry):
+            _guild_summary_cache.pop(key, None)
+            removed += 1
     return removed
 
 
 def get_short_term_memory_cache_stats() -> dict[str, int]:
-    return {"size": len(_cache)}
-
+    return {"size": len(_cache), "guild_summaries": len(_guild_summary_cache)}

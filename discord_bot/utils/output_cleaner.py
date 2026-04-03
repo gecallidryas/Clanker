@@ -143,7 +143,7 @@ def clean_llm_output(
     cleaned = re.sub(r"\*<(.*?)>\*", r"<\1>", cleaned)
     cleaned = re.sub(r"<([a-zA-Z0-9_]+)>[\s\S]*?</\1>", "", cleaned)
 
-    name = bot_name or "Tomori"
+    name = bot_name or "Femmy"
     prefix_re = re.compile(
         rf"^(\*\*{re.escape(name)}:\*\*|\*\*{re.escape(name)}\*\*:|{re.escape(name)}:)\s*",
         flags=re.IGNORECASE,

@@ -1,0 +1,312 @@
+/**
+ * Base provider interface for LLM services
+ * This interface defines the contract that all LLM providers must implement
+ * to work with TomoriBot's modular architecture.
+ */
+
+import type {
+  BaseGuildTextChannel,
+  BaseGuildVoiceChannel,
+  Client,
+  CommandInteraction,
+  Message,
+  DMChannel,
+  AnyThreadChannel,
+} from "discord.js";
+import type { TomoriState } from "../db/schema";
+import type { StructuredContextItem } from "../misc/context";
+import type { StreamingContext } from "../tool/interfaces";
+import type { ProviderError } from "../stream/interfaces";
+
+export type ProviderApiFamily =
+  | "google-genai"
+  | "openrouter"
+  | "novelai"
+  | "openai-compatible";
+
+export interface ProviderFeatureSupport {
+  nativeImageGeneration: boolean;
+  embeddings: boolean;
+  structuredOutput: boolean;
+  presetGeneration: boolean;
+  expressionInitialization: boolean;
+  liveTokenCounting: boolean;
+  conversationCompaction: boolean;
+  historyExtraction: boolean;
+}
+
+/**
+ * Result of API key validation with structured error information
+ */
+export interface ApiKeyValidationResult {
+  valid: boolean;
+  error?: ProviderError; // Detailed error info if validation failed
+}
+
+export type StreamStopReason =
+  | "user_request"
+  | "system_request"
+  | "speaker_guard"
+  | "send_message_limit"
+  | "flush_limit"
+  | "unknown";
+
+export type ThoughtLogKind = "summary" | "raw";
+
+export interface ThoughtLogEntry {
+  kind: ThoughtLogKind;
+  content: string;
+}
+
+export interface ThoughtLogPayload {
+  summary?: string;
+  raw?: string;
+  firstReplyUrl?: string;
+}
+
+/**
+ * Generic stream response result
+ */
+export interface StreamResult {
+  status:
+    | "completed"
+    | "function_call"
+    | "error"
+    | "timeout"
+    | "stopped_by_user"
+    | "empty_response"
+    | "follow_up_interrupt";
+  data?: unknown | Error; // Function call data or error details
+  accumulatedText?: string; // Text sent to Discord (for short-term memory storage)
+  /** Extracted <details> block body text (with <summary> stripped), for routing to STM. */
+  detailsContent?: string;
+  stopReason?: StreamStopReason; // Specific stop source for debugging/logging
+  thoughtLog?: ThoughtLogPayload; // Reasoning/thought text captured separately from visible output
+  /** NAI GLM-4.6: incomplete trailing sentence dropped by sentenceTrailingBuffer, available for prompt continuation on retry */
+  naiContinuationPrefill?: string;
+}
+
+/**
+ * Generic provider configuration
+ * Each provider can extend this with their specific configuration
+ */
+export interface ProviderConfig {
+  model: string;
+  apiKey: string;
+  temperature: number;
+  maxOutputTokens?: number;
+  tools?: Array<Record<string, unknown>>;
+  logitBias?: Record<string, number>;
+}
+
+/**
+ * Provider information and metadata
+ */
+export interface ProviderInfo {
+  name: string;
+  displayName: string;
+  aliases?: string[]; // Optional aliases for provider name (e.g., ["gemini"] for "google")
+  supportedModels: string[];
+  requiresApiKey: boolean;
+  supportsStreaming: boolean;
+  supportsFunctionCalling: boolean;
+  supportsImages: boolean;
+  supportsVideos: boolean;
+  apiFamily: ProviderApiFamily;
+  featureSupport: ProviderFeatureSupport;
+}
+
+/**
+ * Function call representation (provider-agnostic)
+ */
+export interface FunctionCall {
+  name: string;
+  args?: Record<string, unknown>;
+  /**
+   * Optional thought signature for providers that require it (e.g., Gemini).
+   * Encoded as base64 when present.
+   */
+  thoughtSignature?: string;
+  /**
+   * Optional reasoning details for OpenRouter reasoning models (Gemini, Claude, etc.).
+   * Must be preserved when passing tool results back to maintain reasoning continuity.
+   * See: https://openrouter.ai/docs/guides/best-practices/reasoning-tokens#preserving-reasoning-blocks
+   */
+  // biome-ignore lint/suspicious/noExplicitAny: reasoning_details has complex nested structure that varies by provider
+  reasoning_details?: any[];
+  /**
+   * DeepSeek thinking-mode continuation payload.
+   * When a DeepSeek thinking response issues a tool call, the assistant message must
+   * be replayed with its reasoning_content so the same turn can continue.
+   */
+  deepseekReasoningContent?: string;
+}
+
+/**
+ * Metadata about images sent to Discord by tool execution
+ * Used to make LLM aware of images it sent via tools
+ */
+export interface FunctionResponseImageMetadata {
+  imageUrls: Array<{
+    url: string;
+    mimeType?: string;
+    wasCompressed?: boolean;
+    originalUrl?: string;
+  }>;
+  totalSent: number;
+  totalValidated: number;
+  /**
+   * Discord message IDs where these images were sent (if applicable)
+   * Allows follow-up tools to reference the original attachments via message_id
+   */
+  messageIds?: string[];
+}
+
+/**
+ * Base interface that all LLM providers must implement
+ */
+export interface LLMProvider {
+  /**
+   * Get provider information and capabilities
+   */
+  getInfo(): ProviderInfo;
+
+  /**
+   * Validate an API key by making a test request
+   * @param apiKey - The API key to validate
+   * @returns Promise<ApiKeyValidationResult> - Validation result with detailed error info if failed
+   */
+  validateApiKey(apiKey: string): Promise<ApiKeyValidationResult>;
+
+  /**
+   * Create a localized provider-specific error description for user-facing embeds.
+   * This keeps formatting logic inside the provider abstraction instead of command switches.
+   */
+  formatErrorDescription(error: ProviderError, locale: string): string | null;
+
+  /**
+   * Get available tools/functions based on Tomori's configuration
+   * @param tomoriState - The current Tomori state with configuration
+   * @returns Array of tool configurations specific to this provider
+   */
+  getTools(tomoriState: TomoriState): Promise<Array<Record<string, unknown>>>;
+
+  /**
+   * Stream LLM response directly to a Discord channel
+   * @param channel - The Discord text channel or thread to send messages to
+   * @param client - The Discord client instance
+   * @param tomoriState - The current Tomori state
+   * @param config - Provider-specific configuration
+   * @param contextItems - An array of structured context items for the LLM
+   * @param currentTurnModelParts - Accumulated model parts for the current turn
+   * @param emojiStrings - Optional array of emoji strings for cleaning
+   * @param functionInteractionHistory - Optional function calling history
+   * @param initialInteraction - Optional initial interaction for error reporting
+   * @param replyToMessage - Optional message to reply to
+   * @param streamingContext - Optional streaming context for context-aware tool availability
+   * @param userLocale - User's preferred locale for error messages (defaults to en-US)
+   * @param webhook - Optional webhook for alter persona responses with custom avatars
+   * @param personaAvatarUrl - Optional avatar URL for current persona (used with webhook)
+   * @param personaUsername - Optional username override for current persona (used with webhook)
+   * @param prefixStrippingName - Optional name used for prefix stripping (may differ from personaUsername for user impersonation)
+   * @returns Promise<StreamResult> - The outcome of the streaming operation
+   */
+  streamToDiscord(
+    channel:
+      | BaseGuildTextChannel
+      | BaseGuildVoiceChannel
+      | DMChannel
+      | AnyThreadChannel,
+    client: Client,
+    tomoriState: TomoriState,
+    config: ProviderConfig,
+    contextItems: StructuredContextItem[],
+    currentTurnModelParts: Array<Record<string, unknown>>, // Provider-specific parts
+    emojiStrings?: string[],
+    functionInteractionHistory?: Array<{
+      functionCall: FunctionCall;
+      functionResponse: Record<string, unknown>;
+      imageMetadata?: FunctionResponseImageMetadata;
+      /** Text parts the model generated before the function call (prevents repetition on continuation) */
+      preToolCallTextParts?: Array<Record<string, unknown>>;
+    }>,
+    initialInteraction?: CommandInteraction,
+    replyToMessage?: Message,
+    streamingContext?: StreamingContext,
+    userLocale?: string,
+    webhook?: import("discord.js").Webhook,
+    personaAvatarUrl?: string,
+    personaUsername?: string,
+    prefixStrippingName?: string,
+  ): Promise<StreamResult>;
+
+  /**
+   * Get the default model for this provider
+   * @returns Promise<string> - The default model codename
+   */
+  getDefaultModel(): Promise<string>;
+
+  /**
+   * Convert provider-specific configuration from TomoriState
+   * @param tomoriState - The current Tomori state
+   * @param apiKey - The decrypted API key
+   * @returns Provider-specific configuration object
+   */
+  createConfig(
+    tomoriState: TomoriState,
+    apiKey: string,
+  ): Promise<ProviderConfig>;
+}
+
+/**
+ * Abstract base class that provides common functionality for all providers
+ */
+export abstract class BaseLLMProvider implements LLMProvider {
+  abstract getInfo(): ProviderInfo;
+  abstract validateApiKey(apiKey: string): Promise<ApiKeyValidationResult>;
+  abstract formatErrorDescription(
+    error: ProviderError,
+    locale: string,
+  ): string | null;
+  abstract getTools(
+    tomoriState: TomoriState,
+  ): Promise<Array<Record<string, unknown>>>;
+  abstract streamToDiscord(
+    channel:
+      | BaseGuildTextChannel
+      | BaseGuildVoiceChannel
+      | DMChannel
+      | AnyThreadChannel,
+    client: Client,
+    tomoriState: TomoriState,
+    config: ProviderConfig,
+    contextItems: StructuredContextItem[],
+    currentTurnModelParts: Array<Record<string, unknown>>,
+    emojiStrings?: string[],
+    functionInteractionHistory?: Array<{
+      functionCall: FunctionCall;
+      functionResponse: Record<string, unknown>;
+      imageMetadata?: FunctionResponseImageMetadata;
+      /** Text parts the model generated before the function call (prevents repetition on continuation) */
+      preToolCallTextParts?: Array<Record<string, unknown>>;
+    }>,
+    initialInteraction?: CommandInteraction,
+    replyToMessage?: Message,
+    streamingContext?: StreamingContext,
+    userLocale?: string,
+  ): Promise<StreamResult>;
+  abstract getDefaultModel(): Promise<string>;
+  abstract createConfig(
+    tomoriState: TomoriState,
+    apiKey: string,
+  ): Promise<ProviderConfig>;
+
+  /**
+   * Common helper method to check if a provider supports a given model
+   * @param modelCodename - The model codename to check
+   * @returns True if the model is supported by this provider
+   */
+  protected supportsModel(modelCodename: string): boolean {
+    return this.getInfo().supportedModels.includes(modelCodename);
+  }
+}

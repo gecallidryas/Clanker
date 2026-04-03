@@ -21,9 +21,9 @@ from utils.db_handler import (
     reset_user_data,
     set_affection_value_by_mode,
     get_user_full_profile,
-    add_fact_with_source,
-    delete_fact_by_id,
-    get_facts_detailed,
+    add_personal_memory,
+    delete_personal_memory_by_id,
+    get_admin_personal_memory_index,
     set_guild_avatar_path,
     AFFECTION_TRACKED_MODES,
 )
@@ -119,8 +119,8 @@ class Admin(commands.Cog):
         embed.add_field(
             name="Facts",
             value=(
-                "`!admin setfact @user <fact>` - Add a fact\n"
-                "`!admin delfact @user <id>` - Delete fact by ID\n"
+                "`!admin setfact @user <fact>` - Add a personal memory\n"
+                "`!admin delfact @user <id>` - Delete personal memory by ID\n"
             ),
             inline=False
         )
@@ -236,7 +236,9 @@ class Admin(commands.Cog):
             for f in facts[:5]:
                 source = f.get("source", "manual")
                 source_emoji = "📝" if source == "manual" else "🧠" if source == "learned" else "🔧"
-                fact_list.append(f"{source_emoji} `{f['id']}` {f['fact'][:50]}...")
+                fact_list.append(
+                    f"{source_emoji} `{f['id']}` {f.get('status', 'confirmed')} via {f.get('source', 'manual')}"
+                )
             
             embed.add_field(
                 name=f"📋 Facts ({len(facts)} total)",
@@ -249,13 +251,18 @@ class Admin(commands.Cog):
     @admin_group.command(name="setfact")
     async def set_fact(self, ctx: commands.Context, member: discord.Member, *, fact: str):
         """Add a fact for a user (admin source)."""
-        fact_id = await add_fact_with_source(
-            ctx.guild.id,
-            member.id,
-            fact,
-            source="admin",
-            learned_from_user_id=ctx.author.id
-        )
+        try:
+            fact_id = await add_personal_memory(
+                ctx.guild.id,
+                member.id,
+                fact,
+                source="admin",
+                created_by_user_id=ctx.author.id,
+                confirmed_by_user_id=ctx.author.id,
+            )
+        except PermissionError as exc:
+            await ctx.send(f"❌ {exc}")
+            return
         
         await ctx.send(f"✅ Added fact #{fact_id} for {member.display_name}:\n> {fact}")
         logger.info(f"Admin {ctx.author} added fact for {member}: {fact[:50]}")
@@ -264,14 +271,14 @@ class Admin(commands.Cog):
     async def del_fact(self, ctx: commands.Context, member: discord.Member, fact_id: int):
         """Delete a specific fact by ID."""
         # Verify fact belongs to user
-        facts = await get_facts_detailed(ctx.guild.id, member.id)
+        facts = await get_admin_personal_memory_index(ctx.guild.id, member.id)
         fact_ids = [f["id"] for f in facts]
         
         if fact_id not in fact_ids:
             await ctx.send(f"❌ Fact #{fact_id} not found for {member.display_name}")
             return
         
-        success = await delete_fact_by_id(ctx.guild.id, fact_id)
+        success = await delete_personal_memory_by_id(ctx.guild.id, fact_id, deleted_by_user_id=ctx.author.id)
         if success:
             await ctx.send(f"✅ Deleted fact #{fact_id} for {member.display_name}")
             logger.info(f"Admin {ctx.author} deleted fact #{fact_id} for {member}")
@@ -514,7 +521,9 @@ class Admin(commands.Cog):
             for f in facts[:5]:
                 source = f.get("source", "manual")
                 source_emoji = "📝" if source == "manual" else "🧠" if source == "learned" else "🔧"
-                fact_list.append(f"{source_emoji} `{f['id']}` {f['fact'][:50]}...")
+                fact_list.append(
+                    f"{source_emoji} `{f['id']}` {f.get('status', 'confirmed')} via {f.get('source', 'manual')}"
+                )
 
             embed.add_field(
                 name=f"📋 Facts ({len(facts)} total)",
@@ -532,13 +541,18 @@ class Admin(commands.Cog):
             await interaction.response.send_message("Use this command in a server.", ephemeral=True)
             return
 
-        fact_id = await add_fact_with_source(
-            interaction.guild.id,
-            member.id,
-            fact,
-            source="admin",
-            learned_from_user_id=interaction.user.id,
-        )
+        try:
+            fact_id = await add_personal_memory(
+                interaction.guild.id,
+                member.id,
+                fact,
+                source="admin",
+                created_by_user_id=interaction.user.id,
+                confirmed_by_user_id=interaction.user.id,
+            )
+        except PermissionError as exc:
+            await interaction.response.send_message(f"❌ {exc}", ephemeral=True)
+            return
 
         await interaction.response.send_message(
             f"✅ Added fact #{fact_id} for {member.display_name}:\n> {fact}"
@@ -553,7 +567,7 @@ class Admin(commands.Cog):
             await interaction.response.send_message("Use this command in a server.", ephemeral=True)
             return
 
-        facts = await get_facts_detailed(interaction.guild.id, member.id)
+        facts = await get_admin_personal_memory_index(interaction.guild.id, member.id)
         fact_ids = [f["id"] for f in facts]
 
         if fact_id not in fact_ids:
@@ -563,7 +577,11 @@ class Admin(commands.Cog):
             )
             return
 
-        success = await delete_fact_by_id(interaction.guild.id, fact_id)
+        success = await delete_personal_memory_by_id(
+            interaction.guild.id,
+            fact_id,
+            deleted_by_user_id=interaction.user.id,
+        )
         if success:
             await interaction.response.send_message(
                 f"✅ Deleted fact #{fact_id} for {member.display_name}"

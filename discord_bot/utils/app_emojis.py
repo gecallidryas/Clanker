@@ -1,9 +1,10 @@
 from __future__ import annotations
 
 import re
-from types import SimpleNamespace
 from typing import Dict, Iterable, List, Optional
 
+from utils.expression_cache import get_expression_service
+from utils.expression_sync import fetch_application_emojis_live, fetch_guild_assets_live
 from utils.logger import get_logger
 
 logger = get_logger(__name__)
@@ -42,87 +43,19 @@ def filter_emojis_by_prefix(emojis: Iterable, prefix: str) -> List:
 
 
 async def get_application_emojis(bot) -> List:
-    cached = getattr(bot, "_app_emojis_cache", None)
-    if cached is not None:
-        return list(cached)
-
-    emojis: List = []
-    existing = getattr(bot, "application_emojis", None)
-    if existing:
-        try:
-            emojis = list(existing)
-        except Exception:
-            emojis = []
-
-    if not emojis:
-        fetcher = getattr(bot, "fetch_application_emojis", None)
-        if fetcher:
-            try:
-                emojis = await fetcher()
-            except Exception as exc:
-                logger.warning("Failed to fetch application emojis: %s", exc)
-                emojis = []
-
-    if not emojis:
-        application_id = getattr(bot, "application_id", None) or getattr(getattr(bot, "application", None), "id", None)
-        token = getattr(getattr(bot, "http", None), "token", None)
-        if application_id and token:
-            try:
-                import aiohttp
-
-                url = f"{DISCORD_API_BASE}/applications/{application_id}/emojis"
-                headers = {"Authorization": f"Bot {token}"}
-                timeout = aiohttp.ClientTimeout(total=12)
-                async with aiohttp.ClientSession(timeout=timeout) as session:
-                    async with session.get(url, headers=headers) as response:
-                        if response.status >= 400:
-                            body = await response.text()
-                            raise RuntimeError(f"HTTP {response.status}: {body[:200]}")
-                        payload = await response.json()
-                items = payload.get("items", []) if isinstance(payload, dict) else []
-                emojis = [
-                    SimpleNamespace(
-                        id=int(item.get("id")),
-                        name=str(item.get("name") or ""),
-                        animated=bool(item.get("animated", False)),
-                    )
-                    for item in items
-                    if item.get("id") and item.get("name")
-                ]
-            except Exception as exc:
-                logger.warning("Failed REST fallback for application emojis: %s", exc)
-                emojis = []
-
-    setattr(bot, "_app_emojis_cache", list(emojis))
-    return list(emojis)
+    service = get_expression_service(bot)
+    if service is not None:
+        return list(await service.get_application_emojis())
+    return list(await fetch_application_emojis_live(bot))
 
 
 async def get_guild_emojis(bot, guild) -> List:
     if not guild:
         return []
-    cache = getattr(bot, "_guild_emojis_cache", None)
-    if cache is None:
-        cache = {}
-        setattr(bot, "_guild_emojis_cache", cache)
-    if guild.id in cache:
-        return list(cache[guild.id])
-
-    emojis: List = []
-    try:
-        emojis = list(getattr(guild, "emojis", []) or [])
-    except Exception:
-        emojis = []
-
-    if not emojis:
-        fetcher = getattr(guild, "fetch_emojis", None)
-        if fetcher:
-            try:
-                emojis = await fetcher()
-            except Exception as exc:
-                logger.warning("Failed to fetch guild emojis: %s", exc)
-                emojis = []
-
-    cache[guild.id] = list(emojis)
+    service = get_expression_service(bot)
+    if service is not None:
+        return list(await service.get_guild_emojis(guild))
+    emojis, _stickers = await fetch_guild_assets_live(guild)
     return list(emojis)
 
 

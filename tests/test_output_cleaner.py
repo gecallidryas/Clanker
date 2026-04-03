@@ -22,10 +22,10 @@ def test_replace_mention_handles():
 
 
 def test_clean_llm_output_strips_system_and_bot_prefix():
-    raw = "Tomori: [System: hidden]\nHello <|im_end|>"
-    cleaned = clean_llm_output(raw, bot_name="Tomori")
+    raw = "Femmy: [System: hidden]\nHello <|im_end|>"
+    cleaned = clean_llm_output(raw, bot_name="Femmy")
     assert "[System:" not in cleaned
-    assert not cleaned.startswith("Tomori:")
+    assert not cleaned.startswith("Femmy:")
     assert "Hello" in cleaned
 
 

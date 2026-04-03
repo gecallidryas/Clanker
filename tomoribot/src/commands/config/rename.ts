@@ -1,0 +1,450 @@
+import {
+  MessageFlags,
+  TextInputStyle,
+  type ChatInputCommandInteraction,
+  type Client,
+  type ModalSubmitInteraction,
+  type SlashCommandSubcommandBuilder,
+} from "discord.js";
+import { invalidateTomoriStateCache } from "../../utils/cache/tomoriStateCache";
+import { localizer } from "../../utils/text/localizer";
+import { log, ColorCode } from "../../utils/misc/logger";
+import {
+  replyInfoEmbed,
+  promptWithPaginatedModal,
+  safeSelectOptionText,
+} from "../../utils/discord/interactionHelper";
+import {
+  type UserRow,
+  type ErrorContext,
+  tomoriSchema,
+  personaConfigSchema,
+  type TomoriState,
+} from "../../types/db/schema";
+import type { ModalResult, SelectOption } from "../../types/discord/modal";
+import { loadAllPersonasForServer } from "../../utils/db/dbRead";
+import { sql } from "@/utils/db/client";
+
+// Constants for validation
+const NICKNAME_MIN_LENGTH = 2;
+const NICKNAME_MAX_LENGTH = 32;
+const MODAL_CUSTOM_ID = "config_rename_modal";
+const PERSONA_SELECT_ID = "persona_select";
+const NEW_NAME_INPUT_ID = "new_name_input";
+
+function isUniqueViolation(error: unknown): boolean {
+  return (
+    typeof error === "object" &&
+    error !== null &&
+    "code" in error &&
+    (error as { code?: string }).code === "23505"
+  );
+}
+
+// Configure the subcommand
+export const configureSubcommand = (
+  subcommand: SlashCommandSubcommandBuilder,
+) =>
+  subcommand
+    .setName("rename")
+    .setDescription(localizer("en-US", "commands.config.rename.description"));
+
+/**
+ * Changes what Tomori refers to herself in context and in chat.
+ * Also adds the new nickname to her trigger words if not already present.
+ * @param _client - Discord client instance
+ * @param interaction - Command interaction
+ * @param userData - User data from database
+ * @param locale - Locale of the interaction
+ */
+export async function execute(
+  _client: Client,
+  interaction: ChatInputCommandInteraction,
+  userData: UserRow,
+  locale: string,
+): Promise<void> {
+  const serverDiscId = interaction.guild?.id ?? interaction.user.id;
+  let modalResult: ModalResult | null = null;
+  let modalSubmitInteraction: ModalSubmitInteraction | null = null;
+  let selectedPersona: TomoriState | null = null;
+  let attemptedNickname: string | null = null;
+
+  // 1. Ensure command is run in a channel
+  if (!interaction.channel) {
+    await replyInfoEmbed(interaction, locale, {
+      titleKey: "general.errors.channel_only_title",
+      descriptionKey: "general.errors.channel_only_description",
+      color: ColorCode.ERROR,
+      flags: MessageFlags.Ephemeral,
+    });
+    return;
+  }
+
+  try {
+    // 2. Resolve all personas for selector
+    const allPersonas = await loadAllPersonasForServer(serverDiscId);
+    if (allPersonas.length === 0) {
+      await replyInfoEmbed(interaction, locale, {
+        titleKey: "general.errors.tomori_not_setup_title",
+        descriptionKey: "general.errors.tomori_not_setup_description",
+        color: ColorCode.ERROR,
+        flags: MessageFlags.Ephemeral,
+      });
+      return;
+    }
+
+    const personaSelectOptions: SelectOption[] = allPersonas
+      .filter((persona) => persona.tomori_id !== undefined)
+      .map((persona) => ({
+        label: safeSelectOptionText(persona.tomori_nickname),
+        value: persona.tomori_id?.toString() ?? "",
+        description: persona.is_alter
+          ? localizer(
+              locale,
+              "commands.config.rename.alter_persona_description",
+            )
+          : localizer(
+              locale,
+              "commands.config.rename.main_persona_description",
+            ),
+      }))
+      .filter((option) => option.value !== "");
+    if (personaSelectOptions.length === 0) {
+      await replyInfoEmbed(interaction, locale, {
+        titleKey: "general.errors.invalid_option_title",
+        descriptionKey: "general.errors.invalid_option_description",
+        color: ColorCode.ERROR,
+        flags: MessageFlags.Ephemeral,
+      });
+      return;
+    }
+
+    // 3. Show modal (persona select + new name)
+    modalResult = await promptWithPaginatedModal(interaction, locale, {
+      modalCustomId: MODAL_CUSTOM_ID,
+      modalTitleKey: "commands.config.rename.modal_title",
+      components: [
+        {
+          customId: PERSONA_SELECT_ID,
+          labelKey: "commands.config.rename.persona_select_label",
+          descriptionKey: "commands.config.rename.persona_select_description",
+          placeholder: "commands.config.rename.persona_select_placeholder",
+          required: true,
+          options: personaSelectOptions,
+        },
+        {
+          customId: NEW_NAME_INPUT_ID,
+          labelKey: "commands.config.rename.new_name_input_label",
+          descriptionKey: "commands.config.rename.new_name_input_description",
+          placeholder: "commands.config.rename.new_name_input_placeholder",
+          style: TextInputStyle.Short,
+          required: true,
+          minLength: NICKNAME_MIN_LENGTH,
+          maxLength: NICKNAME_MAX_LENGTH,
+        },
+      ],
+    });
+    if (modalResult.outcome !== "submit") {
+      log.info(
+        `Rename modal ${modalResult.outcome} for user ${interaction.user.id}`,
+      );
+      return;
+    }
+
+    // biome-ignore lint/style/noNonNullAssertion: Modal submit outcome guarantees interaction exists
+    modalSubmitInteraction = modalResult.interaction!;
+    if (!modalSubmitInteraction.deferred && !modalSubmitInteraction.replied) {
+      await modalSubmitInteraction.deferReply({
+        flags: MessageFlags.Ephemeral,
+      });
+    }
+    const selectedPersonaId = modalResult.values?.[PERSONA_SELECT_ID];
+    attemptedNickname = modalResult.values?.[NEW_NAME_INPUT_ID] ?? "";
+    const newNickname = attemptedNickname.trim();
+
+    selectedPersona =
+      allPersonas.find(
+        (persona) => persona.tomori_id?.toString() === selectedPersonaId,
+      ) ?? null;
+    if (!selectedPersona?.tomori_id) {
+      await replyInfoEmbed(modalSubmitInteraction, locale, {
+        titleKey: "general.errors.invalid_option_title",
+        descriptionKey: "general.errors.invalid_option_description",
+        color: ColorCode.ERROR,
+      });
+      return;
+    }
+
+    // 4. Validate nickname length
+    if (
+      newNickname.length < NICKNAME_MIN_LENGTH ||
+      newNickname.length > NICKNAME_MAX_LENGTH
+    ) {
+      await replyInfoEmbed(modalSubmitInteraction, locale, {
+        titleKey: "commands.config.rename.invalid_length_title",
+        descriptionKey: "commands.config.rename.invalid_length",
+        descriptionVars: {
+          min: NICKNAME_MIN_LENGTH.toString(),
+          max: NICKNAME_MAX_LENGTH.toString(),
+        },
+        color: ColorCode.ERROR,
+      });
+      return;
+    }
+
+    // 5. Store the old nickname for the success message
+    const oldNickname = selectedPersona.tomori_nickname;
+
+    // 6. Check if the nickname is actually changing
+    if (newNickname === oldNickname) {
+      await replyInfoEmbed(modalSubmitInteraction, locale, {
+        titleKey: "commands.config.rename.already_set_title",
+        descriptionKey: "commands.config.rename.already_set_description",
+        descriptionVars: {
+          nickname: newNickname,
+        },
+        color: ColorCode.WARN,
+      });
+      return;
+    }
+
+    const duplicateNameRows = await sql<Array<{ tomori_id: number }>>`
+			SELECT tomori_id
+			FROM tomoris
+			WHERE server_id = ${selectedPersona.server_id}
+			  AND tomori_id <> ${selectedPersona.tomori_id}
+			  AND lower(btrim(tomori_nickname)) = lower(btrim(${newNickname}))
+			LIMIT 1
+		`;
+    if (duplicateNameRows.length > 0) {
+      await replyInfoEmbed(modalSubmitInteraction, locale, {
+        titleKey: "commands.persona.name_conflict_title",
+        descriptionKey: "commands.persona.name_conflict_description",
+        descriptionVars: { name: newNickname },
+        color: ColorCode.ERROR,
+      });
+      return;
+    }
+
+    // --- Transaction Start (Conceptually) ---
+    // We perform two separate updates, but ideally this would be a transaction
+    // if the database supported it easily with Bun's current driver.
+
+    // 7. Update the nickname in the `tomoris` table
+    const [updatedTomoriRow] = await sql`
+            UPDATE tomoris
+            SET tomori_nickname = ${newNickname}
+            WHERE tomori_id = ${selectedPersona.tomori_id}
+            RETURNING *
+        `;
+
+    // 8. Validate the returned `tomoris` data
+    const validatedTomori = tomoriSchema.safeParse(updatedTomoriRow);
+
+    if (!validatedTomori.success || !updatedTomoriRow) {
+      // Log error specific to tomoris update failure
+      const context: ErrorContext = {
+        tomoriId: selectedPersona.tomori_id,
+        serverId: selectedPersona.server_id,
+        userId: userData.user_id,
+        errorType: "DatabaseUpdateError",
+        metadata: {
+          command: "config rename",
+          table: "tomoris",
+          guildId: serverDiscId,
+          newNickname,
+          validationErrors: validatedTomori.success
+            ? null
+            : validatedTomori.error.flatten(),
+        },
+      };
+      await log.error(
+        "Failed to update or validate tomori_nickname in tomoris table",
+        validatedTomori.success
+          ? new Error("Database update returned no rows or unexpected data")
+          : new Error("Updated tomori data failed validation"),
+        context,
+      );
+
+      await replyInfoEmbed(modalSubmitInteraction, locale, {
+        titleKey: "general.errors.update_failed_title",
+        descriptionKey: "general.errors.update_failed_description",
+        color: ColorCode.ERROR,
+      });
+      return; // Stop if the primary update failed
+    }
+
+    // 9. Add new nickname to trigger words if not already present
+    const currentTriggers = selectedPersona.trigger_words ?? [];
+    let triggerUpdateNeeded = false;
+    const updatedTriggers = [...currentTriggers]; // Create a mutable copy
+
+    // Case-insensitive check if the nickname exists
+    if (
+      !currentTriggers.some(
+        (trigger) => trigger.toLowerCase() === newNickname.toLowerCase(),
+      )
+    ) {
+      updatedTriggers.push(newNickname);
+      triggerUpdateNeeded = true;
+      log.info(
+        `Adding new nickname '${newNickname}' to trigger words for tomori ${selectedPersona.tomori_id}`,
+      );
+    } else {
+      log.info(
+        `Nickname '${newNickname}' already exists in trigger words for tomori ${selectedPersona.tomori_id}. Skipping update.`,
+      );
+    }
+
+    // 10. Update trigger_words in `persona_configs` if needed
+    if (triggerUpdateNeeded) {
+      const [updatedConfigRow] = await sql`
+				INSERT INTO persona_configs (tomori_id, trigger_words)
+				VALUES (${selectedPersona.tomori_id}, ARRAY[${newNickname}]::text[])
+				ON CONFLICT (tomori_id) DO UPDATE
+				SET trigger_words = array_append(persona_configs.trigger_words, ${newNickname})
+				RETURNING *
+			`;
+
+      // 11. Validate the returned `persona_configs` data
+      const validatedConfig = personaConfigSchema.safeParse(updatedConfigRow);
+
+      if (!validatedConfig.success || !updatedConfigRow) {
+        // Log error specific to persona_configs update failure
+        const context: ErrorContext = {
+          tomoriId: selectedPersona.tomori_id,
+          serverId: selectedPersona.server_id,
+          userId: userData.user_id,
+          errorType: "DatabaseUpdateError",
+          metadata: {
+            command: "config rename",
+            table: "persona_configs",
+            column: "trigger_words",
+            guildId: serverDiscId,
+            newNickname,
+            updatedTriggers, // Log the array we tried to set
+            validationErrors: validatedConfig.success
+              ? null
+              : validatedConfig.error.flatten(),
+          },
+        };
+        // Log this as a warning since the primary nickname update succeeded,
+        // but inform the user of the partial failure.
+        await log.error(
+          "Failed to update or validate trigger_words in persona_configs table",
+          validatedConfig.success
+            ? new Error("Database update returned no rows or unexpected data")
+            : new Error("Updated config data failed validation"),
+          context,
+        );
+
+        // Inform user about partial success
+        await replyInfoEmbed(modalSubmitInteraction, locale, {
+          titleKey: "commands.config.rename.partial_success_title",
+          descriptionKey: "commands.config.rename.partial_success_description",
+          descriptionVars: {
+            old_nickname: oldNickname,
+            new_nickname: newNickname,
+          },
+          color: ColorCode.WARN, // Use WARN for partial success
+        });
+        return; // Stop execution after informing about partial success
+      }
+      log.success(
+        `Successfully updated trigger words for tomori ${selectedPersona.tomori_id}`,
+      );
+    }
+    // --- Transaction End (Conceptually) ---
+
+    // 12. Update bot's server nickname only when renaming the main persona
+    let nicknameUpdateSuccess = false;
+    const attemptedGuildNicknameSync =
+      Boolean(interaction.guild) && selectedPersona.is_alter !== true;
+    if (attemptedGuildNicknameSync && interaction.guild) {
+      try {
+        const botMember = await interaction.guild.members.fetchMe();
+        if (botMember) {
+          await botMember.setNickname(newNickname);
+          nicknameUpdateSuccess = true;
+          log.success(
+            `Successfully updated bot nickname to '${newNickname}' in guild ${interaction.guild.id}`,
+          );
+        }
+      } catch (nicknameError) {
+        // Log the error but don't fail the entire command
+        await log.warn(
+          `Failed to update bot's server nickname in guild ${interaction.guild.id} (permissions issue or API error): ${(nicknameError as Error).message}`,
+        );
+      }
+    }
+
+    // 13. Invalidate cache so next message gets fresh config
+    invalidateTomoriStateCache(serverDiscId);
+
+    // 14. Success! Show the nickname change
+    await replyInfoEmbed(modalSubmitInteraction, locale, {
+      titleKey: "commands.config.rename.success_title",
+      descriptionKey: nicknameUpdateSuccess
+        ? triggerUpdateNeeded
+          ? "commands.config.rename.success_with_trigger_and_discord_description"
+          : "commands.config.rename.success_with_discord_description"
+        : triggerUpdateNeeded
+          ? "commands.config.rename.success_with_trigger_description"
+          : "commands.config.rename.success_description",
+      descriptionVars: {
+        old_nickname: oldNickname,
+        new_nickname: newNickname,
+      },
+      color: ColorCode.SUCCESS,
+      footerKey:
+        attemptedGuildNicknameSync && !nicknameUpdateSuccess
+          ? "commands.config.rename.nickname_update_failed_footer"
+          : undefined,
+    });
+  } catch (error) {
+    const errorReplyInteraction = modalSubmitInteraction ?? interaction;
+
+    if (isUniqueViolation(error)) {
+      await replyInfoEmbed(errorReplyInteraction, locale, {
+        titleKey: "commands.persona.name_conflict_title",
+        descriptionKey: "commands.persona.name_conflict_description",
+        descriptionVars: {
+          name:
+            attemptedNickname?.trim() ??
+            modalResult?.values?.[NEW_NAME_INPUT_ID] ??
+            "",
+        },
+        color: ColorCode.ERROR,
+      });
+      return;
+    }
+
+    // 15. Log error with context
+    const context: ErrorContext = {
+      userId: userData.user_id,
+      serverId: selectedPersona?.server_id ?? null,
+      tomoriId: selectedPersona?.tomori_id ?? null,
+      errorType: "CommandExecutionError",
+      metadata: {
+        command: "config rename",
+        guildId: serverDiscId,
+        executorDiscordId: interaction.user.id,
+        selectedPersonaId: selectedPersona?.tomori_id ?? null,
+        nicknameAttempted: attemptedNickname,
+      },
+    };
+    await log.error(
+      `Error executing /config rename for user ${userData.user_disc_id}`,
+      error as Error,
+      context,
+    );
+
+    // 16. Inform user of unknown error
+    await replyInfoEmbed(errorReplyInteraction, locale, {
+      titleKey: "general.errors.unknown_error_title",
+      descriptionKey: "general.errors.unknown_error_description",
+      color: ColorCode.ERROR,
+      flags: MessageFlags.Ephemeral,
+    });
+  }
+}

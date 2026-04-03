@@ -32,3 +32,12 @@ def test_tools_refresh_command_exists():
     source = _read("discord_bot/cogs/tools_admin.py")
     assert '@tools_group.command(\n        name="refresh"' in source
 
+
+def test_tools_clear_guild_recency_command_exists():
+    source = _read("discord_bot/cogs/tools_admin.py")
+    assert 'name="clear-guild-recency"' in source
+
+
+def test_slash_forget_no_long_term_choice():
+    source = _read("discord_bot/cogs/memories.py")
+    assert 'app_commands.Choice(name="long_term", value="long_term")' not in source

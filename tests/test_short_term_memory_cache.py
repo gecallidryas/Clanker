@@ -9,8 +9,11 @@ from utils.short_term_memory_cache import (
     ShortTermMessage,
     clear_short_term_memory_for_channel,
     clear_short_term_memory_for_user,
+    clear_guild_recency_summary,
+    get_guild_recency_summary,
     get_short_term_memory_for_channel,
     get_short_term_memories_for_user,
+    store_guild_recency_summary,
     store_short_term_memory,
     update_short_term_memory_summary,
 )
@@ -41,3 +44,10 @@ def test_clear_helpers():
     assert removed_channel >= 1
     removed_user = clear_short_term_memory_for_user(3)
     assert removed_user >= 1
+
+
+def test_guild_recency_summary_helpers():
+    store_guild_recency_summary(server_id=999, summary="Guild-wide handoff")
+    assert get_guild_recency_summary(999) == "Guild-wide handoff"
+    assert clear_guild_recency_summary(999) is True
+    assert get_guild_recency_summary(999) is None

@@ -10,6 +10,7 @@ Version: 1.0.0
 
 import os
 import asyncio
+from contextlib import nullcontext
 from pathlib import Path
 import discord
 from discord.ext import commands
@@ -17,9 +18,11 @@ from dotenv import load_dotenv
 
 from utils.logger import get_logger, log_startup, log_error, log_command
 from utils.db_handler import increment_stat
+from utils.expression_cache import ExpressionService
 from modes import validate_mode_registry, resolve_mode_key
 from utils.emoji_manager import EmojiManager
 from utils.activity_rotator import ActivityRotator, is_activity_rotator_enabled
+from utils.runtime_guard import RuntimeInstanceGuard
 
 BASE_DIR = Path(__file__).resolve().parent
 ENV_PATH = BASE_DIR / ".env"
@@ -35,6 +38,8 @@ for env_path in ENV_OVERRIDE_PATHS:
 load_dotenv(ENV_PATH, override=False)
 
 COG_PACKAGE = "cogs"
+RUNTIME_GUARD_DISABLE_ENV = "FEMMY_DISABLE_RUNTIME_GUARD"
+RUNTIME_GUARD_PATH_ENV = "FEMMY_RUNTIME_GUARD_PATH"
 
 def _require_env(name: str) -> str:
     value = os.getenv(name)
@@ -44,6 +49,17 @@ def _require_env(name: str) -> str:
         f"Missing required environment variable: {name}. "
         f"Set it in your environment, {ENV_PATH}, or one of: {', '.join(str(p) for p in ENV_OVERRIDE_PATHS)}"
     )
+
+
+def _resolve_runtime_guard_path() -> Path:
+    configured = os.getenv(RUNTIME_GUARD_PATH_ENV)
+    if configured:
+        return Path(configured)
+    return BASE_DIR / "femmy.runtime.lock"
+
+
+def _runtime_guard_disabled() -> bool:
+    return str(os.getenv(RUNTIME_GUARD_DISABLE_ENV, "")).lower() in {"1", "true", "yes", "on"}
 
 
 # Bot configuration
@@ -93,9 +109,11 @@ class Femmy(commands.Bot):
             help_command=None  # Use custom help in utilities.py
         )
         self.add_check(self._guild_only_check)
+        self.expression_service = ExpressionService(self)
         self.emoji_manager = EmojiManager(self)
         self._activity_task: asyncio.Task | None = None
         self._activity_rotator: ActivityRotator | None = None
+        self._app_expression_refresh_task: asyncio.Task | None = None
 
     async def _guild_only_check(self, ctx: commands.Context) -> bool:
         if ctx.guild is None:
@@ -161,9 +179,10 @@ class Femmy(commands.Bot):
                 logger.warning("Failed to init DB for guild %s: %s", guild.id, e)
 
         try:
+            await self.expression_service.get_application_snapshot(force_refresh=True)
             await self.emoji_manager.validate_emojis()
             logger.info(
-                "Validated %s emoji rules and %s general emojis",
+                "Validated %s contextual emojis and %s general emojis",
                 len(self.emoji_manager._validated_emojis),
                 len(self.emoji_manager._validated_general),
             )
@@ -176,6 +195,8 @@ class Femmy(commands.Bot):
         else:
             activity = discord.Game(name="Clanking with humans")
             await self.change_presence(activity=activity)
+        if not self._app_expression_refresh_task or self._app_expression_refresh_task.done():
+            self._app_expression_refresh_task = asyncio.create_task(self._run_app_expression_refresh())
 
     async def _run_activity_rotator(self) -> None:
         if not self._activity_rotator:
@@ -189,6 +210,15 @@ class Femmy(commands.Bot):
             except Exception as exc:
                 logger.warning("Activity rotator failed to update presence: %s", exc)
             await asyncio.sleep(self._activity_rotator.interval_seconds)
+
+    async def _run_app_expression_refresh(self) -> None:
+        while not self.is_closed():
+            try:
+                await self.expression_service.refresh_application_emojis(background_refresh=True)
+                await self.emoji_manager.validate_emojis()
+            except Exception as exc:
+                logger.warning("Application emoji background refresh failed: %s", exc)
+            await asyncio.sleep(self.expression_service.app_ttl_seconds)
 
     async def on_guild_join(self, guild: discord.Guild):
         """Initialize new guild data and set the server avatar to the guild icon."""
@@ -228,6 +258,23 @@ class Femmy(commands.Bot):
 
         if not success:
             logger.warning("Guild avatar update failed for %s: %s", guild.id, reason)
+
+    async def on_guild_emojis_update(self, guild: discord.Guild, _before, _after):
+        try:
+            await self.expression_service.refresh_guild_snapshot(guild)
+        except Exception as exc:
+            logger.warning("Guild emoji sync failed for %s: %s", guild.id, exc)
+
+    async def on_guild_stickers_update(self, guild: discord.Guild, _before, _after):
+        try:
+            await self.expression_service.refresh_guild_snapshot(guild)
+        except Exception as exc:
+            logger.warning("Guild sticker sync failed for %s: %s", guild.id, exc)
+
+    async def on_resumed(self):
+        self.expression_service.mark_all_guilds_suspect()
+        self.expression_service.mark_application_stale()
+        return await super().on_resumed()
 
     async def on_interaction(self, interaction: discord.Interaction):
         """Block application commands in DMs (works even without tree.check support)."""
@@ -308,13 +355,20 @@ async def sync_command(ctx: commands.Context):
 async def main():
     """Main entry point for the bot."""
     log_startup()
-    bot = Femmy()
-    
-    # Register the standalone !sync command
-    bot.add_command(sync_command)
-    
-    async with bot:
-        await bot.start(DISCORD_TOKEN)
+    guard_context = nullcontext()
+    if _runtime_guard_disabled():
+        logger.warning("Runtime guard disabled via %s", RUNTIME_GUARD_DISABLE_ENV)
+    else:
+        guard_context = RuntimeInstanceGuard(_resolve_runtime_guard_path()).claim()
+
+    with guard_context:
+        bot = Femmy()
+
+        # Register the standalone !sync command
+        bot.add_command(sync_command)
+
+        async with bot:
+            await bot.start(DISCORD_TOKEN)
 
 
 if __name__ == "__main__":

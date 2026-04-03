@@ -3,6 +3,7 @@ import re
 from pathlib import Path
 from typing import Dict, List
 
+from utils.expression_cache import get_expression_service
 from utils.app_emojis import format_custom_emoji, get_application_emojis
 from utils.logger import get_logger
 
@@ -14,6 +15,38 @@ _EMOJI_IN_TEXT_PATTERN = re.compile(r"<a?:[A-Za-z0-9_]+:\d+>")
 _SHORTCODE_PATTERN = re.compile(r"(?<!<a)(?<!<):([A-Za-z0-9_]+):")
 _DANGLING_SHORTCODE_PATTERN = re.compile(r"(?<!<a)(?<!<):([A-Za-z0-9_]+)(?=$|[\s.,!?;)\]\}])")
 _SHORTCODE_IN_TEXT_PATTERN = re.compile(r"(?<!<a)(?<!<):[A-Za-z0-9_]+:")
+_WORD_PATTERN = re.compile(r"[a-z0-9']+")
+_CAMEL_CASE_PATTERN = re.compile(r"([a-z])([A-Z])")
+
+_SIGNAL_KEYWORDS = {
+    "celebratory": ("celebrate", "celebrating", "success", "win", "won", "victory", "hype", "excited", "yay", "woo", "lets go", "did it", "finally"),
+    "positive": ("good", "great", "nice", "adorable", "cute", "lovely", "sweet", "happy", "glad", "fun"),
+    "affectionate": ("love", "loving", "heart", "hearts", "darling", "sweetheart", "affectionate", "warm", "kiss"),
+    "playful": ("playful", "cute", "cat", "hehe", "lol", "lmao", "goofy", "silly", "peek", "adorable"),
+    "teasing": ("teasing", "tease", "smug", "sassy", "cheeky", "brat"),
+    "annoyed": ("annoyed", "annoying", "rude", "hostile", "angry", "mad", "watch your tone", "stop", "enough", "pout"),
+    "confused": ("confused", "huh", "what", "wait", "erm", "uh", "hmm", "excuse me"),
+    "shocked": ("shocked", "surprised", "surprise", "no way", "omg", "wtf", "wild", "insane"),
+    "flirty": ("flirty", "horny", "sexy", "kiss", "make out", "bed", "suggestive"),
+    "sad": ("sad", "cry", "crying", "upset", "lonely", "sorry", "hurt"),
+    "supportive": ("support", "supportive", "proud", "you got this", "its okay", "it's okay", "there for you", "take care", "comfort"),
+    "serious": ("setting", "settings", "channel", "role", "threshold", "policy", "admin", "configure", "configured", "updated", "database", "command", "rule", "moderation"),
+}
+
+_DEFAULT_SIGNAL_WEIGHTS = {
+    "celebratory": 0.0,
+    "positive": 0.0,
+    "affectionate": 0.0,
+    "playful": 0.0,
+    "teasing": 0.0,
+    "annoyed": 0.0,
+    "confused": 0.0,
+    "shocked": 0.0,
+    "flirty": 0.0,
+    "sad": 0.0,
+    "supportive": 0.0,
+    "serious": 0.0,
+}
 
 
 class EmojiManager:
@@ -22,6 +55,7 @@ class EmojiManager:
         self.config = self._load_config()
         self._validated_emojis: Dict[str, str] = {}
         self._validated_general: List[str] = []
+        self._validated_snapshot_version: int = 0
 
     def _load_config(self) -> dict:
         config_path = Path(__file__).resolve().parent.parent / "data" / "emoji_config.json"
@@ -40,7 +74,14 @@ class EmojiManager:
         self._validated_emojis = {}
         self._validated_general = []
 
-        emojis = await get_application_emojis(self.bot)
+        service = get_expression_service(self.bot)
+        if service is not None:
+            snapshot = await service.get_application_snapshot()
+            emojis = snapshot.of_kind("emoji")
+            self._validated_snapshot_version = snapshot.snapshot_version
+        else:
+            emojis = await get_application_emojis(self.bot)
+            self._validated_snapshot_version = 0
         emoji_by_id = {str(getattr(emoji, "id", "")): emoji for emoji in emojis if getattr(emoji, "id", None)}
 
         for name, data in self.config.get("emojis", {}).items():
@@ -73,6 +114,232 @@ class EmojiManager:
     def get_emoji(self, name: str) -> str:
         """Get emoji string by name."""
         return self._validated_emojis.get(name, "")
+
+    def _normalize_words(self, text: str) -> list[str]:
+        if not text:
+            return []
+        compact = _CAMEL_CASE_PATTERN.sub(r"\1 \2", text.replace("_", " ").replace("-", " "))
+        return _WORD_PATTERN.findall(compact.lower())
+
+    def _signal_weights_for_text(self, text: str, *, weight: float = 1.0) -> Dict[str, float]:
+        lowered = (text or "").lower()
+        weights = dict(_DEFAULT_SIGNAL_WEIGHTS)
+
+        for signal, keywords in _SIGNAL_KEYWORDS.items():
+            for keyword in keywords:
+                if " " in keyword:
+                    if keyword in lowered:
+                        weights[signal] += weight
+                else:
+                    if re.search(r"\b" + re.escape(keyword) + r"\b", lowered):
+                        weights[signal] += weight
+
+        exclamations = lowered.count("!")
+        questions = lowered.count("?")
+        if exclamations:
+            weights["celebratory"] += min(exclamations, 2) * 0.35 * weight
+            weights["playful"] += min(exclamations, 2) * 0.2 * weight
+        if questions >= 2:
+            weights["confused"] += 0.8 * weight
+            weights["shocked"] += 0.4 * weight
+
+        return weights
+
+    def _merge_signal_weights(self, *sets: Dict[str, float]) -> Dict[str, float]:
+        merged = dict(_DEFAULT_SIGNAL_WEIGHTS)
+        for signal_set in sets:
+            for signal, value in signal_set.items():
+                merged[signal] = merged.get(signal, 0.0) + value
+        return merged
+
+    def _infer_candidate_signals(self, name: str, usage: str) -> Dict[str, float]:
+        basis = " ".join(part for part in [name, usage] if part).strip()
+        weights = self._signal_weights_for_text(basis, weight=1.0)
+
+        words = self._normalize_words(name)
+        for word in words:
+            if word in {"cat", "cute", "peek"}:
+                weights["playful"] += 0.6
+                weights["positive"] += 0.3
+            if word in {"smirk", "smug"}:
+                weights["teasing"] += 0.5
+            if word in {"annoyed", "pout"}:
+                weights["annoyed"] += 0.7
+            if word in {"heart", "love", "kiss"}:
+                weights["affectionate"] += 0.7
+
+        return weights
+
+    def _build_context_weights(self, response_text: str, user_text: str) -> Dict[str, float]:
+        response_weights = self._signal_weights_for_text(response_text, weight=1.1)
+        user_weights = self._signal_weights_for_text(user_text, weight=0.8)
+        merged = self._merge_signal_weights(response_weights, user_weights)
+
+        lowered_user = (user_text or "").lower()
+        lowered_response = (response_text or "").lower()
+        if re.search(r"\b(femmy|yumi)\b", lowered_user) and re.search(r"\b(cute|adorable|hehe|lol|silly)\b", lowered_response):
+            merged["playful"] += 1.1
+            merged["positive"] += 0.5
+
+        return merged
+
+    def _iter_contextual_candidates(
+        self,
+        mode: str,
+        affection: int = 0,
+        evil_mode: bool = False,
+    ) -> list[dict[str, object]]:
+        candidates: list[dict[str, object]] = []
+        available = self.get_available_emojis(mode, affection, evil_mode)
+
+        for name, info in available.items():
+            token = info.get("emoji", "")
+            usage = info.get("usage", "")
+            if not token:
+                continue
+            candidates.append(
+                {
+                    "name": name,
+                    "token": token,
+                    "usage": usage,
+                    "signals": self._infer_candidate_signals(name, usage),
+                }
+            )
+
+        for token in self._validated_general:
+            match = _EMOJI_NAME_PATTERN.match(token)
+            if not match:
+                continue
+            name = match.group(1)
+            candidates.append(
+                {
+                    "name": name,
+                    "token": token,
+                    "usage": name,
+                    "signals": self._infer_candidate_signals(name, name),
+                }
+            )
+
+        return candidates
+
+    def _score_candidate(
+        self,
+        candidate: dict[str, object],
+        context_weights: Dict[str, float],
+    ) -> float:
+        candidate_weights = candidate.get("signals", {})
+        if not isinstance(candidate_weights, dict):
+            return 0.0
+
+        score = 0.0
+        for signal, value in candidate_weights.items():
+            score += context_weights.get(signal, 0.0) * float(value)
+
+        if context_weights.get("serious", 0.0) >= 1.5 and context_weights.get("celebratory", 0.0) < 1.0:
+            score -= 1.5
+        if context_weights.get("annoyed", 0.0) >= 1.0 and candidate_weights.get("positive", 0.0) >= 0.8:
+            score -= 1.0
+        if context_weights.get("positive", 0.0) >= 1.0 and candidate_weights.get("annoyed", 0.0) >= 0.8:
+            score -= 0.8
+
+        return score
+
+    def pick_contextual_emoji(
+        self,
+        response_text: str,
+        user_text: str,
+        mode: str,
+        affection: int = 0,
+        evil_mode: bool = False,
+    ) -> str:
+        if not response_text:
+            return ""
+
+        context_weights = self._build_context_weights(response_text, user_text)
+        expressive_weight = (
+            context_weights.get("celebratory", 0.0)
+            + context_weights.get("positive", 0.0)
+            + context_weights.get("affectionate", 0.0)
+            + context_weights.get("playful", 0.0)
+            + context_weights.get("teasing", 0.0)
+            + context_weights.get("annoyed", 0.0)
+            + context_weights.get("confused", 0.0)
+            + context_weights.get("shocked", 0.0)
+            + context_weights.get("flirty", 0.0)
+            + context_weights.get("sad", 0.0)
+            + context_weights.get("supportive", 0.0)
+        )
+        if context_weights.get("serious", 0.0) >= 1.5 and expressive_weight < 1.8:
+            return ""
+
+        candidates = self._iter_contextual_candidates(mode, affection, evil_mode)
+        if not candidates:
+            return ""
+
+        scored: list[tuple[float, str]] = []
+        for candidate in candidates:
+            token = str(candidate.get("token", "") or "")
+            if not token:
+                continue
+            score = self._score_candidate(candidate, context_weights)
+            scored.append((score, token))
+
+        if not scored:
+            return ""
+
+        scored.sort(key=lambda item: item[0], reverse=True)
+        top_score, top_token = scored[0]
+        next_score = scored[1][0] if len(scored) > 1 else 0.0
+
+        if top_score < 1.6:
+            return ""
+        if top_score - next_score < 0.2 and top_score < 2.3:
+            return ""
+        return top_token
+
+    def strip_known_shortcodes(self, text: str) -> str:
+        if not text:
+            return text
+        lookup = self._build_shortcode_lookup()
+        if not lookup:
+            return text
+
+        known_names = {name.lower() for name in lookup.keys()}
+
+        def _replace_shortcode(match: re.Match) -> str:
+            name = match.group(1).lower()
+            return "" if name in known_names else match.group(0)
+
+        cleaned = _SHORTCODE_PATTERN.sub(_replace_shortcode, text)
+        cleaned = _DANGLING_SHORTCODE_PATTERN.sub(_replace_shortcode, cleaned)
+        cleaned = re.sub(r"\s{2,}", " ", cleaned)
+        cleaned = re.sub(r"\s+([.,!?;:])", r"\1", cleaned)
+        return cleaned.strip()
+
+    def append_contextual_emoji(
+        self,
+        response_text: str,
+        user_text: str,
+        mode: str,
+        affection: int = 0,
+        evil_mode: bool = False,
+    ) -> str:
+        if not response_text:
+            return response_text
+
+        if _EMOJI_IN_TEXT_PATTERN.search(response_text):
+            return response_text
+
+        token = self.pick_contextual_emoji(
+            response_text=response_text,
+            user_text=user_text,
+            mode=mode,
+            affection=affection,
+            evil_mode=evil_mode,
+        )
+        if not token:
+            return response_text
+        return response_text.rstrip() + " " + token
 
     def get_available_emojis(
         self,

@@ -26,6 +26,7 @@ from utils.app_emojis import (
     get_application_emojis,
 )
 from utils.db_handler import (
+    add_guild_config_audit,
     get_server_mode,
     set_server_mode,
     get_evil_mode,
@@ -43,6 +44,11 @@ from utils.db_handler import (
 from utils.guild_ai import generate_guild_gemini_text, GuildConfigError
 from utils.logger import get_logger
 from utils.server_profile import set_custom_profile, set_mode_profile, set_member_nickname
+from utils.persona_panel_ui import (
+    MANAGE_GUIDANCE,
+    activate_persona_mode,
+    set_persona_evil_mode,
+)
 from modes import get_mode_profile, get_all_modes, resolve_mode_key
 
 logger = get_logger(__name__)
@@ -210,6 +216,108 @@ class Social(commands.Cog):
         except Exception as exc:
             logger.warning("Failed to update server avatar for %s: %s", mode_key, exc)
 
+    async def _log_persona_presentation_audit(
+        self,
+        guild_id: int,
+        user_id: int,
+        *,
+        action: str,
+        summary: str,
+        detail: dict | None = None,
+        target_id: str | None = None,
+    ) -> None:
+        await add_guild_config_audit(
+            guild_id,
+            user_id,
+            action,
+            category="persona_presentation",
+            target_type="persona_mode",
+            target_id=target_id,
+            summary=summary,
+            detail=detail,
+        )
+
+    async def apply_mode_selection(
+        self,
+        guild: discord.Guild,
+        actor: discord.abc.User,
+        mode_name: str | None,
+    ) -> tuple[bool, str]:
+        locked_mode = os.getenv("BOT_MODE", "").lower()
+        if locked_mode in ("femboy", "tsundere", "oneesan"):
+            return (
+                False,
+                "Mode switching is disabled for this bot instance.\n"
+                f"This bot is locked to **{locked_mode}** mode.",
+            )
+
+        requested_name = (mode_name or "").strip().lower()
+        if not requested_name:
+            return False, "No mode provided."
+
+        target_mode = resolve_mode_key(requested_name)
+        custom_persona = None
+        if not target_mode:
+            custom_persona = await self._resolve_custom_persona(guild.id, requested_name)
+            if custom_persona:
+                target_mode = custom_persona.get("mode_key")
+
+        if not target_mode:
+            return False, f"Unknown mode: `{requested_name}`"
+
+        current_mode = await get_server_mode(guild.id)
+        if current_mode == target_mode:
+            if custom_persona:
+                return True, f"Already in **{custom_persona.get('name', 'custom')}** mode!"
+            profile = get_mode_profile(target_mode)
+            mode_icon = await self._get_mode_icon(target_mode)
+            prefix = f"{mode_icon} " if mode_icon else ""
+            return True, f"{prefix}Already in **{profile.display_name}** mode!"
+
+        await activate_persona_mode(
+            bot=self.bot,
+            guild_id=guild.id,
+            user_id=actor.id,
+            mode_key=target_mode,
+        )
+
+        if custom_persona:
+            target_name = custom_persona.get("name", "custom")
+            message = f"Mode changed to **{target_name}**!"
+        else:
+            profile = get_mode_profile(target_mode)
+            mode_icon = await self._get_mode_icon(target_mode)
+            prefix = f"{mode_icon} " if mode_icon else ""
+            target_name = profile.display_name
+            message = f"{prefix}{profile.switch_message}"
+        return True, message
+
+    async def apply_evil_mode_change(
+        self,
+        guild: discord.Guild,
+        actor: discord.abc.User,
+        state: bool | None,
+    ) -> tuple[bool, str]:
+        current_mode = await get_server_mode(guild.id)
+        if current_mode == "mode_default":
+            await set_evil_mode(guild.id, False)
+            return True, "Evil Mode is disabled in default mode."
+
+        if state is None:
+            current = await get_evil_mode(guild.id)
+            status = "ENABLED" if current else "DISABLED"
+            return True, f"Evil Mode is currently **{status}**."
+
+        await set_persona_evil_mode(
+            bot=self.bot,
+            guild_id=guild.id,
+            user_id=actor.id,
+            enabled=state,
+        )
+        if state:
+            return True, "Evil Mode ENABLED. Responses will now use uncensored models (Venice/Hermes)."
+        return True, "Evil Mode DISABLED. Returning to standard safety protocols."
+
     def _is_mention_only(self, message: discord.Message) -> bool:
         """Return True when the message only mentions the bot."""
         content = message.content
@@ -265,24 +373,34 @@ class Social(commands.Cog):
         current_mode = await get_server_mode(ctx.guild.id)
         if current_mode == "mode_default":
             await set_evil_mode(ctx.guild.id, False)
-            await ctx.send("Evil Mode is disabled in default mode.")
+            await ctx.send(f"Evil Mode is disabled in default mode. {MANAGE_GUIDANCE}")
             return
 
         if not state:
             current = await get_evil_mode(ctx.guild.id)
             status = "ENABLED" if current else "DISABLED"
-            await ctx.send(f"😈 Evil Mode is currently **{status}**.")
+            await ctx.send(f"😈 Evil Mode is currently **{status}**. {MANAGE_GUIDANCE}")
             return
 
         state = state.lower()
         if state in ["on", "enable", "true", "yes"]:
-            await set_evil_mode(ctx.guild.id, True)
-            await ctx.send("😈 Evil Mode ENABLED. Responses will now use uncensored models (Venice/Hermes).")
+            await set_persona_evil_mode(
+                bot=self.bot,
+                guild_id=ctx.guild.id,
+                user_id=ctx.author.id,
+                enabled=True,
+            )
+            await ctx.send(f"😈 Evil Mode ENABLED. Responses will now use uncensored models (Venice/Hermes). {MANAGE_GUIDANCE}")
         elif state in ["off", "disable", "false", "no"]:
-            await set_evil_mode(ctx.guild.id, False)
-            await ctx.send("😇 Evil Mode DISABLED. Returning to standard safety protocols.")
+            await set_persona_evil_mode(
+                bot=self.bot,
+                guild_id=ctx.guild.id,
+                user_id=ctx.author.id,
+                enabled=False,
+            )
+            await ctx.send(f"😇 Evil Mode DISABLED. Returning to standard safety protocols. {MANAGE_GUIDANCE}")
         else:
-            await ctx.send("Usage: `!evil on` or `!evil off`")
+            await ctx.send(f"Usage: `!evil on` or `!evil off` {MANAGE_GUIDANCE}")
 
     @app_commands.command(name="evil", description="Toggle uncensored (evil) mode.")
     @app_commands.checks.has_permissions(manage_guild=True)
@@ -295,28 +413,76 @@ class Social(commands.Cog):
         current_mode = await get_server_mode(interaction.guild.id)
         if current_mode == "mode_default":
             await set_evil_mode(interaction.guild.id, False)
-            await interaction.response.send_message("Evil Mode is disabled in default mode.", ephemeral=True)
+            await interaction.response.send_message(
+                f"Evil Mode is disabled in default mode. {MANAGE_GUIDANCE}",
+                ephemeral=True,
+            )
             return
 
         if not state:
             current = await get_evil_mode(interaction.guild.id)
             status = "ENABLED" if current else "DISABLED"
-            await interaction.response.send_message(f"😈 Evil Mode is currently **{status}**.")
+            await interaction.response.send_message(f"😈 Evil Mode is currently **{status}**. {MANAGE_GUIDANCE}")
             return
 
         state = state.lower()
         if state in ["on", "enable", "true", "yes"]:
-            await set_evil_mode(interaction.guild.id, True)
+            await set_persona_evil_mode(
+                bot=self.bot,
+                guild_id=interaction.guild.id,
+                user_id=interaction.user.id,
+                enabled=True,
+            )
             await interaction.response.send_message(
-                "😈 Evil Mode ENABLED. Responses will now use uncensored models (Venice/Hermes)."
+                f"😈 Evil Mode ENABLED. Responses will now use uncensored models (Venice/Hermes). {MANAGE_GUIDANCE}"
             )
         elif state in ["off", "disable", "false", "no"]:
-            await set_evil_mode(interaction.guild.id, False)
+            await set_persona_evil_mode(
+                bot=self.bot,
+                guild_id=interaction.guild.id,
+                user_id=interaction.user.id,
+                enabled=False,
+            )
             await interaction.response.send_message(
-                "😇 Evil Mode DISABLED. Returning to standard safety protocols."
+                f"😇 Evil Mode DISABLED. Returning to standard safety protocols. {MANAGE_GUIDANCE}"
             )
         else:
-            await interaction.response.send_message("Usage: `/evil on` or `/evil off`", ephemeral=True)
+            await interaction.response.send_message(
+                f"Usage: `/evil on` or `/evil off` {MANAGE_GUIDANCE}",
+                ephemeral=True,
+            )
+
+    @app_commands.command(name="evil", description="Toggle uncensored (evil) mode.")
+    @app_commands.checks.has_permissions(manage_guild=True)
+    @app_commands.describe(state="on/off")
+    async def toggle_evil_mode_slash(self, interaction: discord.Interaction, state: str = None):
+        if not interaction.guild:
+            await interaction.response.send_message("Use this command in a server.", ephemeral=True)
+            return
+
+        normalized_state = None
+        if state:
+            lowered = state.lower().strip()
+            if lowered in ["on", "enable", "true", "yes"]:
+                normalized_state = True
+            elif lowered in ["off", "disable", "false", "no"]:
+                normalized_state = False
+            else:
+                await interaction.response.send_message(
+                    "Usage: `/evil on` or `/evil off`\nUse `/persona manage` for the primary persona and presentation panel.",
+                    ephemeral=True,
+                )
+                return
+
+        _, message = await self.apply_evil_mode_change(
+            interaction.guild,
+            interaction.user,
+            normalized_state,
+        )
+        await interaction.response.send_message(
+            f"{message}\nUse `/persona manage` for the primary persona and presentation panel.",
+            ephemeral=True,
+        )
 
     @commands.command(name="mode")
     @commands.has_permissions(manage_guild=True)
@@ -327,65 +493,15 @@ class Social(commands.Cog):
         Args:
             mode_name: Personality mode (femboy, tsundere, oneesan)
         """
-        # Check if mode is locked via environment
-        locked_mode = os.getenv("BOT_MODE", "").lower()
-        if locked_mode in ("femboy", "tsundere", "oneesan"):
-            await ctx.send(
-                "Mode switching is disabled for this bot instance.\n"
-                f"This bot is locked to **{locked_mode}** mode."
-            )
-            return
-
         if not mode_name:
             await self.show_modes(ctx)
             return
 
-        # Normalize mode name
-        mode_name = mode_name.lower().strip()
-        target_mode = resolve_mode_key(mode_name)
-        custom_persona = None
-
-        if not target_mode:
-            custom_persona = await self._resolve_custom_persona(ctx.guild.id, mode_name)
-            if custom_persona:
-                target_mode = custom_persona.get("mode_key")
-
-        if not target_mode:
-            await ctx.send(
-                f"Unknown mode: `{mode_name}`\n"
-                "Use `!modes` to see available options!"
-            )
+        ok, message = await self.apply_mode_selection(ctx.guild, ctx.author, mode_name)
+        if not ok:
+            await ctx.send(f"{message}\nUse `!modes` to see available options.")
             return
-
-        # Check if already in this mode
-        current_mode = await get_server_mode(ctx.guild.id)
-        if current_mode == target_mode:
-            if custom_persona:
-                await ctx.send(f"Already in **{custom_persona.get('name', 'custom')}** mode!")
-                return
-            profile = get_mode_profile(target_mode)
-            mode_icon = await self._get_mode_icon(target_mode)
-            prefix = f"{mode_icon} " if mode_icon else ""
-            await ctx.send(f"{prefix}Already in **{profile.display_name}** mode!")
-            return
-
-        left_custom = current_mode.startswith("custom_") and not target_mode.startswith("custom_")
-        if left_custom:
-            await set_guild_avatar_path(ctx.guild.id, None)
-
-        # Switch mode
-        await set_server_mode(ctx.guild.id, target_mode)
-        if target_mode == "mode_default":
-            await set_evil_mode(ctx.guild.id, False)
-
-        if custom_persona:
-            await ctx.send(f"Mode changed to **{custom_persona.get('name', 'custom')}**!")
-        else:
-            profile = get_mode_profile(target_mode)
-            mode_icon = await self._get_mode_icon(target_mode)
-            prefix = f"{mode_icon} " if mode_icon else ""
-            await ctx.send(f"{prefix}{profile.switch_message}")
-        await self._apply_mode_profile_updates(ctx.guild.id, target_mode, custom_persona)
+        await ctx.send(f"{message}\nUse `/persona manage` for the primary persona and presentation panel.")
 
     @app_commands.command(name="mode", description="Switch the bot's personality mode.")
     @app_commands.checks.has_permissions(manage_guild=True)
@@ -395,64 +511,32 @@ class Social(commands.Cog):
             await interaction.response.send_message("Use this command in a server.", ephemeral=True)
             return
 
-        locked_mode = os.getenv("BOT_MODE", "").lower()
-        if locked_mode in ("femboy", "tsundere", "oneesan"):
+        _, message = await self.apply_mode_selection(interaction.guild, interaction.user, mode)
+        await interaction.response.send_message(
+            f"{message}\nUse `/persona manage` for the primary persona and presentation panel.",
+            ephemeral=True,
+        )
+
+    @app_commands.command(name="mode", description="Switch the bot's personality mode.")
+    @app_commands.checks.has_permissions(manage_guild=True)
+    @app_commands.describe(mode="Personality mode")
+    async def switch_mode_slash(self, interaction: discord.Interaction, mode: str):
+        if not interaction.guild:
+            await interaction.response.send_message("Use this command in a server.", ephemeral=True)
+            return
+
+        ok, message = await self.apply_mode_selection(interaction.guild, interaction.user, mode)
+        if not ok:
             await interaction.response.send_message(
-                "Mode switching is disabled for this bot instance.\n"
-                f"This bot is locked to **{locked_mode}** mode.",
+                f"{message}\nUse `/modes` to see available options!",
                 ephemeral=True,
             )
             return
 
-        mode_name = (mode or "").lower().strip()
-        target_mode = resolve_mode_key(mode_name)
-        custom_persona = None
-
-        if not target_mode:
-            custom_persona = await self._resolve_custom_persona(interaction.guild.id, mode_name)
-            if custom_persona:
-                target_mode = custom_persona.get("mode_key")
-
-        if not target_mode:
-            await interaction.response.send_message(
-                f"Unknown mode: `{mode_name}`\n"
-                "Use `/modes` to see available options!",
-                ephemeral=True,
-            )
-            return
-
-        current_mode = await get_server_mode(interaction.guild.id)
-        if current_mode == target_mode:
-            if custom_persona:
-                await interaction.response.send_message(
-                    f"Already in **{custom_persona.get('name', 'custom')}** mode!"
-                )
-                return
-            profile = get_mode_profile(target_mode)
-            mode_icon = await self._get_mode_icon(target_mode)
-            prefix = f"{mode_icon} " if mode_icon else ""
-            await interaction.response.send_message(
-                f"{prefix}Already in **{profile.display_name}** mode!"
-            )
-            return
-
-        left_custom = current_mode.startswith("custom_") and not target_mode.startswith("custom_")
-        if left_custom:
-            await set_guild_avatar_path(interaction.guild.id, None)
-
-        await set_server_mode(interaction.guild.id, target_mode)
-        if target_mode == "mode_default":
-            await set_evil_mode(interaction.guild.id, False)
-        if custom_persona:
-            await interaction.response.send_message(
-                f"Mode changed to **{custom_persona.get('name', 'custom')}**!"
-            )
-        else:
-            profile = get_mode_profile(target_mode)
-            mode_icon = await self._get_mode_icon(target_mode)
-            prefix = f"{mode_icon} " if mode_icon else ""
-            await interaction.response.send_message(f"{prefix}{profile.switch_message}")
-        await self._apply_mode_profile_updates(interaction.guild.id, target_mode, custom_persona)
+        await interaction.response.send_message(
+            f"{message}\nUse `/persona manage` for the primary persona and presentation panel.",
+            ephemeral=True,
+        )
 
     @switch_mode_slash.autocomplete("mode")
     async def mode_autocomplete(

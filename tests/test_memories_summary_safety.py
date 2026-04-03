@@ -13,7 +13,11 @@ from cogs.memories import Memories  # noqa: E402
 class _FakeCtx:
     def __init__(self):
         self.guild = SimpleNamespace(id=1)
-        self.author = SimpleNamespace(id=10, display_name="Author")
+        self.author = SimpleNamespace(
+            id=10,
+            display_name="Author",
+            guild_permissions=SimpleNamespace(manage_guild=False),
+        )
         self.messages: list[str] = []
 
     async def send(self, message: str):
@@ -57,13 +61,14 @@ def test_prefix_remember_does_not_delete_when_summary_item_invalid():
         cog = Memories(bot=None)
         cog._summarize_facts = AsyncMock(return_value=["valid summary", " "])
         ctx = _FakeCtx()
-        target = SimpleNamespace(id=99, display_name="Target")
+        target = SimpleNamespace(id=ctx.author.id, display_name="Target")
         delete_mock = AsyncMock()
         add_mock = AsyncMock()
 
         with (
             patch("cogs.memories.create_user", new=AsyncMock()),
-            patch("cogs.memories.get_facts", new=AsyncMock(return_value=["old fact"])),
+            patch("cogs.memories.get_personal_memory_opt_out", new=AsyncMock(return_value=False)),
+            patch("cogs.memories.get_personal_memories", new=AsyncMock(return_value=["old fact"])),
             patch("cogs.memories.delete_facts", new=delete_mock),
             patch("cogs.memories.add_fact", new=add_mock),
         ):
@@ -86,7 +91,8 @@ def test_slash_remember_does_not_delete_when_summary_item_invalid():
 
         with (
             patch("cogs.memories.create_user", new=AsyncMock()),
-            patch("cogs.memories.get_facts", new=AsyncMock(return_value=["old fact"])),
+            patch("cogs.memories.get_personal_memory_opt_out", new=AsyncMock(return_value=False)),
+            patch("cogs.memories.get_personal_memories", new=AsyncMock(return_value=["old fact"])),
             patch("cogs.memories.delete_facts", new=delete_mock),
             patch("cogs.memories.add_fact", new=add_mock),
         ):

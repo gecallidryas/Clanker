@@ -1,0 +1,37 @@
+{
+	"version": 1,
+	"families": {
+		"deepseek_v3_r1": {
+			"repo": "deepseek-ai/DeepSeek-R1",
+			"files": ["tokenizer.json", "tokenizer_config.json"]
+		},
+		"gemma3": {
+			"repo": "google/gemma-3-4b-pt",
+			"files": ["tokenizer.json", "tokenizer.model", "tokenizer_config.json"]
+		},
+		"glm_zai": {
+			"repo": "zai-org/GLM-4.7",
+			"files": ["tokenizer.json", "tokenizer_config.json"]
+		},
+		"kimi_k2": {
+			"repo": "moonshotai/Kimi-K2-Instruct",
+			"files": ["tiktoken.model", "tokenizer_config.json", "config.json"]
+		},
+		"mistral_small3": {
+			"repo": "mistralai/Mistral-Small-3.1-24B-Instruct-2503",
+			"files": ["tekken.json", "config.json"]
+		},
+		"nemotron3": {
+			"repo": "nvidia/NVIDIA-Nemotron-3-Nano-30B-A3B-BF16",
+			"files": ["tokenizer.json", "special_tokens_map.json", "tokenizer_config.json"]
+		},
+		"qwen3_5": {
+			"repo": "Qwen/Qwen3.5-27B",
+			"files": ["tokenizer.json", "tokenizer_config.json"]
+		},
+		"stepfun_step35": {
+			"repo": "stepfun-ai/Step-3.5-Flash",
+			"files": ["tokenizer.json", "tokenizer_config.json"]
+		}
+	}
+}

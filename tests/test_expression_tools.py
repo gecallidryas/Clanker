@@ -27,8 +27,11 @@ class ExpressionToolsTests(unittest.IsolatedAsyncioTestCase):
         guild = mock.Mock()
         guild.get_channel.return_value = DummyChannel()
         guild.emojis = []
+        bot = mock.Mock()
+        bot.expression_service = mock.Mock()
+        bot.expression_service.refresh_guild_snapshot = mock.AsyncMock()
         return ToolContext(
-            bot=object(),
+            bot=bot,
             guild=guild,
             channel=DummyChannel(),
             user=mock.Mock(),
@@ -41,18 +44,33 @@ class ExpressionToolsTests(unittest.IsolatedAsyncioTestCase):
         context = self._make_context()
         sticker = mock.Mock(name="sticker")
         sticker.name = "cool"
+        sticker.id = 123
         with mock.patch.object(expression_tools, "pick_sticker", return_value=sticker):
             result = await expression_tools._handle_select_sticker(context, {"query": "cool"})
 
         self.assertTrue(result.ok)
 
-    async def test_react_with_emoji(self):
+    async def test_react_with_emoji_retries_after_refresh(self):
         context = self._make_context()
         channel = DummyChannel()
         context.channel = channel
         context.guild.get_channel.return_value = channel
 
-        with mock.patch.object(expression_tools, "pick_emoji", return_value="🙂"), \
+        first = mock.Mock()
+        first.name = "smile"
+        first.id = 555
+        first.animated = False
+        second = mock.Mock()
+        second.name = "smile"
+        second.id = 777
+        second.animated = True
+        http_error = expression_tools.discord.HTTPException(
+            mock.Mock(status=400, reason="bad"),
+            "bad request",
+        )
+        channel._message.add_reaction.side_effect = [http_error, None]
+
+        with mock.patch.object(expression_tools, "pick_emoji", side_effect=[first, second]), \
             mock.patch.object(expression_tools.discord, "TextChannel", DummyChannel):
             result = await expression_tools._handle_react_with_emoji(
                 context,
@@ -60,6 +78,8 @@ class ExpressionToolsTests(unittest.IsolatedAsyncioTestCase):
             )
 
         self.assertTrue(result.ok)
+        context.bot.expression_service.refresh_guild_snapshot.assert_awaited_once()
+        self.assertEqual(channel._message.add_reaction.await_count, 2)
 
 
 if __name__ == "__main__":
