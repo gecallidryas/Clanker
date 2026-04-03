@@ -16,3 +16,8 @@ class ToolContext:
     message: Optional[discord.Message]
     guild_config: dict[str, Any]
     locale: str = "en"
+    request_id: Optional[str] = None
+    turn_id: Optional[str] = None
+    provider_name: Optional[str] = None
+    model_name: Optional[str] = None
+    debug_mode: bool = False

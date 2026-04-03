@@ -28,3 +28,6 @@ class ModeRegistryTests(unittest.TestCase):
         self.assertTrue(profile.evil_prompt_file)
         self.assertTrue(profile.display_name)
         self.assertTrue(profile.description)
+
+    def test_unknown_mode_returns_none(self):
+        self.assertIsNone(resolve_mode_key("custom_123_missing"))

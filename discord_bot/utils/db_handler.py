@@ -19,13 +19,19 @@ Usage:
 import os
 import json
 import re
+import inspect
 from pathlib import Path
 import aiosqlite
-from typing import Optional, List, Dict, Any, Set
+from typing import Optional, List, Dict, Any, Set, Iterable
 from datetime import datetime, timezone, timedelta, date
 from contextlib import asynccontextmanager
 
 from utils.logger import get_logger
+from utils.admin_panel_logic import (
+    deserialize_audit_detail,
+    normalize_audit_category,
+    normalize_audit_detail,
+)
 from utils.memory_limits import (
     get_memory_limit_error_message,
     validate_attribute_content,
@@ -64,6 +70,24 @@ logger = get_logger(__name__)
 
 _initialized_guilds: Set[int] = set()
 _global_initialized = False
+_memory_backfill_completed: Set[int] = set()
+
+EXPRESSION_SCOPE_GUILD = "guild"
+EXPRESSION_SCOPE_APPLICATION = "application"
+EXPRESSION_KIND_EMOJI = "emoji"
+EXPRESSION_KIND_STICKER = "sticker"
+EXPRESSION_PRUNE_RETENTION_DAYS = 7
+
+
+PERSONAL_MEMORY_CONFIRMED_STATUSES = ("confirmed", "admin_override")
+SHORT_TERM_DEFAULT_TTL_HOURS = int(os.getenv("SHORT_TERM_MEMORY_SUMMARY_TTL_HOURS", "24"))
+DUAL_WRITE_LEGACY_MEMORY = str(os.getenv("DUAL_WRITE_LEGACY_MEMORY", "1")).lower() in {"1", "true", "yes", "on"}
+BUILTIN_PERSONA_MODES = {
+    "mode_default",
+    "mode_femboy",
+    "mode_tsundere",
+    "mode_oneesan",
+}
 
 
 def get_guild_db_path(guild_id: int) -> str:
@@ -73,22 +97,43 @@ def get_guild_db_path(guild_id: int) -> str:
 @asynccontextmanager
 async def guild_db(guild_id: int):
     await _ensure_guild_db(guild_id)
-    async with aiosqlite.connect(get_guild_db_path(guild_id)) as db:
+    async with _sqlite_connect(get_guild_db_path(guild_id)) as db:
         yield db
 
 
 @asynccontextmanager
 async def global_db():
     await _ensure_global_db()
-    async with aiosqlite.connect(GLOBAL_DATABASE_PATH) as db:
+    async with _sqlite_connect(GLOBAL_DATABASE_PATH) as db:
         yield db
+
+
+@asynccontextmanager
+async def _sqlite_connect(path: str):
+    connection = aiosqlite.connect(path)
+    if hasattr(connection, "__aenter__"):
+        async with connection as db:
+            yield db
+        return
+
+    if inspect.isawaitable(connection):
+        db = await connection
+        try:
+            yield db
+        finally:
+            close_result = db.close()
+            if inspect.isawaitable(close_result):
+                await close_result
+        return
+
+    raise TypeError("aiosqlite.connect returned an unsupported connection object")
 
 
 async def _ensure_global_db() -> None:
     global _global_initialized
     if _global_initialized:
         return
-    async with aiosqlite.connect(GLOBAL_DATABASE_PATH) as db:
+    async with _sqlite_connect(GLOBAL_DATABASE_PATH) as db:
         await db.execute("""
             CREATE TABLE IF NOT EXISTS bot_stats (
                 id INTEGER PRIMARY KEY CHECK (id = 1),
@@ -116,13 +161,15 @@ async def _ensure_global_db() -> None:
         await db.execute("""
             INSERT OR IGNORE INTO bot_stats (id, start_time) VALUES (1, ?)
         """, (datetime.now(),))
+        await _init_expression_catalog_schema(db)
+        await _init_tooling_global_schema(db)
         await db.commit()
     _global_initialized = True
 
 
 async def _register_guild(guild_id: int) -> None:
     await _ensure_global_db()
-    async with aiosqlite.connect(GLOBAL_DATABASE_PATH) as db:
+    async with _sqlite_connect(GLOBAL_DATABASE_PATH) as db:
         await db.execute(
             "INSERT OR IGNORE INTO guild_registry (guild_id) VALUES (?)",
             (guild_id,),
@@ -136,10 +183,12 @@ async def _ensure_guild_db(guild_id: int) -> None:
     await _ensure_global_db()
     await _register_guild(guild_id)
 
-    async with aiosqlite.connect(get_guild_db_path(guild_id)) as db:
+    async with _sqlite_connect(get_guild_db_path(guild_id)) as db:
         await _init_guild_schema(db)
+        await _backfill_memory_tables(db, guild_id)
         await db.commit()
     _initialized_guilds.add(guild_id)
+    _memory_backfill_completed.add(guild_id)
 
 
 async def init_db() -> None:
@@ -150,24 +199,583 @@ async def init_db() -> None:
     await _ensure_global_db()
 
 
+async def _init_tooling_global_schema(db: aiosqlite.Connection) -> None:
+    await db.execute(
+        """
+        CREATE TABLE IF NOT EXISTS tool_policy_rules (
+            id INTEGER PRIMARY KEY AUTOINCREMENT,
+            scope_type TEXT NOT NULL,
+            guild_id INTEGER NOT NULL DEFAULT 0,
+            subject_type TEXT NOT NULL,
+            subject_id TEXT NOT NULL,
+            policy_mode TEXT NOT NULL,
+            note TEXT,
+            metadata_json TEXT,
+            created_by INTEGER,
+            updated_by INTEGER,
+            created_at TIMESTAMP DEFAULT CURRENT_TIMESTAMP,
+            updated_at TIMESTAMP DEFAULT CURRENT_TIMESTAMP,
+            UNIQUE(scope_type, guild_id, subject_type, subject_id)
+        )
+        """
+    )
+    await db.execute(
+        """
+        CREATE TABLE IF NOT EXISTS tool_policy_audit (
+            id INTEGER PRIMARY KEY AUTOINCREMENT,
+            scope_type TEXT NOT NULL,
+            guild_id INTEGER NOT NULL DEFAULT 0,
+            subject_type TEXT NOT NULL,
+            subject_id TEXT NOT NULL,
+            policy_mode TEXT,
+            actor_id INTEGER,
+            note TEXT,
+            metadata_json TEXT,
+            action TEXT NOT NULL,
+            created_at TIMESTAMP DEFAULT CURRENT_TIMESTAMP
+        )
+        """
+    )
+    await db.execute(
+        """
+        CREATE TABLE IF NOT EXISTS tool_execution_log (
+            id INTEGER PRIMARY KEY AUTOINCREMENT,
+            guild_id INTEGER NOT NULL DEFAULT 0,
+            channel_id INTEGER,
+            user_id INTEGER,
+            provider TEXT,
+            model TEXT,
+            tool_name TEXT,
+            tool_source_type TEXT,
+            invocation_mode TEXT NOT NULL,
+            decision_outcome TEXT NOT NULL,
+            execution_outcome TEXT NOT NULL,
+            latency_ms INTEGER,
+            timestamp TIMESTAMP DEFAULT CURRENT_TIMESTAMP,
+            error_category TEXT,
+            request_id TEXT,
+            turn_id TEXT,
+            tool_id TEXT,
+            category TEXT,
+            reason_codes_json TEXT,
+            args_summary_json TEXT,
+            result_summary_json TEXT,
+            debug_capture_id INTEGER
+        )
+        """
+    )
+    await db.execute(
+        """
+        CREATE TABLE IF NOT EXISTS tool_debug_capture (
+            id INTEGER PRIMARY KEY AUTOINCREMENT,
+            guild_id INTEGER NOT NULL DEFAULT 0,
+            tool_id TEXT,
+            tool_name TEXT,
+            raw_args_json TEXT,
+            raw_result_json TEXT,
+            created_at TIMESTAMP DEFAULT CURRENT_TIMESTAMP,
+            expires_at TEXT
+        )
+        """
+    )
+    await db.execute(
+        """
+        CREATE TABLE IF NOT EXISTS tool_debug_capture_settings (
+            guild_id INTEGER PRIMARY KEY,
+            enabled_by INTEGER,
+            note TEXT,
+            expires_at TEXT NOT NULL,
+            updated_at TIMESTAMP DEFAULT CURRENT_TIMESTAMP
+        )
+        """
+    )
+    await db.execute(
+        """
+        CREATE TABLE IF NOT EXISTS tool_quarantine_policy (
+            category TEXT PRIMARY KEY,
+            failure_threshold INTEGER NOT NULL,
+            quarantine_minutes INTEGER NOT NULL,
+            updated_by INTEGER,
+            note TEXT,
+            updated_at TIMESTAMP DEFAULT CURRENT_TIMESTAMP
+        )
+        """
+    )
+    await db.execute(
+        """
+        CREATE TABLE IF NOT EXISTS tool_quarantine_state (
+            guild_id INTEGER NOT NULL,
+            tool_id TEXT NOT NULL,
+            category TEXT NOT NULL,
+            failure_count INTEGER NOT NULL DEFAULT 0,
+            quarantined_until TEXT,
+            quarantine_reason TEXT,
+            last_failure_at TEXT,
+            updated_at TIMESTAMP DEFAULT CURRENT_TIMESTAMP,
+            PRIMARY KEY (guild_id, tool_id)
+        )
+        """
+    )
+    await db.execute(
+        """
+        CREATE TABLE IF NOT EXISTS mcp_server_registrations (
+            id INTEGER PRIMARY KEY AUTOINCREMENT,
+            scope_type TEXT NOT NULL,
+            guild_id INTEGER NOT NULL DEFAULT 0,
+            server_slug TEXT NOT NULL,
+            transport_type TEXT NOT NULL,
+            command_json TEXT NOT NULL,
+            env_json TEXT,
+            trusted INTEGER NOT NULL DEFAULT 0,
+            enabled INTEGER NOT NULL DEFAULT 1,
+            note TEXT,
+            created_by INTEGER,
+            updated_by INTEGER,
+            created_at TIMESTAMP DEFAULT CURRENT_TIMESTAMP,
+            updated_at TIMESTAMP DEFAULT CURRENT_TIMESTAMP,
+            UNIQUE(scope_type, guild_id, server_slug)
+        )
+        """
+    )
+    await db.execute(
+        """
+        CREATE TABLE IF NOT EXISTS mcp_discovered_tools (
+            id INTEGER PRIMARY KEY AUTOINCREMENT,
+            scope_type TEXT NOT NULL,
+            guild_id INTEGER NOT NULL DEFAULT 0,
+            server_slug TEXT NOT NULL,
+            remote_tool_name TEXT NOT NULL,
+            public_name TEXT,
+            display_name TEXT,
+            description TEXT,
+            input_schema_json TEXT,
+            category TEXT DEFAULT 'uncategorized',
+            approved INTEGER NOT NULL DEFAULT 0,
+            approved_by INTEGER,
+            approved_at TEXT,
+            discovered_at TIMESTAMP DEFAULT CURRENT_TIMESTAMP,
+            last_seen_at TIMESTAMP DEFAULT CURRENT_TIMESTAMP,
+            UNIQUE(scope_type, guild_id, server_slug, remote_tool_name)
+        )
+        """
+    )
+    await db.execute(
+        """
+        CREATE TABLE IF NOT EXISTS mcp_server_health (
+            scope_type TEXT NOT NULL,
+            guild_id INTEGER NOT NULL DEFAULT 0,
+            server_slug TEXT NOT NULL,
+            last_discovery_status TEXT,
+            last_discovery_error TEXT,
+            last_discovery_at TEXT,
+            last_call_status TEXT,
+            last_call_error TEXT,
+            last_call_at TEXT,
+            cooldown_until TEXT,
+            PRIMARY KEY (scope_type, guild_id, server_slug)
+        )
+        """
+    )
+    async with db.execute("PRAGMA table_info(tool_debug_capture)") as cursor:
+        columns = {row[1] for row in await cursor.fetchall()}
+    if "expires_at" not in columns:
+        await db.execute("ALTER TABLE tool_debug_capture ADD COLUMN expires_at TEXT")
+
+
 async def init_guild_db(guild_id: int) -> None:
     """Initialize a specific guild database."""
     await _ensure_guild_db(guild_id)
 
 
+def _normalize_expression_scope(scope_type: str) -> str:
+    normalized = (scope_type or "").strip().lower()
+    if normalized not in {EXPRESSION_SCOPE_GUILD, EXPRESSION_SCOPE_APPLICATION}:
+        raise ValueError(f"Unsupported expression scope_type: {scope_type}")
+    return normalized
+
+
+@asynccontextmanager
+async def expression_db(scope_type: str, scope_id: int):
+    scope = _normalize_expression_scope(scope_type)
+    if scope == EXPRESSION_SCOPE_GUILD:
+        async with guild_db(int(scope_id)) as db:
+            yield db
+        return
+    async with global_db() as db:
+        yield db
+
+
+async def get_expression_sync_state(scope_type: str, scope_id: int) -> Dict[str, Any]:
+    scope = _normalize_expression_scope(scope_type)
+    async with expression_db(scope, scope_id) as db:
+        db.row_factory = aiosqlite.Row
+        async with db.execute(
+            """
+            SELECT scope_type, scope_id, last_sync_at, last_background_refresh_at, item_count, snapshot_version
+            FROM expression_sync_state
+            WHERE scope_type = ? AND scope_id = ?
+            """,
+            (scope, int(scope_id)),
+        ) as cursor:
+            row = await cursor.fetchone()
+            if not row:
+                return {
+                    "scope_type": scope,
+                    "scope_id": int(scope_id),
+                    "last_sync_at": None,
+                    "last_background_refresh_at": None,
+                    "item_count": 0,
+                    "snapshot_version": 0,
+                }
+            return dict(row)
+
+
+async def list_expressions(
+    scope_type: str,
+    scope_id: int,
+    *,
+    include_unavailable: bool = False,
+    kind: Optional[str] = None,
+) -> List[Dict[str, Any]]:
+    scope = _normalize_expression_scope(scope_type)
+    clauses = ["e.scope_type = ?", "e.scope_id = ?"]
+    params: List[Any] = [scope, int(scope_id)]
+    if not include_unavailable:
+        clauses.append("e.available = 1")
+    if kind:
+        clauses.append("e.kind = ?")
+        params.append(kind)
+
+    async with expression_db(scope, scope_id) as db:
+        db.row_factory = aiosqlite.Row
+        async with db.execute(
+            f"""
+            SELECT
+                e.*,
+                o.admin_description,
+                o.admin_tags_json,
+                o.updated_by AS override_updated_by,
+                o.updated_at AS override_updated_at
+            FROM expressions e
+            LEFT JOIN expression_metadata_overrides o ON o.expression_id = e.id
+            WHERE {' AND '.join(clauses)}
+            ORDER BY e.kind ASC, e.source ASC, e.normalized_name ASC, e.discord_expression_id ASC
+            """,
+            params,
+        ) as cursor:
+            return [dict(row) for row in await cursor.fetchall()]
+
+
+async def has_persisted_expressions(
+    scope_type: str,
+    scope_id: int,
+    *,
+    kind: Optional[str] = None,
+) -> bool:
+    rows = await list_expressions(scope_type, scope_id, include_unavailable=True, kind=kind)
+    return bool(rows)
+
+
+async def upsert_expression_catalog(
+    scope_type: str,
+    scope_id: int,
+    expressions: List[Dict[str, Any]],
+    *,
+    managed_kinds: Optional[Iterable[str]] = None,
+    background_refresh: bool = False,
+    synced_at: Optional[datetime] = None,
+) -> Dict[str, Any]:
+    scope = _normalize_expression_scope(scope_type)
+    synced_at = synced_at or _utcnow()
+    now_iso = synced_at.isoformat()
+    normalized_scope_id = int(scope_id)
+    managed_kind_values = tuple(
+        kind_value for kind_value in (managed_kinds or {item.get("kind") for item in expressions}) if kind_value
+    )
+
+    incoming: Dict[tuple[str, str], Dict[str, Any]] = {}
+    for item in expressions:
+        kind_value = str(item.get("kind") or "").strip().lower()
+        discord_expression_id = str(item.get("discord_expression_id") or "").strip()
+        if not kind_value or not discord_expression_id:
+            continue
+        payload = dict(item)
+        payload["scope_type"] = scope
+        payload["scope_id"] = normalized_scope_id
+        payload["kind"] = kind_value
+        payload["discord_expression_id"] = discord_expression_id
+        payload["normalized_name"] = str(payload.get("normalized_name") or payload.get("name") or "").strip().lower()
+        payload["animated"] = int(bool(payload.get("animated"))) if payload.get("animated") is not None else None
+        payload["available"] = 1
+        payload["discord_description"] = payload.get("discord_description")
+        incoming[(kind_value, discord_expression_id)] = payload
+
+    async with expression_db(scope, scope_id) as db:
+        db.row_factory = aiosqlite.Row
+
+        sync_row: Optional[Dict[str, Any]] = None
+        async with db.execute(
+            """
+            SELECT scope_type, scope_id, last_sync_at, last_background_refresh_at, item_count, snapshot_version
+            FROM expression_sync_state
+            WHERE scope_type = ? AND scope_id = ?
+            """,
+            (scope, normalized_scope_id),
+        ) as cursor:
+            row = await cursor.fetchone()
+            sync_row = dict(row) if row else None
+
+        clauses = ["scope_type = ?", "scope_id = ?"]
+        params: List[Any] = [scope, normalized_scope_id]
+        if managed_kind_values:
+            placeholders = ", ".join(["?"] * len(managed_kind_values))
+            clauses.append(f"kind IN ({placeholders})")
+            params.extend(list(managed_kind_values))
+
+        async with db.execute(
+            f"""
+            SELECT *
+            FROM expressions
+            WHERE {' AND '.join(clauses)}
+            """,
+            params,
+        ) as cursor:
+            existing_rows = [dict(row) for row in await cursor.fetchall()]
+
+        existing_by_key = {
+            (str(row.get("kind") or "").lower(), str(row.get("discord_expression_id") or "")): row
+            for row in existing_rows
+        }
+
+        changed = not sync_row
+        for key, payload in incoming.items():
+            existing = existing_by_key.get(key)
+            comparable = (
+                "name",
+                "normalized_name",
+                "source",
+                "animated",
+                "format_type",
+                "discord_description",
+            )
+            if not existing:
+                changed = True
+                continue
+            if int(existing.get("available") or 0) != 1 or existing.get("deleted_at"):
+                changed = True
+                continue
+            for field in comparable:
+                if (existing.get(field) or None) != (payload.get(field) or None):
+                    changed = True
+                    break
+
+        for key, existing in existing_by_key.items():
+            if key in incoming:
+                continue
+            if int(existing.get("available") or 0) != 0 or not existing.get("deleted_at"):
+                changed = True
+                break
+
+        current_version = int((sync_row or {}).get("snapshot_version") or 0)
+        snapshot_version = current_version + 1 if changed else current_version
+        if snapshot_version == 0 and (incoming or existing_rows or sync_row):
+            snapshot_version = 1
+
+        for key, payload in incoming.items():
+            existing = existing_by_key.get(key)
+            first_seen_at = existing.get("first_seen_at") if existing else now_iso
+            await db.execute(
+                """
+                INSERT INTO expressions (
+                    scope_type, scope_id, kind, source, discord_expression_id,
+                    name, normalized_name, animated, format_type, discord_description,
+                    available, snapshot_version, first_seen_at, last_seen_at, deleted_at
+                )
+                VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, 1, ?, ?, ?, NULL)
+                ON CONFLICT(scope_type, scope_id, kind, discord_expression_id) DO UPDATE SET
+                    source = excluded.source,
+                    name = excluded.name,
+                    normalized_name = excluded.normalized_name,
+                    animated = excluded.animated,
+                    format_type = excluded.format_type,
+                    discord_description = excluded.discord_description,
+                    available = 1,
+                    snapshot_version = excluded.snapshot_version,
+                    first_seen_at = COALESCE(expressions.first_seen_at, excluded.first_seen_at),
+                    last_seen_at = excluded.last_seen_at,
+                    deleted_at = NULL
+                """,
+                (
+                    scope,
+                    normalized_scope_id,
+                    payload["kind"],
+                    str(payload.get("source") or ""),
+                    payload["discord_expression_id"],
+                    str(payload.get("name") or ""),
+                    payload["normalized_name"],
+                    payload.get("animated"),
+                    payload.get("format_type"),
+                    payload.get("discord_description"),
+                    snapshot_version,
+                    first_seen_at,
+                    now_iso,
+                ),
+            )
+
+        for key, existing in existing_by_key.items():
+            if key in incoming:
+                continue
+            await db.execute(
+                """
+                UPDATE expressions
+                SET available = 0,
+                    snapshot_version = ?,
+                    last_seen_at = ?,
+                    deleted_at = COALESCE(deleted_at, ?)
+                WHERE id = ?
+                """,
+                (
+                    snapshot_version,
+                    now_iso,
+                    now_iso,
+                    existing["id"],
+                ),
+            )
+
+        last_background_refresh_at = now_iso if background_refresh else (sync_row or {}).get("last_background_refresh_at")
+        await db.execute(
+            """
+            INSERT INTO expression_sync_state (
+                scope_type, scope_id, last_sync_at, last_background_refresh_at, item_count, snapshot_version
+            )
+            VALUES (?, ?, ?, ?, ?, ?)
+            ON CONFLICT(scope_type, scope_id) DO UPDATE SET
+                last_sync_at = excluded.last_sync_at,
+                last_background_refresh_at = COALESCE(excluded.last_background_refresh_at, expression_sync_state.last_background_refresh_at),
+                item_count = excluded.item_count,
+                snapshot_version = excluded.snapshot_version
+            """,
+            (
+                scope,
+                normalized_scope_id,
+                now_iso,
+                last_background_refresh_at,
+                len(incoming),
+                snapshot_version,
+            ),
+        )
+        await db.commit()
+
+    return {
+        "scope_type": scope,
+        "scope_id": normalized_scope_id,
+        "item_count": len(incoming),
+        "snapshot_version": snapshot_version,
+        "changed": changed,
+        "last_sync_at": now_iso,
+        "last_background_refresh_at": last_background_refresh_at,
+    }
+
+
+async def prune_deleted_expressions(
+    scope_type: str,
+    scope_id: int,
+    *,
+    retention_days: int = EXPRESSION_PRUNE_RETENTION_DAYS,
+    now: Optional[datetime] = None,
+) -> int:
+    scope = _normalize_expression_scope(scope_type)
+    now = now or _utcnow()
+    cutoff = (now - timedelta(days=retention_days)).isoformat()
+    async with expression_db(scope, scope_id) as db:
+        cursor = await db.execute(
+            """
+            DELETE FROM expressions
+            WHERE scope_type = ? AND scope_id = ? AND available = 0 AND deleted_at IS NOT NULL AND deleted_at < ?
+            """,
+            (scope, int(scope_id), cutoff),
+        )
+        await db.commit()
+        return int(cursor.rowcount or 0)
+
+
 async def get_registered_guild_ids() -> List[int]:
     """Return all guild IDs that have registered a database."""
     await _ensure_global_db()
-    async with aiosqlite.connect(GLOBAL_DATABASE_PATH) as db:
+    async with _sqlite_connect(GLOBAL_DATABASE_PATH) as db:
         async with db.execute("SELECT guild_id FROM guild_registry") as cursor:
             rows = await cursor.fetchall()
             return [row[0] for row in rows]
+
+
+async def _init_expression_catalog_schema(db: aiosqlite.Connection) -> None:
+    await db.execute(
+        """
+        CREATE TABLE IF NOT EXISTS expressions (
+            id INTEGER PRIMARY KEY AUTOINCREMENT,
+            scope_type TEXT NOT NULL,
+            scope_id INTEGER NOT NULL,
+            kind TEXT NOT NULL,
+            source TEXT NOT NULL,
+            discord_expression_id TEXT NOT NULL,
+            name TEXT NOT NULL,
+            normalized_name TEXT NOT NULL,
+            animated INTEGER,
+            format_type INTEGER,
+            discord_description TEXT,
+            available INTEGER NOT NULL DEFAULT 1,
+            snapshot_version INTEGER NOT NULL DEFAULT 0,
+            first_seen_at TIMESTAMP NOT NULL,
+            last_seen_at TIMESTAMP NOT NULL,
+            deleted_at TIMESTAMP,
+            UNIQUE(scope_type, scope_id, kind, discord_expression_id)
+        )
+        """
+    )
+    await db.execute(
+        """
+        CREATE TABLE IF NOT EXISTS expression_metadata_overrides (
+            expression_id INTEGER PRIMARY KEY,
+            admin_description TEXT,
+            admin_tags_json TEXT,
+            updated_by INTEGER,
+            updated_at TIMESTAMP
+        )
+        """
+    )
+    await db.execute(
+        """
+        CREATE TABLE IF NOT EXISTS expression_sync_state (
+            scope_type TEXT NOT NULL,
+            scope_id INTEGER NOT NULL,
+            last_sync_at TIMESTAMP,
+            last_background_refresh_at TIMESTAMP,
+            item_count INTEGER NOT NULL DEFAULT 0,
+            snapshot_version INTEGER NOT NULL DEFAULT 0,
+            PRIMARY KEY (scope_type, scope_id)
+        )
+        """
+    )
+    await db.execute(
+        """
+        CREATE INDEX IF NOT EXISTS idx_expressions_scope_available
+        ON expressions(scope_type, scope_id, available, kind)
+        """
+    )
+    await db.execute(
+        """
+        CREATE INDEX IF NOT EXISTS idx_expressions_deleted_at
+        ON expressions(scope_type, scope_id, deleted_at)
+        """
+    )
 
 
 async def _init_guild_schema(db: aiosqlite.Connection) -> None:
     """
     Initialize the per-guild database schema and run migrations.
     """
+    await _init_expression_catalog_schema(db)
+
     # Users table (global registry within this guild DB)
     await db.execute("""
         CREATE TABLE IF NOT EXISTS users (
@@ -186,6 +794,9 @@ async def _init_guild_schema(db: aiosqlite.Connection) -> None:
             timezone TEXT DEFAULT 'UTC',
             birthday TEXT,
             personal_memory_opt_out INTEGER DEFAULT 0,
+            allow_mention_fact_lookup INTEGER DEFAULT 0,
+            personal_memory_export_enabled INTEGER DEFAULT 1,
+            privacy_updated_at TIMESTAMP,
             created_at TIMESTAMP DEFAULT CURRENT_TIMESTAMP,
             PRIMARY KEY (guild_id, user_id),
             FOREIGN KEY (user_id) REFERENCES users(user_id)
@@ -278,12 +889,32 @@ async def _init_guild_schema(db: aiosqlite.Connection) -> None:
             profile_peek_enabled INTEGER DEFAULT 0,
             rag_enabled INTEGER DEFAULT 1,
             gif_responses_enabled INTEGER DEFAULT 0,
+            reply_sequence_enabled INTEGER DEFAULT 0,
+            reply_sequence_timeout_seconds INTEGER DEFAULT 300,
+            reply_sequence_hard_max_stages INTEGER DEFAULT 4,
+            reply_sequence_allow_gif INTEGER DEFAULT 1,
+            reply_sequence_allow_sticker INTEGER DEFAULT 1,
+            reply_sequence_allow_emoji_only INTEGER DEFAULT 1,
             ai_reply_cooldown_seconds INTEGER DEFAULT 0,
             ai_reply_cooldown_type TEXT DEFAULT 'per_user',
             ai_channel_whitelist TEXT,
             ai_self_reply_limit INTEGER DEFAULT 3,
+            ai_multi_persona_enabled INTEGER DEFAULT 0,
+            ai_triggered_persona_limit INTEGER DEFAULT 1,
+            ai_active_personas TEXT,
+            ai_persona_webhooks_enabled INTEGER DEFAULT 1,
             ai_auto_channels TEXT,
             ai_auto_threshold INTEGER DEFAULT 0,
+            ai_streaming_enabled INTEGER DEFAULT 1,
+            ai_stream_min_flush_chars INTEGER DEFAULT 120,
+            ai_stream_stall_seconds REAL DEFAULT 2.0,
+            ai_stream_min_interval_seconds REAL DEFAULT 1.0,
+            ai_stream_max_messages INTEGER DEFAULT 6,
+            ai_stream_max_total_chars INTEGER DEFAULT 6000,
+            ai_stream_warmup_edit_window_seconds REAL DEFAULT 2.0,
+            ai_thought_channel_id INTEGER,
+            ai_thought_log_level TEXT DEFAULT 'off',
+            ai_thought_log_allow_mod_log INTEGER DEFAULT 0,
             url_safety_enabled INTEGER DEFAULT 0,
             url_allowlist TEXT,
             url_blocklist TEXT,
@@ -326,9 +957,14 @@ async def _init_guild_schema(db: aiosqlite.Connection) -> None:
             guild_id INTEGER NOT NULL,
             user_id INTEGER NOT NULL,
             action TEXT NOT NULL,
+            category TEXT,
             field TEXT,
+            target_type TEXT,
+            target_id TEXT,
             old_value TEXT,
             new_value TEXT,
+            summary TEXT,
+            detail_json TEXT,
             created_at TIMESTAMP DEFAULT CURRENT_TIMESTAMP
         )
     """)
@@ -596,12 +1232,32 @@ async def _init_guild_schema(db: aiosqlite.Connection) -> None:
             ("profile_peek_enabled", "INTEGER", 0),
             ("rag_enabled", "INTEGER", 1),
             ("gif_responses_enabled", "INTEGER", 0),
+            ("reply_sequence_enabled", "INTEGER", 0),
+            ("reply_sequence_timeout_seconds", "INTEGER", 300),
+            ("reply_sequence_hard_max_stages", "INTEGER", 4),
+            ("reply_sequence_allow_gif", "INTEGER", 1),
+            ("reply_sequence_allow_sticker", "INTEGER", 1),
+            ("reply_sequence_allow_emoji_only", "INTEGER", 1),
             ("ai_reply_cooldown_seconds", "INTEGER", 0),
             ("ai_reply_cooldown_type", "TEXT", "per_user"),
             ("ai_channel_whitelist", "TEXT", None),
             ("ai_self_reply_limit", "INTEGER", 3),
+            ("ai_multi_persona_enabled", "INTEGER", 0),
+            ("ai_triggered_persona_limit", "INTEGER", 1),
+            ("ai_active_personas", "TEXT", None),
+            ("ai_persona_webhooks_enabled", "INTEGER", 1),
             ("ai_auto_channels", "TEXT", None),
             ("ai_auto_threshold", "INTEGER", 0),
+            ("ai_streaming_enabled", "INTEGER", 1),
+            ("ai_stream_min_flush_chars", "INTEGER", 120),
+            ("ai_stream_stall_seconds", "REAL", 2.0),
+            ("ai_stream_min_interval_seconds", "REAL", 1.0),
+            ("ai_stream_max_messages", "INTEGER", 6),
+            ("ai_stream_max_total_chars", "INTEGER", 6000),
+            ("ai_stream_warmup_edit_window_seconds", "REAL", 2.0),
+            ("ai_thought_channel_id", "INTEGER", None),
+            ("ai_thought_log_level", "TEXT", "off"),
+            ("ai_thought_log_allow_mod_log", "INTEGER", 0),
             ("url_safety_enabled", "INTEGER", 0),
             ("url_allowlist", "TEXT", None),
             ("url_blocklist", "TEXT", None),
@@ -624,6 +1280,34 @@ async def _init_guild_schema(db: aiosqlite.Connection) -> None:
                 await db.execute(
                     f"ALTER TABLE guild_config ADD COLUMN {column_name} {column_type} DEFAULT {default_sql}"
                 )
+    except Exception:
+        pass
+
+    # Extend guild_config_audit with normalized category and detail fields.
+    try:
+        async with db.execute("PRAGMA table_info(guild_config_audit)") as cursor:
+            audit_columns = {row[1] for row in await cursor.fetchall()}
+        for column_name, column_type in [
+            ("category", "TEXT"),
+            ("target_type", "TEXT"),
+            ("target_id", "TEXT"),
+            ("summary", "TEXT"),
+            ("detail_json", "TEXT"),
+        ]:
+            if column_name in audit_columns:
+                continue
+            await db.execute(
+                f"ALTER TABLE guild_config_audit ADD COLUMN {column_name} {column_type}"
+            )
+        async with db.execute(
+            "SELECT id, action FROM guild_config_audit WHERE category IS NULL OR trim(category) = ''"
+        ) as cursor:
+            missing_categories = await cursor.fetchall()
+        for row_id, action in missing_categories:
+            await db.execute(
+                "UPDATE guild_config_audit SET category = ? WHERE id = ?",
+                (normalize_audit_category(None, action=action), row_id),
+            )
     except Exception:
         pass
 
@@ -654,6 +1338,18 @@ async def _init_guild_schema(db: aiosqlite.Connection) -> None:
     # Add personal memory opt-out to user_profiles if missing (migration)
     try:
         await db.execute("ALTER TABLE user_profiles ADD COLUMN personal_memory_opt_out INTEGER DEFAULT 0")
+    except Exception:
+        pass
+    try:
+        await db.execute("ALTER TABLE user_profiles ADD COLUMN allow_mention_fact_lookup INTEGER DEFAULT 0")
+    except Exception:
+        pass
+    try:
+        await db.execute("ALTER TABLE user_profiles ADD COLUMN personal_memory_export_enabled INTEGER DEFAULT 1")
+    except Exception:
+        pass
+    try:
+        await db.execute("ALTER TABLE user_profiles ADD COLUMN privacy_updated_at TIMESTAMP")
     except Exception:
         pass
 
@@ -698,6 +1394,79 @@ async def _init_guild_schema(db: aiosqlite.Connection) -> None:
             channel_id INTEGER NOT NULL,
             message_id INTEGER,
             expires_at TIMESTAMP NOT NULL,
+            created_at TIMESTAMP DEFAULT CURRENT_TIMESTAMP
+        )
+    """)
+
+    await db.execute("""
+        CREATE TABLE IF NOT EXISTS server_memories (
+            id INTEGER PRIMARY KEY AUTOINCREMENT,
+            guild_id INTEGER NOT NULL,
+            content TEXT NOT NULL,
+            category TEXT,
+            source TEXT DEFAULT 'manual',
+            created_by_user_id INTEGER,
+            created_at TIMESTAMP DEFAULT CURRENT_TIMESTAMP,
+            updated_at TIMESTAMP DEFAULT CURRENT_TIMESTAMP,
+            is_deleted INTEGER DEFAULT 0,
+            deleted_at TIMESTAMP,
+            deleted_by_user_id INTEGER,
+            legacy_fact_id INTEGER UNIQUE
+        )
+    """)
+
+    await db.execute("""
+        CREATE TABLE IF NOT EXISTS personal_memories (
+            id INTEGER PRIMARY KEY AUTOINCREMENT,
+            guild_id INTEGER NOT NULL,
+            user_id INTEGER NOT NULL,
+            content TEXT NOT NULL,
+            category TEXT,
+            source TEXT DEFAULT 'manual',
+            status TEXT DEFAULT 'confirmed',
+            created_by_user_id INTEGER,
+            confirmed_by_user_id INTEGER,
+            created_at TIMESTAMP DEFAULT CURRENT_TIMESTAMP,
+            updated_at TIMESTAMP DEFAULT CURRENT_TIMESTAMP,
+            is_deleted INTEGER DEFAULT 0,
+            deleted_at TIMESTAMP,
+            deleted_by_user_id INTEGER,
+            legacy_fact_id INTEGER UNIQUE
+        )
+    """)
+
+    await db.execute("""
+        CREATE TABLE IF NOT EXISTS short_term_memory (
+            id INTEGER PRIMARY KEY AUTOINCREMENT,
+            guild_id INTEGER NOT NULL,
+            channel_id INTEGER,
+            user_id INTEGER,
+            scope_kind TEXT NOT NULL,
+            memory_kind TEXT NOT NULL,
+            content TEXT NOT NULL,
+            source TEXT DEFAULT 'system',
+            source_message_id INTEGER,
+            created_by_user_id INTEGER,
+            created_at TIMESTAMP DEFAULT CURRENT_TIMESTAMP,
+            updated_at TIMESTAMP DEFAULT CURRENT_TIMESTAMP,
+            expires_at TIMESTAMP NOT NULL,
+            is_deleted INTEGER DEFAULT 0,
+            deleted_at TIMESTAMP,
+            deleted_by_user_id INTEGER,
+            legacy_fact_id INTEGER UNIQUE
+        )
+    """)
+
+    await db.execute("""
+        CREATE TABLE IF NOT EXISTS memory_operation_audit (
+            id INTEGER PRIMARY KEY AUTOINCREMENT,
+            guild_id INTEGER NOT NULL,
+            actor_user_id INTEGER NOT NULL,
+            target_user_id INTEGER,
+            memory_class TEXT NOT NULL,
+            operation_type TEXT NOT NULL,
+            record_ids TEXT,
+            detail_json TEXT,
             created_at TIMESTAMP DEFAULT CURRENT_TIMESTAMP
         )
     """)
@@ -794,6 +1563,164 @@ async def _init_guild_schema(db: aiosqlite.Connection) -> None:
             PRIMARY KEY (guild_id, channel_id)
         )
     """)
+
+
+def _legacy_short_term_channel_id(source: Optional[str]) -> Optional[int]:
+    if not source:
+        return None
+    match = re.search(rf"{SHORT_TERM_CHANNEL_TAG}(\d+)", source)
+    if not match:
+        return None
+    try:
+        return int(match.group(1))
+    except (TypeError, ValueError):
+        return None
+
+
+def _default_short_term_expiry(created_at: Optional[str]) -> str:
+    created = _parse_timestamp(created_at) or _utcnow()
+    return (created + timedelta(hours=SHORT_TERM_DEFAULT_TTL_HOURS)).isoformat()
+
+
+def _sort_memory_rows(rows: List[Dict[str, Any]]) -> List[Dict[str, Any]]:
+    def _key(row: Dict[str, Any]) -> tuple[str, str, int]:
+        return (
+            str(row.get("updated_at") or ""),
+            str(row.get("created_at") or ""),
+            int(row.get("id") or 0),
+        )
+
+    return sorted(rows, key=_key, reverse=True)
+
+
+def _merge_rows_with_legacy_fallback(
+    new_rows: List[Dict[str, Any]],
+    legacy_rows: List[Dict[str, Any]],
+    *,
+    limit: Optional[int] = None,
+) -> List[Dict[str, Any]]:
+    seen_legacy_ids = {
+        int(row["legacy_fact_id"])
+        for row in new_rows
+        if row.get("legacy_fact_id") is not None
+    }
+    merged = list(new_rows)
+    for row in legacy_rows:
+        legacy_id = row.get("legacy_fact_id")
+        if legacy_id is not None and int(legacy_id) in seen_legacy_ids:
+            continue
+        merged.append(row)
+    merged = _sort_memory_rows(merged)
+    if limit is not None:
+        return merged[:limit]
+    return merged
+
+
+async def _backfill_memory_tables(db: aiosqlite.Connection, guild_id: int) -> None:
+    if guild_id in _memory_backfill_completed:
+        return
+    db.row_factory = aiosqlite.Row
+    async with db.execute(
+        """
+        SELECT id, guild_id, user_id, fact, source, learned_from_user_id, memory_type, created_at
+        FROM user_facts
+        WHERE guild_id = ?
+        ORDER BY id ASC
+        """,
+        (guild_id,),
+    ) as cursor:
+        legacy_rows = await cursor.fetchall()
+
+    for row in legacy_rows:
+        memory_type = str(row["memory_type"] or "personal")
+        created_at = row["created_at"]
+        source = row["source"] or "manual"
+        learned_from = row["learned_from_user_id"]
+        if memory_type == "server" and int(row["user_id"]) == 0:
+            await db.execute(
+                """
+                INSERT OR IGNORE INTO server_memories
+                (guild_id, content, category, source, created_by_user_id, created_at, updated_at, legacy_fact_id)
+                VALUES (?, ?, NULL, ?, ?, ?, ?, ?)
+                """,
+                (guild_id, row["fact"], source, learned_from, created_at, created_at, row["id"]),
+            )
+            continue
+
+        if memory_type in {"personal", "long_term"}:
+            await db.execute(
+                """
+                INSERT OR IGNORE INTO personal_memories
+                (guild_id, user_id, content, category, source, status, created_by_user_id, confirmed_by_user_id,
+                 created_at, updated_at, legacy_fact_id)
+                VALUES (?, ?, ?, NULL, ?, 'confirmed', ?, ?, ?, ?, ?)
+                """,
+                (
+                    guild_id,
+                    row["user_id"],
+                    row["fact"],
+                    source,
+                    learned_from,
+                    row["user_id"],
+                    created_at,
+                    created_at,
+                    row["id"],
+                ),
+            )
+            continue
+
+        if memory_type == "short_term":
+            channel_id = _legacy_short_term_channel_id(source)
+            await db.execute(
+                """
+                INSERT OR IGNORE INTO short_term_memory
+                (guild_id, channel_id, user_id, scope_kind, memory_kind, content, source, created_by_user_id,
+                 created_at, updated_at, expires_at, legacy_fact_id)
+                VALUES (?, ?, ?, 'channel', 'observation', ?, ?, ?, ?, ?, ?, ?)
+                """,
+                (
+                    guild_id,
+                    channel_id,
+                    row["user_id"],
+                    row["fact"],
+                    source,
+                    learned_from,
+                    created_at,
+                    created_at,
+                    _default_short_term_expiry(created_at),
+                    row["id"],
+                ),
+            )
+
+
+async def _audit_memory_operation(
+    guild_id: int,
+    actor_user_id: int,
+    memory_class: str,
+    operation_type: str,
+    *,
+    target_user_id: Optional[int] = None,
+    record_ids: Optional[list[int]] = None,
+    detail: Optional[dict[str, Any]] = None,
+) -> None:
+    async with guild_db(guild_id) as db:
+        await db.execute(
+            """
+            INSERT INTO memory_operation_audit
+            (guild_id, actor_user_id, target_user_id, memory_class, operation_type, record_ids, detail_json)
+            VALUES (?, ?, ?, ?, ?, ?, ?)
+            """,
+            (
+                guild_id,
+                actor_user_id,
+                target_user_id,
+                memory_class,
+                operation_type,
+                json.dumps(record_ids or []),
+                json.dumps(detail or {}),
+            ),
+        )
+        await db.commit()
 
 async def get_user(guild_id: int, user_id: int) -> Optional[Dict[str, Any]]:
     """
@@ -944,16 +1871,14 @@ async def get_facts(
         - [ ] Add pagination for users with many facts
     """
     types = memory_types or ["personal"]
-    placeholders = ", ".join("?" for _ in types)
-    async with guild_db(guild_id) as db:
-        async with db.execute(
-            f"""SELECT fact FROM user_facts
-                WHERE guild_id = ? AND user_id = ? AND memory_type IN ({placeholders})
-                ORDER BY created_at DESC""",
-            (guild_id, user_id, *types),
-        ) as cursor:
-            rows = await cursor.fetchall()
-            return [row[0] for row in rows]
+    facts: list[str] = []
+    if any(memory_type in {"personal", "long_term"} for memory_type in types):
+        facts.extend(await get_personal_memories(guild_id, user_id))
+    if "short_term" in types:
+        facts.extend(await get_short_term_memories_for_user(guild_id, user_id))
+    if "server" in types and user_id == 0:
+        facts.extend(await get_server_memory(guild_id))
+    return facts
 
 
 async def delete_facts(
@@ -975,14 +1900,14 @@ async def delete_facts(
         - [ ] Add confirmation before deletion
     """
     types = memory_types or ["personal"]
-    placeholders = ", ".join("?" for _ in types)
-    async with guild_db(guild_id) as db:
-        cursor = await db.execute(
-            f"DELETE FROM user_facts WHERE guild_id = ? AND user_id = ? AND memory_type IN ({placeholders})",
-            (guild_id, user_id, *types),
-        )
-        await db.commit()
-        return cursor.rowcount
+    deleted = 0
+    if any(memory_type in {"personal", "long_term"} for memory_type in types):
+        deleted += await delete_all_personal_memories(guild_id, user_id)
+    if "short_term" in types:
+        deleted += await delete_short_term_memories_for_user(guild_id, user_id)
+    if "server" in types and user_id == 0:
+        deleted += await delete_all_server_memories(guild_id)
+    return deleted
 
 
 SHORT_TERM_CHANNEL_TAG = "short_term:channel:"
@@ -1003,13 +1928,15 @@ async def add_short_term_fact(
     learned_from_user_id: Optional[int] = None,
 ) -> int:
     """Store short-term memory scoped to a specific channel."""
-    return await add_fact_with_source(
+    return await add_short_term_memory(
         guild_id,
+        content=fact,
+        scope_kind="channel",
+        memory_kind="observation",
+        channel_id=channel_id,
         user_id=user_id,
-        fact=fact,
         source=build_short_term_source(channel_id, source=source),
-        learned_from_user_id=learned_from_user_id,
-        memory_type="short_term",
+        created_by_user_id=learned_from_user_id,
     )
 
 
@@ -1019,17 +1946,7 @@ async def get_short_term_facts_for_channel(
     channel_id: int,
 ) -> List[str]:
     """Return short-term memories that were learned in a specific channel."""
-    channel_pattern = f"%{SHORT_TERM_CHANNEL_TAG}{int(channel_id)}"
-    async with guild_db(guild_id) as db:
-        async with db.execute(
-            """SELECT fact FROM user_facts
-               WHERE guild_id = ? AND user_id = ? AND memory_type = 'short_term'
-                 AND source LIKE ?
-               ORDER BY created_at DESC""",
-            (guild_id, user_id, channel_pattern),
-        ) as cursor:
-            rows = await cursor.fetchall()
-            return [row[0] for row in rows]
+    return await get_short_term_memories_for_user(guild_id, user_id, channel_id=channel_id)
 
 
 async def delete_short_term_facts_for_channel(
@@ -1042,20 +1959,7 @@ async def delete_short_term_facts_for_channel(
 
     If user_id is provided, only that user's channel-scoped short-term memory is removed.
     """
-    channel_pattern = f"%{SHORT_TERM_CHANNEL_TAG}{int(channel_id)}"
-    query = (
-        "DELETE FROM user_facts WHERE guild_id = ? AND memory_type = 'short_term' "
-        "AND source LIKE ?"
-    )
-    params: list[Any] = [guild_id, channel_pattern]
-    if user_id is not None:
-        query += " AND user_id = ?"
-        params.append(user_id)
-
-    async with guild_db(guild_id) as db:
-        cursor = await db.execute(query, tuple(params))
-        await db.commit()
-        return cursor.rowcount
+    return await delete_short_term_memory_scope(guild_id, channel_id=channel_id, user_id=user_id)
 
 
 async def add_server_memory(
@@ -1065,19 +1969,18 @@ async def add_server_memory(
     learned_from_user_id: Optional[int] = None,
 ) -> int:
     """Store a server-scoped memory entry."""
-    return await add_fact_with_source(
+    return await add_server_memory_record(
         guild_id,
-        user_id=0,
-        fact=fact,
+        content=fact,
         source=source,
-        learned_from_user_id=learned_from_user_id,
-        memory_type="server",
+        created_by_user_id=learned_from_user_id,
     )
 
 
 async def get_server_memory(guild_id: int) -> List[str]:
     """Retrieve server-scoped memory entries."""
-    return await get_facts(guild_id, 0, memory_types=["server"])
+    records = await get_server_memory_records(guild_id)
+    return [str(record["content"]) for record in records]
 
 
 async def get_personal_memory_opt_out(guild_id: int, user_id: int) -> bool:
@@ -1095,10 +1998,12 @@ async def set_personal_memory_opt_out(guild_id: int, user_id: int, enabled: bool
     """Set or clear personal memory opt-out for a user."""
     async with guild_db(guild_id) as db:
         await db.execute(
-            """INSERT INTO user_profiles (guild_id, user_id, personal_memory_opt_out)
-               VALUES (?, ?, ?)
-               ON CONFLICT(guild_id, user_id) DO UPDATE SET personal_memory_opt_out = ?""",
-            (guild_id, user_id, int(enabled), int(enabled)),
+            """INSERT INTO user_profiles (guild_id, user_id, personal_memory_opt_out, privacy_updated_at)
+               VALUES (?, ?, ?, ?)
+               ON CONFLICT(guild_id, user_id) DO UPDATE SET
+                   personal_memory_opt_out = excluded.personal_memory_opt_out,
+                   privacy_updated_at = excluded.privacy_updated_at""",
+            (guild_id, user_id, int(enabled), _utcnow().isoformat()),
         )
         await db.commit()
 
@@ -1299,6 +2204,61 @@ async def set_server_mode(guild_id: int, mode: str) -> None:
                 updated_at = ?
         """, (guild_id, mode, datetime.now(), mode, datetime.now()))
         await db.commit()
+
+
+async def _sanitize_single_persona_mode(guild_id: int, mode_key: Optional[str]) -> Optional[str]:
+    if not mode_key:
+        return None
+    normalized = str(mode_key).strip()
+    if not normalized:
+        return None
+    if normalized in BUILTIN_PERSONA_MODES:
+        return normalized
+    if not normalized.startswith("custom_"):
+        return None
+    persona = await get_custom_persona_by_mode_key(guild_id, normalized)
+    return normalized if persona else None
+
+
+async def sanitize_active_persona_modes(guild_id: int, mode_keys: list[str]) -> list[str]:
+    sanitized: list[str] = []
+    seen: set[str] = set()
+
+    for mode_key in mode_keys:
+        normalized = await _sanitize_single_persona_mode(guild_id, mode_key)
+        if not normalized or normalized in seen:
+            continue
+        sanitized.append(normalized)
+        seen.add(normalized)
+
+    if sanitized:
+        return sanitized
+
+    fallback_mode = await _sanitize_single_persona_mode(guild_id, await get_server_mode(guild_id))
+    return [fallback_mode or "mode_default"]
+
+
+async def get_active_persona_modes(guild_id: int) -> list[str]:
+    config = await get_guild_config(guild_id)
+    raw_value = config.get("ai_active_personas")
+    stored_modes: list[str] = []
+    if raw_value:
+        try:
+            parsed = json.loads(raw_value)
+        except json.JSONDecodeError:
+            parsed = []
+        if isinstance(parsed, list):
+            stored_modes = [str(item) for item in parsed if isinstance(item, str)]
+
+    sanitized = await sanitize_active_persona_modes(guild_id, stored_modes)
+    if stored_modes != sanitized:
+        await update_guild_config(guild_id, {"ai_active_personas": json.dumps(sanitized, ensure_ascii=True)})
+    return sanitized
+
+
+async def set_active_persona_modes(guild_id: int, mode_keys: list[str]) -> None:
+    sanitized = await sanitize_active_persona_modes(guild_id, mode_keys)
+    await update_guild_config(guild_id, {"ai_active_personas": json.dumps(sanitized, ensure_ascii=True)})
 
 
 async def get_evil_mode(guild_id: int) -> bool:
@@ -2364,41 +3324,656 @@ async def add_fact_with_source(
     memory_type: str = "personal",
 ) -> int:
     """Store a fact about a user with source tracking."""
-    fact_validation = validate_fact_content(fact)
-    if not fact_validation.is_valid:
-        raise ValueError(get_memory_limit_error_message(fact_validation))
-    async with guild_db(guild_id) as db:
-        cursor = await db.execute(
-            """INSERT INTO user_facts (guild_id, user_id, fact, source, learned_from_user_id, memory_type) 
-               VALUES (?, ?, ?, ?, ?, ?)""",
-            (guild_id, user_id, fact, source, learned_from_user_id, memory_type)
+    if memory_type == "server" or user_id == 0:
+        return await add_server_memory_record(
+            guild_id,
+            content=fact,
+            source=source,
+            created_by_user_id=learned_from_user_id,
         )
-        await db.commit()
-        return cursor.lastrowid
+    if memory_type == "short_term":
+        channel_id = _legacy_short_term_channel_id(source)
+        return await add_short_term_memory(
+            guild_id,
+            content=fact,
+            scope_kind="channel",
+            memory_kind="observation",
+            channel_id=channel_id,
+            user_id=user_id,
+            source=source,
+            created_by_user_id=learned_from_user_id,
+        )
+    return await add_personal_memory(
+        guild_id,
+        user_id,
+        fact,
+        source=source,
+        status="confirmed",
+        created_by_user_id=learned_from_user_id or user_id,
+        confirmed_by_user_id=user_id,
+        bypass_privacy=memory_type == "long_term",
+    )
 
 
 async def get_facts_detailed(guild_id: int, user_id: int) -> List[Dict[str, Any]]:
     """Get all facts about a user with full details."""
-    async with guild_db(guild_id) as db:
-        db.row_factory = aiosqlite.Row
-        async with db.execute(
-            """SELECT id, fact, source, learned_from_user_id, memory_type, created_at 
-               FROM user_facts WHERE guild_id = ? AND user_id = ? ORDER BY created_at DESC""",
-            (guild_id, user_id)
-        ) as cursor:
-            rows = await cursor.fetchall()
-            return [dict(row) for row in rows]
+    rows = await get_personal_memory_records(guild_id, user_id, include_private=True)
+    return [
+        {
+            "id": row["id"],
+            "fact": row["content"],
+            "source": row.get("source", "manual"),
+            "learned_from_user_id": row.get("created_by_user_id"),
+            "memory_type": "personal",
+            "created_at": row.get("created_at"),
+            "status": row.get("status"),
+        }
+        for row in rows
+    ]
 
 
 async def delete_fact_by_id(guild_id: int, fact_id: int) -> bool:
     """Delete a specific fact by ID."""
+    return await delete_personal_memory_by_id(guild_id, fact_id, deleted_by_user_id=0)
+
+
+async def _insert_legacy_fact(
+    guild_id: int,
+    user_id: int,
+    fact: str,
+    source: str,
+    learned_from_user_id: Optional[int],
+    memory_type: str,
+) -> int:
     async with guild_db(guild_id) as db:
         cursor = await db.execute(
-            "DELETE FROM user_facts WHERE guild_id = ? AND id = ?",
-            (guild_id, fact_id)
+            """
+            INSERT INTO user_facts (guild_id, user_id, fact, source, learned_from_user_id, memory_type)
+            VALUES (?, ?, ?, ?, ?, ?)
+            """,
+            (guild_id, user_id, fact, source, learned_from_user_id, memory_type),
         )
         await db.commit()
-        return cursor.rowcount > 0
+        return int(cursor.lastrowid)
+
+
+async def _delete_legacy_fact_by_id(guild_id: int, legacy_fact_id: Optional[int]) -> None:
+    if not legacy_fact_id:
+        return
+    async with guild_db(guild_id) as db:
+        await db.execute(
+            "DELETE FROM user_facts WHERE guild_id = ? AND id = ?",
+            (guild_id, legacy_fact_id),
+        )
+        await db.commit()
+
+
+async def get_personal_memory_privacy(guild_id: int, user_id: int) -> Dict[str, Any]:
+    async with guild_db(guild_id) as db:
+        db.row_factory = aiosqlite.Row
+        async with db.execute(
+            """
+            SELECT personal_memory_opt_out, allow_mention_fact_lookup,
+                   personal_memory_export_enabled, privacy_updated_at
+            FROM user_profiles
+            WHERE guild_id = ? AND user_id = ?
+            """,
+            (guild_id, user_id),
+        ) as cursor:
+            row = await cursor.fetchone()
+    if not row:
+        return {
+            "personal_memory_opt_out": False,
+            "allow_mention_fact_lookup": False,
+            "personal_memory_export_enabled": True,
+            "privacy_updated_at": None,
+        }
+    return {
+        "personal_memory_opt_out": bool(row["personal_memory_opt_out"]),
+        "allow_mention_fact_lookup": bool(row["allow_mention_fact_lookup"]),
+        "personal_memory_export_enabled": bool(row["personal_memory_export_enabled"]),
+        "privacy_updated_at": row["privacy_updated_at"],
+    }
+
+
+async def set_allow_mention_fact_lookup(guild_id: int, user_id: int, enabled: bool) -> None:
+    async with guild_db(guild_id) as db:
+        await db.execute(
+            """
+            INSERT INTO user_profiles
+            (guild_id, user_id, allow_mention_fact_lookup, privacy_updated_at)
+            VALUES (?, ?, ?, ?)
+            ON CONFLICT(guild_id, user_id) DO UPDATE SET
+                allow_mention_fact_lookup = excluded.allow_mention_fact_lookup,
+                privacy_updated_at = excluded.privacy_updated_at
+            """,
+            (guild_id, user_id, int(enabled), _utcnow().isoformat()),
+        )
+        await db.commit()
+
+
+async def add_personal_memory(
+    guild_id: int,
+    user_id: int,
+    content: str,
+    *,
+    category: Optional[str] = None,
+    source: str = "manual",
+    status: str = "confirmed",
+    created_by_user_id: Optional[int] = None,
+    confirmed_by_user_id: Optional[int] = None,
+    bypass_privacy: bool = False,
+    mirror_legacy: bool = True,
+) -> int:
+    validation = validate_fact_content(content)
+    if not validation.is_valid:
+        raise ValueError(get_memory_limit_error_message(validation))
+    privacy = await get_personal_memory_privacy(guild_id, user_id)
+    if privacy["personal_memory_opt_out"]:
+        raise PermissionError("User opted out of personal memory in this guild.")
+
+    legacy_fact_id: Optional[int] = None
+    if mirror_legacy and DUAL_WRITE_LEGACY_MEMORY:
+        legacy_fact_id = await _insert_legacy_fact(
+            guild_id,
+            user_id,
+            content,
+            source,
+            created_by_user_id,
+            "personal",
+        )
+
+    async with guild_db(guild_id) as db:
+        cursor = await db.execute(
+            """
+            INSERT INTO personal_memories
+            (guild_id, user_id, content, category, source, status, created_by_user_id,
+             confirmed_by_user_id, legacy_fact_id)
+            VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?)
+            """,
+            (
+                guild_id,
+                user_id,
+                content,
+                category,
+                source,
+                status,
+                created_by_user_id,
+                confirmed_by_user_id,
+                legacy_fact_id,
+            ),
+        )
+        await db.commit()
+        return int(cursor.lastrowid)
+
+
+async def get_personal_memory_records(
+    guild_id: int,
+    user_id: int,
+    *,
+    include_private: bool = False,
+    limit: Optional[int] = None,
+) -> List[Dict[str, Any]]:
+    privacy = await get_personal_memory_privacy(guild_id, user_id)
+    if privacy["personal_memory_opt_out"] and not include_private:
+        return []
+
+    query = """
+        SELECT id, guild_id, user_id, content, category, source, status, created_by_user_id,
+               confirmed_by_user_id, created_at, updated_at, legacy_fact_id
+        FROM personal_memories
+        WHERE guild_id = ? AND user_id = ? AND is_deleted = 0
+          AND status IN ('confirmed', 'admin_override')
+        ORDER BY updated_at DESC, created_at DESC, id DESC
+    """
+    params: list[Any] = [guild_id, user_id]
+    if limit is not None:
+        query += " LIMIT ?"
+        params.append(limit)
+    async with guild_db(guild_id) as db:
+        db.row_factory = aiosqlite.Row
+        async with db.execute(query, tuple(params)) as cursor:
+            rows = [dict(row) for row in await cursor.fetchall()]
+
+    async with guild_db(guild_id) as db:
+        db.row_factory = aiosqlite.Row
+        async with db.execute(
+            """
+            SELECT id, guild_id, user_id, fact AS content, NULL AS category, source,
+                   'confirmed' AS status, learned_from_user_id AS created_by_user_id,
+                   user_id AS confirmed_by_user_id, created_at, created_at AS updated_at, id AS legacy_fact_id
+            FROM user_facts
+            WHERE guild_id = ? AND user_id = ? AND memory_type IN ('personal', 'long_term')
+            ORDER BY created_at DESC, id DESC
+            """,
+            (guild_id, user_id),
+        ) as cursor:
+            fallback_rows = [dict(row) for row in await cursor.fetchall()]
+    return _merge_rows_with_legacy_fallback(rows, fallback_rows, limit=limit)
+
+
+async def get_personal_memories(
+    guild_id: int,
+    user_id: int,
+    *,
+    include_private: bool = False,
+    limit: Optional[int] = None,
+) -> List[str]:
+    rows = await get_personal_memory_records(
+        guild_id, user_id, include_private=include_private, limit=limit
+    )
+    return [str(row["content"]) for row in rows]
+
+
+async def get_mention_lookup_personal_memories(
+    guild_id: int,
+    user_id: int,
+    *,
+    limit: int = 3,
+) -> List[str]:
+    privacy = await get_personal_memory_privacy(guild_id, user_id)
+    if privacy["personal_memory_opt_out"] or not privacy["allow_mention_fact_lookup"]:
+        return []
+    return await get_personal_memories(guild_id, user_id, limit=limit)
+
+
+async def get_admin_personal_memory_index(guild_id: int, user_id: int) -> List[Dict[str, Any]]:
+    rows = await get_personal_memory_records(guild_id, user_id, include_private=True)
+    return [
+        {
+            "id": row["id"],
+            "memory_type": "personal",
+            "created_at": row["created_at"],
+            "source": row["source"],
+            "status": row["status"],
+        }
+        for row in rows
+    ]
+
+
+async def delete_personal_memory_by_id(
+    guild_id: int,
+    memory_id: int,
+    *,
+    deleted_by_user_id: int,
+) -> bool:
+    async with guild_db(guild_id) as db:
+        db.row_factory = aiosqlite.Row
+        async with db.execute(
+            """
+            SELECT id, user_id, legacy_fact_id
+            FROM personal_memories
+            WHERE guild_id = ? AND id = ? AND is_deleted = 0
+            """,
+            (guild_id, memory_id),
+        ) as cursor:
+            row = await cursor.fetchone()
+        if not row:
+            return False
+        await db.execute(
+            """
+            UPDATE personal_memories
+            SET is_deleted = 1, deleted_at = ?, deleted_by_user_id = ?
+            WHERE guild_id = ? AND id = ?
+            """,
+            (_utcnow().isoformat(), deleted_by_user_id, guild_id, memory_id),
+        )
+        await db.commit()
+    await _delete_legacy_fact_by_id(guild_id, row["legacy_fact_id"])
+    await _audit_memory_operation(
+        guild_id,
+        deleted_by_user_id,
+        "personal",
+        "delete",
+        target_user_id=row["user_id"],
+        record_ids=[memory_id],
+    )
+    return True
+
+
+async def delete_all_personal_memories(guild_id: int, user_id: int) -> int:
+    rows = await get_personal_memory_records(guild_id, user_id, include_private=True)
+    deleted = 0
+    for row in rows:
+        deleted += int(await delete_personal_memory_by_id(guild_id, int(row["id"]), deleted_by_user_id=user_id))
+    return deleted
+
+
+async def add_server_memory_record(
+    guild_id: int,
+    *,
+    content: str,
+    category: Optional[str] = None,
+    source: str = "manual",
+    created_by_user_id: Optional[int] = None,
+    mirror_legacy: bool = True,
+) -> int:
+    validation = validate_fact_content(content)
+    if not validation.is_valid:
+        raise ValueError(get_memory_limit_error_message(validation))
+    legacy_fact_id: Optional[int] = None
+    if mirror_legacy and DUAL_WRITE_LEGACY_MEMORY:
+        legacy_fact_id = await _insert_legacy_fact(guild_id, 0, content, source, created_by_user_id, "server")
+    async with guild_db(guild_id) as db:
+        cursor = await db.execute(
+            """
+            INSERT INTO server_memories
+            (guild_id, content, category, source, created_by_user_id, legacy_fact_id)
+            VALUES (?, ?, ?, ?, ?, ?)
+            """,
+            (guild_id, content, category, source, created_by_user_id, legacy_fact_id),
+        )
+        await db.commit()
+        return int(cursor.lastrowid)
+
+
+async def get_server_memory_records(guild_id: int, *, limit: Optional[int] = 5) -> List[Dict[str, Any]]:
+    query = """
+        SELECT id, guild_id, content, category, source, created_by_user_id, created_at, updated_at, legacy_fact_id
+        FROM server_memories
+        WHERE guild_id = ? AND is_deleted = 0
+        ORDER BY updated_at DESC, created_at DESC, id DESC
+    """
+    params: list[Any] = [guild_id]
+    if limit is not None:
+        query += " LIMIT ?"
+        params.append(limit)
+    async with guild_db(guild_id) as db:
+        db.row_factory = aiosqlite.Row
+        async with db.execute(query, tuple(params)) as cursor:
+            rows = [dict(row) for row in await cursor.fetchall()]
+    fallback_query = """
+        SELECT id, guild_id, fact AS content, NULL AS category, source, learned_from_user_id AS created_by_user_id,
+               created_at, created_at AS updated_at, id AS legacy_fact_id
+        FROM user_facts
+        WHERE guild_id = ? AND user_id = 0 AND memory_type = 'server'
+        ORDER BY created_at DESC, id DESC
+    """
+    fallback_params: list[Any] = [guild_id]
+    if limit is not None:
+        fallback_query += " LIMIT ?"
+        fallback_params.append(limit)
+    async with guild_db(guild_id) as db:
+        db.row_factory = aiosqlite.Row
+        async with db.execute(fallback_query, tuple(fallback_params)) as cursor:
+            fallback_rows = [dict(row) for row in await cursor.fetchall()]
+    return _merge_rows_with_legacy_fallback(rows, fallback_rows, limit=limit)
+
+
+async def delete_all_server_memories(guild_id: int) -> int:
+    rows = await get_server_memory_records(guild_id, limit=None)
+    async with guild_db(guild_id) as db:
+        await db.execute(
+            """
+            UPDATE server_memories
+            SET is_deleted = 1, deleted_at = ?, deleted_by_user_id = 0
+            WHERE guild_id = ? AND is_deleted = 0
+            """,
+            (_utcnow().isoformat(), guild_id),
+        )
+        await db.execute(
+            "DELETE FROM user_facts WHERE guild_id = ? AND user_id = 0 AND memory_type = 'server'",
+            (guild_id,),
+        )
+        await db.commit()
+    return len(rows)
+
+
+async def add_short_term_memory(
+    guild_id: int,
+    *,
+    content: str,
+    scope_kind: str,
+    memory_kind: str,
+    expires_at: Optional[datetime] = None,
+    channel_id: Optional[int] = None,
+    user_id: Optional[int] = None,
+    source: str = "system",
+    source_message_id: Optional[int] = None,
+    created_by_user_id: Optional[int] = None,
+    mirror_legacy: bool = True,
+) -> int:
+    validation = validate_fact_content(content)
+    if not validation.is_valid:
+        raise ValueError(get_memory_limit_error_message(validation))
+    if user_id is not None:
+        privacy = await get_personal_memory_privacy(guild_id, user_id)
+        if privacy["personal_memory_opt_out"]:
+            raise PermissionError("User opted out of personal memory in this guild.")
+    expires = expires_at or (_utcnow() + timedelta(hours=SHORT_TERM_DEFAULT_TTL_HOURS))
+    legacy_fact_id: Optional[int] = None
+    if mirror_legacy and DUAL_WRITE_LEGACY_MEMORY and scope_kind == "channel" and user_id is not None:
+        legacy_fact_id = await _insert_legacy_fact(
+            guild_id,
+            user_id,
+            content,
+            build_short_term_source(channel_id or 0, source=source),
+            created_by_user_id,
+            "short_term",
+        )
+    async with guild_db(guild_id) as db:
+        cursor = await db.execute(
+            """
+            INSERT INTO short_term_memory
+            (guild_id, channel_id, user_id, scope_kind, memory_kind, content, source,
+             source_message_id, created_by_user_id, expires_at, legacy_fact_id)
+            VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
+            """,
+            (
+                guild_id,
+                channel_id,
+                user_id,
+                scope_kind,
+                memory_kind,
+                content,
+                source,
+                source_message_id,
+                created_by_user_id,
+                expires.isoformat(),
+                legacy_fact_id,
+            ),
+        )
+        await db.commit()
+        return int(cursor.lastrowid)
+
+
+async def upsert_short_term_summary(
+    guild_id: int,
+    *,
+    content: str,
+    scope_kind: str,
+    expires_at: datetime,
+    channel_id: Optional[int] = None,
+    memory_kind: str = "summary",
+    user_id: Optional[int] = None,
+    source: str = "system",
+    created_by_user_id: Optional[int] = None,
+) -> int:
+    async with guild_db(guild_id) as db:
+        await db.execute(
+            """
+            UPDATE short_term_memory
+            SET is_deleted = 1, deleted_at = ?, deleted_by_user_id = ?
+            WHERE guild_id = ? AND scope_kind = ? AND memory_kind = ?
+              AND ifnull(channel_id, -1) = ifnull(?, -1)
+              AND ifnull(user_id, -1) = ifnull(?, -1)
+              AND is_deleted = 0
+            """,
+            (_utcnow().isoformat(), created_by_user_id or 0, guild_id, scope_kind, memory_kind, channel_id, user_id),
+        )
+        await db.commit()
+    return await add_short_term_memory(
+        guild_id,
+        content=content,
+        scope_kind=scope_kind,
+        memory_kind=memory_kind,
+        channel_id=channel_id,
+        user_id=user_id,
+        source=source,
+        created_by_user_id=created_by_user_id,
+        expires_at=expires_at,
+        mirror_legacy=False,
+    )
+
+
+async def prune_expired_short_term_memory(guild_id: int) -> int:
+    async with guild_db(guild_id) as db:
+        cursor = await db.execute(
+            """
+            UPDATE short_term_memory
+            SET is_deleted = 1, deleted_at = ?, deleted_by_user_id = 0
+            WHERE guild_id = ? AND is_deleted = 0 AND expires_at <= ?
+            """,
+            (_utcnow().isoformat(), guild_id, _utcnow().isoformat()),
+        )
+        await db.commit()
+        return int(cursor.rowcount or 0)
+
+
+async def get_short_term_memory_records(
+    guild_id: int,
+    *,
+    scope_kind: Optional[str] = None,
+    channel_id: Optional[int] = None,
+    user_id: Optional[int] = None,
+    memory_kind: Optional[str] = None,
+    include_expired: bool = False,
+    limit: Optional[int] = None,
+) -> List[Dict[str, Any]]:
+    if not include_expired:
+        await prune_expired_short_term_memory(guild_id)
+    query = """
+        SELECT id, guild_id, channel_id, user_id, scope_kind, memory_kind, content, source,
+               source_message_id, created_by_user_id, created_at, updated_at, expires_at, legacy_fact_id
+        FROM short_term_memory
+        WHERE guild_id = ? AND is_deleted = 0
+    """
+    params: list[Any] = [guild_id]
+    if scope_kind is not None:
+        query += " AND scope_kind = ?"
+        params.append(scope_kind)
+    if channel_id is not None:
+        query += " AND channel_id = ?"
+        params.append(channel_id)
+    if user_id is not None:
+        query += " AND user_id = ?"
+        params.append(user_id)
+    if memory_kind is not None:
+        query += " AND memory_kind = ?"
+        params.append(memory_kind)
+    query += " ORDER BY updated_at DESC, created_at DESC, id DESC"
+    if limit is not None:
+        query += " LIMIT ?"
+        params.append(limit)
+    async with guild_db(guild_id) as db:
+        db.row_factory = aiosqlite.Row
+        async with db.execute(query, tuple(params)) as cursor:
+            rows = [dict(row) for row in await cursor.fetchall()]
+    fallback_rows: list[Dict[str, Any]] = []
+    if scope_kind == "channel" and channel_id is not None and user_id is not None:
+        channel_pattern = f"%{SHORT_TERM_CHANNEL_TAG}{int(channel_id)}"
+        fallback_query = """
+            SELECT id, guild_id, ? AS channel_id, user_id, 'channel' AS scope_kind,
+                   'observation' AS memory_kind, fact AS content, source, NULL AS source_message_id,
+                   learned_from_user_id AS created_by_user_id, created_at, created_at AS updated_at,
+                   ? AS expires_at, id AS legacy_fact_id
+            FROM user_facts
+            WHERE guild_id = ? AND user_id = ? AND memory_type = 'short_term' AND source LIKE ?
+            ORDER BY created_at DESC, id DESC
+        """
+        fallback_params = (
+            channel_id,
+            _default_short_term_expiry(None),
+            guild_id,
+            user_id,
+            channel_pattern,
+        )
+        async with guild_db(guild_id) as db:
+            db.row_factory = aiosqlite.Row
+            async with db.execute(fallback_query, fallback_params) as cursor:
+                fallback_rows = [dict(row) for row in await cursor.fetchall()]
+    return _merge_rows_with_legacy_fallback(rows, fallback_rows, limit=limit)
+
+
+async def get_short_term_memories_for_user(
+    guild_id: int,
+    user_id: int,
+    *,
+    channel_id: Optional[int] = None,
+) -> List[str]:
+    rows = await get_short_term_memory_records(
+        guild_id,
+        scope_kind="channel",
+        channel_id=channel_id,
+        user_id=user_id,
+    )
+    return [str(row["content"]) for row in rows]
+
+
+async def get_channel_recency_summary(guild_id: int, channel_id: int) -> List[str]:
+    rows = await get_short_term_memory_records(
+        guild_id,
+        scope_kind="channel",
+        channel_id=channel_id,
+        memory_kind="summary",
+        limit=1,
+    )
+    return [str(row["content"]) for row in rows]
+
+
+async def get_guild_recency_summary(guild_id: int) -> List[str]:
+    rows = await get_short_term_memory_records(
+        guild_id,
+        scope_kind="guild",
+        memory_kind="summary",
+        limit=1,
+    )
+    return [str(row["content"]) for row in rows]
+
+
+async def delete_short_term_memory_scope(
+    guild_id: int,
+    *,
+    channel_id: Optional[int] = None,
+    user_id: Optional[int] = None,
+    scope_kind: Optional[str] = "channel",
+) -> int:
+    query = "UPDATE short_term_memory SET is_deleted = 1, deleted_at = ?, deleted_by_user_id = 0 WHERE guild_id = ? AND is_deleted = 0"
+    params: list[Any] = [_utcnow().isoformat(), guild_id]
+    if scope_kind is not None:
+        query += " AND scope_kind = ?"
+        params.append(scope_kind)
+    if channel_id is not None:
+        query += " AND channel_id = ?"
+        params.append(channel_id)
+    if user_id is not None:
+        query += " AND user_id = ?"
+        params.append(user_id)
+    async with guild_db(guild_id) as db:
+        cursor = await db.execute(query, tuple(params))
+        if channel_id is not None:
+            channel_pattern = f"%{SHORT_TERM_CHANNEL_TAG}{int(channel_id)}"
+            if user_id is not None:
+                await db.execute(
+                    "DELETE FROM user_facts WHERE guild_id = ? AND memory_type = 'short_term' AND source LIKE ? AND user_id = ?",
+                    (guild_id, channel_pattern, user_id),
+                )
+            else:
+                await db.execute(
+                    "DELETE FROM user_facts WHERE guild_id = ? AND memory_type = 'short_term' AND source LIKE ?",
+                    (guild_id, channel_pattern),
+                )
+        elif scope_kind == "guild":
+            await db.execute(
+                "DELETE FROM user_facts WHERE guild_id = ? AND memory_type = 'short_term' AND source LIKE 'guild:%'",
+                (guild_id,),
+            )
+        await db.commit()
+        return int(cursor.rowcount or 0)
+
+
+async def delete_short_term_memories_for_user(guild_id: int, user_id: int) -> int:
+    return await delete_short_term_memory_scope(guild_id, user_id=user_id, scope_kind=None)
 
 
 # ============================================
@@ -2450,13 +4025,13 @@ async def confirm_pending_fact(guild_id: int, pending_id: int) -> bool:
         await delete_pending_fact(guild_id, pending_id)
         return False
     
-    # Move to user_facts
-    await add_fact_with_source(
+    await add_personal_memory(
         pending["guild_id"],
         pending["about_user_id"],
         pending["fact"],
         source="learned",
-        learned_from_user_id=pending["learned_from_user_id"]
+        created_by_user_id=pending["learned_from_user_id"],
+        confirmed_by_user_id=pending["about_user_id"],
     )
     await delete_pending_fact(guild_id, pending_id)
     return True
@@ -2761,10 +4336,10 @@ async def create_custom_persona(
     bio: Optional[str],
     avatar_path: Optional[str],
     banner_path: Optional[str],
-    aliases: Optional[List[str]],
     normal_prompt: str,
     evil_prompt: Optional[str],
     created_by: int,
+    aliases: Optional[List[str]] = None,
 ) -> int:
     """Create a custom persona and return its row id."""
     async with guild_db(guild_id) as db:
@@ -3099,6 +4674,23 @@ async def reset_user_data(
                 (guild_id, user_id)
             )
             deleted["facts"] = cursor.rowcount
+            cursor = await db.execute(
+                """
+                UPDATE personal_memories
+                SET is_deleted = 1, deleted_at = ?, deleted_by_user_id = 0
+                WHERE guild_id = ? AND user_id = ? AND is_deleted = 0
+                """,
+                (_utcnow().isoformat(), guild_id, user_id),
+            )
+            deleted["facts"] += int(cursor.rowcount or 0)
+            await db.execute(
+                """
+                UPDATE short_term_memory
+                SET is_deleted = 1, deleted_at = ?, deleted_by_user_id = 0
+                WHERE guild_id = ? AND user_id = ? AND is_deleted = 0
+                """,
+                (_utcnow().isoformat(), guild_id, user_id),
+            )
         
         if reset_type in ("all", "affection"):
             if reset_type == "affection":
@@ -3133,7 +4725,7 @@ async def get_user_full_profile(guild_id: int, user_id: int) -> Dict[str, Any]:
     """Get complete user profile for admin viewing."""
     user = await get_user(guild_id, user_id) or {"user_id": user_id}
     affection_by_mode = await get_all_mode_affection(guild_id, user_id)
-    facts = await get_facts_detailed(guild_id, user_id)
+    facts = await get_admin_personal_memory_index(guild_id, user_id)
     aliases = await get_aliases(guild_id, user_id)
     
     return {
@@ -3302,6 +4894,25 @@ async def set_url_safety_config(guild_id: int, updates: Dict[str, Any]) -> None:
     await update_guild_config(guild_id, updates)
 
 
+async def get_ai_streaming_config(guild_id: int) -> Dict[str, Any]:
+    """Get AI streaming and thought-log configuration for a guild."""
+    config = await get_guild_config(guild_id)
+    return {
+        "ai_streaming_enabled": bool(config.get("ai_streaming_enabled", 1)),
+        "ai_stream_min_flush_chars": int(config.get("ai_stream_min_flush_chars") or 120),
+        "ai_stream_stall_seconds": float(config.get("ai_stream_stall_seconds") or 2.0),
+        "ai_stream_min_interval_seconds": float(config.get("ai_stream_min_interval_seconds") or 1.0),
+        "ai_stream_max_messages": int(config.get("ai_stream_max_messages") or 6),
+        "ai_stream_max_total_chars": int(config.get("ai_stream_max_total_chars") or 6000),
+        "ai_stream_warmup_edit_window_seconds": float(
+            config.get("ai_stream_warmup_edit_window_seconds") or 2.0
+        ),
+        "ai_thought_channel_id": config.get("ai_thought_channel_id"),
+        "ai_thought_log_level": str(config.get("ai_thought_log_level") or "off").lower(),
+        "ai_thought_log_allow_mod_log": bool(config.get("ai_thought_log_allow_mod_log") or 0),
+    }
+
+
 # ============================================
 # Guild API Config Operations
 # ============================================
@@ -3363,12 +4974,32 @@ GUILD_CONFIG_FIELDS: Set[str] = {
     "profile_peek_enabled",
     "rag_enabled",
     "gif_responses_enabled",
+    "reply_sequence_enabled",
+    "reply_sequence_timeout_seconds",
+    "reply_sequence_hard_max_stages",
+    "reply_sequence_allow_gif",
+    "reply_sequence_allow_sticker",
+    "reply_sequence_allow_emoji_only",
     "ai_reply_cooldown_seconds",
     "ai_reply_cooldown_type",
     "ai_channel_whitelist",
     "ai_self_reply_limit",
+    "ai_multi_persona_enabled",
+    "ai_triggered_persona_limit",
+    "ai_active_personas",
+    "ai_persona_webhooks_enabled",
     "ai_auto_channels",
     "ai_auto_threshold",
+    "ai_streaming_enabled",
+    "ai_stream_min_flush_chars",
+    "ai_stream_stall_seconds",
+    "ai_stream_min_interval_seconds",
+    "ai_stream_max_messages",
+    "ai_stream_max_total_chars",
+    "ai_stream_warmup_edit_window_seconds",
+    "ai_thought_channel_id",
+    "ai_thought_log_level",
+    "ai_thought_log_allow_mod_log",
     "url_safety_enabled",
     "url_allowlist",
     "url_blocklist",
@@ -3461,18 +5092,61 @@ async def add_guild_config_audit(
     field: Optional[str] = None,
     old_value: Optional[str] = None,
     new_value: Optional[str] = None,
+    category: Optional[str] = None,
+    target_type: Optional[str] = None,
+    target_id: Optional[str] = None,
+    summary: Optional[str] = None,
+    detail: Optional[Dict[str, Any]] = None,
 ) -> None:
     """Record a config change event for auditing."""
+    normalized_category = normalize_audit_category(category, action=action)
+    detail_json = normalize_audit_detail(detail)
     async with guild_db(guild_id) as db:
         await db.execute(
             """
             INSERT INTO guild_config_audit
-                (guild_id, user_id, action, field, old_value, new_value)
-            VALUES (?, ?, ?, ?, ?, ?)
+                (guild_id, user_id, action, category, field, target_type, target_id, old_value, new_value, summary, detail_json)
+            VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
             """,
-            (guild_id, user_id, action, field, old_value, new_value),
+            (
+                guild_id,
+                user_id,
+                action,
+                normalized_category,
+                field,
+                target_type,
+                target_id,
+                old_value,
+                new_value,
+                summary,
+                detail_json,
+            ),
         )
         await db.commit()
+
+
+async def get_guild_config_audit_entries(guild_id: int, limit: int = 100) -> List[Dict[str, Any]]:
+    """Return audit entries newest first with legacy-category compatibility."""
+    async with guild_db(guild_id) as db:
+        db.row_factory = aiosqlite.Row
+        async with db.execute(
+            """
+            SELECT * FROM guild_config_audit
+            WHERE guild_id = ?
+            ORDER BY id DESC
+            LIMIT ?
+            """,
+            (guild_id, limit),
+        ) as cursor:
+            rows = await cursor.fetchall()
+
+    entries: List[Dict[str, Any]] = []
+    for row in rows:
+        item = dict(row)
+        item["category"] = normalize_audit_category(item.get("category"), action=item.get("action"))
+        item["detail"] = deserialize_audit_detail(item.get("detail_json"))
+        entries.append(item)
+    return entries
 
 
 async def cleanup_guild_audit(guild_id: int, max_age_days: int = 90) -> int:
@@ -3484,4 +5158,3 @@ async def cleanup_guild_audit(guild_id: int, max_age_days: int = 90) -> int:
         )
         await db.commit()
         return cursor.rowcount
-

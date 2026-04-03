@@ -6,11 +6,15 @@ from __future__ import annotations
 
 import asyncio
 import os
-from typing import Dict, List, Optional, Tuple
+from typing import Any, AsyncIterator, Dict, List, Optional, Tuple
+
+try:
+    from openai import AsyncOpenAI
+except ImportError:  # pragma: no cover - exercised in lightweight test environments
+    AsyncOpenAI = None
 
 from utils.logger import get_logger
 from utils.db_handler import get_guild_config
-from utils.encryption import get_encryption
 from utils.encryption import get_encryption
 from utils.api_manager import (
     UserInputError,
@@ -19,9 +23,13 @@ from utils.api_manager import (
     normalize_gemini_model,
     generate_gemini_with_key,
     generate_gemini_with_key_and_image,
+    stream_events_from_text,
+    stream_openai_chat_completions,
+    stream_gemini_with_key,
     _is_rate_limit_error,
     _parse_timeout,
 )
+from utils.streaming.types import ProviderFeatures, StreamEvent
 
 logger = get_logger(__name__)
 
@@ -173,6 +181,30 @@ def _parse_capabilities(raw: Optional[str]) -> List[str]:
     return list(dict.fromkeys(items))
 
 
+def get_custom_endpoint_features(capabilities: List[str]) -> ProviderFeatures:
+    capability_set = {str(item).strip().lower() for item in capabilities if str(item).strip()}
+    openai_compatible = bool(
+        capability_set.intersection({"openai_compat", "openai-compatible", "openai_chat"})
+    )
+    supports_streaming = openai_compatible and bool(
+        capability_set.intersection({"streaming", "openai_streaming"})
+    )
+    supports_tools = openai_compatible and bool(
+        capability_set.intersection({"tools", "tool_calls", "openai_tools"})
+    )
+    supports_vision = "vision" in capability_set
+    supports_video = "video" in capability_set
+    text_only = not any((supports_tools, supports_vision, supports_video))
+    return ProviderFeatures(
+        openai_compatible=openai_compatible,
+        supports_streaming=supports_streaming,
+        supports_tools=supports_tools,
+        supports_vision=supports_vision,
+        supports_video=supports_video,
+        text_only=text_only,
+    )
+
+
 async def get_guild_custom_endpoint_config(
     guild_id: int,
 ) -> Tuple[Optional[str], Optional[str], Optional[str], List[str], bool]:
@@ -280,6 +312,54 @@ async def generate_guild_gemini_text(
     )
 
 
+async def stream_guild_gemini_text(
+    guild_id: int,
+    prompt: str,
+    messages: Optional[List[dict]] = None,
+    system_instruction: Optional[str] = None,
+    tools: Optional[list[dict[str, Any]]] = None,
+) -> AsyncIterator[StreamEvent]:
+    if tools:
+        raise RuntimeError("Gemini streaming tool events are not supported.")
+    keys = await get_guild_gemini_keys(guild_id)
+    model = await get_guild_gemini_model(guild_id)
+    if not keys:
+        raise GuildConfigError("general keys not configured for this server.")
+    request_timeout = _parse_timeout(os.getenv("GEMINI_REQUEST_TIMEOUT_SECONDS"), 30.0)
+    key_type = await get_guild_gemini_key_type(guild_id)
+    if key_type == "free":
+        start = await _next_key_index(guild_id, "general", len(keys))
+    else:
+        start = await _get_key_index(guild_id, "general", len(keys))
+    last_error: Optional[Exception] = None
+    for offset in range(len(keys)):
+        key_index = (start + offset) % len(keys)
+        key = keys[key_index]
+        try:
+            async for event in stream_gemini_with_key(
+                key,
+                model,
+                prompt,
+                request_timeout=request_timeout,
+                messages=messages,
+                system_instruction=system_instruction,
+            ):
+                yield event
+            if key_type != "free":
+                await _set_key_index(guild_id, "general", key_index, len(keys))
+            return
+        except UserInputError:
+            raise
+        except Exception as exc:
+            last_error = exc
+            if _is_rate_limit_error(str(exc).lower()):
+                continue
+            continue
+    if last_error:
+        raise RuntimeError(f"All guild general keys failed. Last error: {last_error}")
+    raise RuntimeError("All guild general keys failed.")
+
+
 async def generate_guild_gemini_translate_text(guild_id: int, prompt: str) -> tuple[str, str]:
     keys = await get_guild_translate_keys(guild_id)
     model = await get_guild_translate_model(guild_id)
@@ -375,10 +455,45 @@ async def generate_guild_openrouter_text(
     raise RuntimeError(f"All OpenRouter keys failed. Last error: {last_error}")
 
 
+async def stream_guild_openrouter_text(
+    guild_id: int,
+    prompt: str,
+    messages: Optional[List[dict]] = None,
+    system_instruction: Optional[str] = None,
+    tools: Optional[list[dict[str, Any]]] = None,
+) -> AsyncIterator[StreamEvent]:
+    keys = await get_guild_openrouter_keys(guild_id)
+    if not keys:
+        raise GuildConfigError("OpenRouter API keys not configured for this server.")
+    model, fallbacks = await get_guild_openrouter_config(guild_id)
+    start = await _next_key_index(guild_id, "openrouter", len(keys))
+    last_error: Optional[Exception] = None
+    for offset in range(len(keys)):
+        api_key = keys[(start + offset) % len(keys)]
+        manager = _get_openrouter_manager(guild_id, api_key, model, fallbacks)
+        try:
+            async for event in manager.stream_generate(
+                prompt,
+                messages=messages,
+                system_instruction=system_instruction,
+                tools=tools,
+            ):
+                yield event
+            return
+        except UserInputError:
+            raise
+        except Exception as exc:
+            last_error = exc
+            continue
+    raise RuntimeError(f"All OpenRouter keys failed. Last error: {last_error}")
+
+
 _custom_client_cache: Dict[tuple[int, str, str], AsyncOpenAI] = {}
 
 
 def _get_custom_client(guild_id: int, api_key: Optional[str], base_url: str) -> AsyncOpenAI:
+    if AsyncOpenAI is None:
+        raise RuntimeError("openai is not installed")
     cache_key = (guild_id, api_key or "", base_url)
     cached = _custom_client_cache.get(cache_key)
     if cached:
@@ -421,3 +536,47 @@ async def generate_guild_custom_text(
     if not content:
         raise RuntimeError("Custom endpoint returned empty content.")
     return content, model
+
+
+async def stream_guild_custom_text(
+    guild_id: int,
+    prompt: str,
+    messages: Optional[List[dict]] = None,
+    system_instruction: Optional[str] = None,
+    tools: Optional[list[dict[str, Any]]] = None,
+) -> AsyncIterator[StreamEvent]:
+    url, api_key, model, capabilities, enabled = await get_guild_custom_endpoint_config(guild_id)
+    if not enabled or not url or not model:
+        raise GuildConfigError("Custom endpoint not configured for this server.")
+
+    features = get_custom_endpoint_features(capabilities)
+    if tools and not features.supports_tools:
+        raise RuntimeError("Custom endpoint streaming tool events are not supported.")
+    if not features.supports_streaming:
+        text, _ = await generate_guild_custom_text(
+            guild_id,
+            prompt,
+            messages=messages,
+            system_instruction=system_instruction,
+        )
+        async for event in stream_events_from_text(text):
+            yield event
+        return
+
+    client = _get_custom_client(guild_id, api_key, url)
+    payload_messages: List[dict[str, Any]] = []
+    if messages:
+        if system_instruction:
+            payload_messages.append({"role": "system", "content": system_instruction})
+        payload_messages.extend(messages)
+    else:
+        payload_messages = [{"role": "user", "content": prompt}]
+
+    async for event in stream_openai_chat_completions(
+        client,
+        model=model,
+        messages=payload_messages,
+        timeout=_parse_timeout(os.getenv("CUSTOM_ENDPOINT_TIMEOUT_SECONDS"), 45.0),
+        tools=tools if features.supports_tools else None,
+    ):
+        yield event

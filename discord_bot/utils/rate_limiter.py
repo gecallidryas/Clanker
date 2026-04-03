@@ -23,7 +23,7 @@ import asyncio
 from collections import defaultdict
 from dataclasses import dataclass, field
 from datetime import datetime, timedelta
-from typing import Dict
+from typing import Dict, Optional
 
 
 @dataclass
@@ -33,6 +33,33 @@ class TokenBucket:
     last_update: datetime
     max_tokens: int
     refill_rate: float  # tokens per second
+
+
+@dataclass
+class StreamSendBudget:
+    """Per-turn outbound budget for streamed Discord replies."""
+
+    max_messages: int = 6
+    max_total_chars: int = 6000
+    min_flush_chars: int = 80
+    min_flush_interval: float = 1.0
+    messages_sent: int = 0
+    total_chars_sent: int = 0
+    last_send_at: Optional[datetime] = None
+
+    def can_send(self, char_count: int) -> bool:
+        if char_count <= 0:
+            return False
+        if self.messages_sent >= self.max_messages:
+            return False
+        if self.total_chars_sent + char_count > self.max_total_chars:
+            return False
+        return True
+
+    def record_send(self, char_count: int) -> None:
+        self.messages_sent += 1
+        self.total_chars_sent += max(0, int(char_count))
+        self.last_send_at = datetime.now()
 
 
 class RateLimiter:

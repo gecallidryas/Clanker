@@ -16,17 +16,36 @@ Usage:
     response = await manager.generate(prompt)
 """
 
-import os
 import asyncio
+import contextlib
+import os
 import random
 from datetime import datetime, timedelta
 from dataclasses import dataclass
-from typing import Optional, List, Dict
-from google import genai
-from google.genai import types
+from typing import Any, AsyncIterator, Dict, List, Optional
 import aiohttp
 
 from utils.logger import get_logger
+from utils.streaming.types import StreamEvent
+
+try:
+    from google import genai
+    from google.genai import types
+except ImportError:  # pragma: no cover - exercised in lightweight test environments
+    genai = None
+
+    class _TypesFallback:
+        class SafetySetting:
+            def __init__(self, *args, **kwargs):
+                self.args = args
+                self.kwargs = kwargs
+
+        class GenerateContentConfig:
+            def __init__(self, *args, **kwargs):
+                self.args = args
+                self.kwargs = kwargs
+
+    types = _TypesFallback()
 
 logger = get_logger(__name__)
 
@@ -201,6 +220,8 @@ def _parse_float_env(
 
 
 def _generate_content_sync(api_key: str, model_name: str, prompt: str, image) -> object:
+    if genai is None:
+        raise RuntimeError("google-genai is not installed")
     # Maximum permissive safety settings - BLOCK_NONE
     # Note: Google may still block PROHIBITED_CONTENT regardless of settings
     safety_settings = [
@@ -274,6 +295,218 @@ async def generate_gemini_with_key_and_image(
             raise UserInputError(str(exc)) from exc
         raise
     return response.text, model_name
+
+
+async def stream_events_from_text(
+    text: str,
+    *,
+    finish_reason: str = "stop",
+) -> AsyncIterator[StreamEvent]:
+    if text:
+        yield StreamEvent.text_delta(text)
+    yield StreamEvent.done(finish_reason=finish_reason)
+
+
+def _coerce_openai_content(content: Any) -> str:
+    if content is None:
+        return ""
+    if isinstance(content, str):
+        return content
+    if isinstance(content, list):
+        parts: list[str] = []
+        for item in content:
+            if isinstance(item, str):
+                parts.append(item)
+                continue
+            if isinstance(item, dict):
+                if item.get("type") == "text":
+                    parts.append(str(item.get("text") or ""))
+                elif item.get("type") == "output_text":
+                    parts.append(str(item.get("text") or ""))
+        return "".join(parts)
+    return str(content)
+
+
+async def stream_openai_chat_completions(
+    client: Any,
+    *,
+    model: str,
+    messages: list[dict[str, Any]],
+    timeout: Optional[float] = None,
+    tools: Optional[list[dict[str, Any]]] = None,
+) -> AsyncIterator[StreamEvent]:
+    stream = await client.chat.completions.create(
+        model=model,
+        messages=messages,
+        stream=True,
+        timeout=timeout,
+        tools=tools or None,
+    )
+    tool_calls: dict[int, dict[str, Any]] = {}
+    async for chunk in stream:
+        choices = getattr(chunk, "choices", None) or []
+        if not choices:
+            continue
+        choice = choices[0]
+        delta = getattr(choice, "delta", None)
+        if delta is not None:
+            content = _coerce_openai_content(getattr(delta, "content", None))
+            if content:
+                yield StreamEvent.text_delta(content)
+            for item in getattr(delta, "tool_calls", None) or []:
+                index = int(getattr(item, "index", 0) or 0)
+                entry = tool_calls.setdefault(
+                    index,
+                    {
+                        "id": getattr(item, "id", None),
+                        "name": "",
+                        "arguments": "",
+                    },
+                )
+                function = getattr(item, "function", None)
+                if function is not None:
+                    name = getattr(function, "name", None)
+                    arguments = getattr(function, "arguments", None)
+                    if name:
+                        entry["name"] = name
+                    if arguments:
+                        entry["arguments"] += str(arguments)
+        finish_reason = getattr(choice, "finish_reason", None)
+        if finish_reason == "tool_calls" and tool_calls:
+            assembled = list(tool_calls.values())
+            if len(assembled) == 1:
+                yield StreamEvent.tool_call(assembled[0])
+            else:
+                yield StreamEvent.tool_call({"calls": assembled})
+            return
+        if finish_reason == "content_filter":
+            yield StreamEvent.moderation_stop(reason=finish_reason)
+            return
+        if finish_reason and finish_reason != "stop":
+            yield StreamEvent.done(finish_reason=finish_reason)
+            return
+    yield StreamEvent.done()
+
+
+def _build_gemini_stream_request(
+    prompt: str,
+    messages: Optional[list[dict[str, Any]]] = None,
+    system_instruction: Optional[str] = None,
+) -> tuple[list[dict[str, Any]], Optional[str]]:
+    if not messages:
+        return ([{"role": "user", "parts": [{"text": prompt}]}], system_instruction)
+    contents: list[dict[str, Any]] = []
+    effective_system_instruction = system_instruction
+    for item in messages:
+        role = str(item.get("role") or "user").strip().lower()
+        content = str(item.get("content") or "").strip()
+        if not content:
+            continue
+        if role == "system":
+            if not effective_system_instruction:
+                effective_system_instruction = content
+            continue
+        mapped_role = "model" if role == "assistant" else "user"
+        contents.append({"role": mapped_role, "parts": [{"text": content}]})
+    if not contents:
+        contents.append({"role": "user", "parts": [{"text": prompt}]})
+    return contents, effective_system_instruction
+
+
+def _pump_gemini_stream_sync(
+    api_key: str,
+    model_name: str,
+    contents: list[dict[str, Any]],
+    system_instruction: Optional[str],
+    emit_text,
+) -> None:
+    if genai is None:
+        raise RuntimeError("google-genai is not installed")
+    safety_settings = [
+        types.SafetySetting(category="HARM_CATEGORY_HARASSMENT", threshold="BLOCK_NONE"),
+        types.SafetySetting(category="HARM_CATEGORY_HATE_SPEECH", threshold="BLOCK_NONE"),
+        types.SafetySetting(category="HARM_CATEGORY_SEXUALLY_EXPLICIT", threshold="BLOCK_NONE"),
+        types.SafetySetting(category="HARM_CATEGORY_DANGEROUS_CONTENT", threshold="BLOCK_NONE"),
+    ]
+    client = genai.Client(api_key=api_key)
+    config_kwargs = {"safety_settings": safety_settings}
+    if system_instruction:
+        config_kwargs["system_instruction"] = system_instruction
+    config = types.GenerateContentConfig(**config_kwargs)
+    for chunk in client.models.generate_content_stream(
+        model=model_name,
+        contents=contents,
+        config=config,
+    ):
+        text = getattr(chunk, "text", None)
+        if text:
+            emit_text(text)
+
+
+async def stream_gemini_with_key(
+    api_key: str,
+    model_name: str,
+    prompt: str,
+    *,
+    request_timeout: float = 30.0,
+    messages: Optional[list[dict[str, Any]]] = None,
+    system_instruction: Optional[str] = None,
+) -> AsyncIterator[StreamEvent]:
+    contents, effective_system_instruction = _build_gemini_stream_request(
+        prompt,
+        messages=messages,
+        system_instruction=system_instruction,
+    )
+    queue: asyncio.Queue[StreamEvent] = asyncio.Queue()
+    loop = asyncio.get_running_loop()
+
+    def emit_text(text: str) -> None:
+        loop.call_soon_threadsafe(queue.put_nowait, StreamEvent.text_delta(text))
+
+    async def producer() -> None:
+        try:
+            await asyncio.wait_for(
+                asyncio.to_thread(
+                    _pump_gemini_stream_sync,
+                    api_key,
+                    model_name,
+                    contents,
+                    effective_system_instruction,
+                    emit_text,
+                ),
+                timeout=request_timeout,
+            )
+        except Exception as exc:
+            error_str = str(exc).lower()
+            if _is_user_input_error(error_str):
+                raise UserInputError(str(exc)) from exc
+            raise
+
+    producer_task = asyncio.create_task(producer())
+    try:
+        while True:
+            if producer_task.done() and queue.empty():
+                exc = producer_task.exception()
+                if exc:
+                    raise exc
+                break
+            try:
+                event = await asyncio.wait_for(queue.get(), timeout=request_timeout)
+            except asyncio.TimeoutError:
+                if producer_task.done():
+                    exc = producer_task.exception()
+                    if exc:
+                        raise exc
+                    break
+                raise
+            yield event
+    finally:
+        if not producer_task.done():
+            producer_task.cancel()
+            with contextlib.suppress(asyncio.CancelledError):
+                await producer_task
+
+    yield StreamEvent.done()
 
 
 @dataclass
@@ -584,19 +817,36 @@ def get_gemini_manager() -> GeminiManager:
 # OpenRouter Integration (Uncensored Models)
 # ============================================
 
-from openai import (
-    AsyncOpenAI,
-    APIConnectionError,
-    APITimeoutError,
-    APIStatusError,
-    AuthenticationError,
-    BadRequestError,
-    ConflictError,
-    NotFoundError,
-    PermissionDeniedError,
-    RateLimitError,
-    UnprocessableEntityError,
-)
+try:
+    from openai import (
+        AsyncOpenAI,
+        APIConnectionError,
+        APITimeoutError,
+        APIStatusError,
+        AuthenticationError,
+        BadRequestError,
+        ConflictError,
+        NotFoundError,
+        PermissionDeniedError,
+        RateLimitError,
+        UnprocessableEntityError,
+    )
+except ImportError:  # pragma: no cover - exercised in lightweight test environments
+    AsyncOpenAI = None
+
+    class _OpenAIFallbackError(Exception):
+        pass
+
+    APIConnectionError = _OpenAIFallbackError
+    APITimeoutError = _OpenAIFallbackError
+    APIStatusError = _OpenAIFallbackError
+    AuthenticationError = _OpenAIFallbackError
+    BadRequestError = _OpenAIFallbackError
+    ConflictError = _OpenAIFallbackError
+    NotFoundError = _OpenAIFallbackError
+    PermissionDeniedError = _OpenAIFallbackError
+    RateLimitError = _OpenAIFallbackError
+    UnprocessableEntityError = _OpenAIFallbackError
 
 OPENROUTER_BASE_URL = "https://openrouter.ai/api/v1"
 
@@ -740,6 +990,8 @@ class OpenRouterManager:
         app_title = os.getenv("OPENROUTER_APP_TITLE", "Femmy Discord Bot")
 
         if self.api_key:
+            if AsyncOpenAI is None:
+                raise RuntimeError("openai is not installed")
             self.client = AsyncOpenAI(
                 base_url=OPENROUTER_BASE_URL,
                 api_key=self.api_key,
@@ -1002,6 +1254,45 @@ class OpenRouterManager:
         if last_error:
             error_msg += f". Last error: {last_error}"
         raise RuntimeError(error_msg)
+
+    async def stream_generate(
+        self,
+        prompt: str,
+        *,
+        messages: Optional[List[Dict[str, str]]] = None,
+        system_instruction: Optional[str] = None,
+        tools: Optional[list[dict[str, Any]]] = None,
+    ) -> AsyncIterator[StreamEvent]:
+        if not self.client:
+            raise RuntimeError("OpenRouter API key not configured")
+
+        candidates = self._get_model_candidates()
+        model_id = self._pick_model(candidates)
+        payload_messages: List[Dict[str, str]] = []
+        if messages:
+            if system_instruction:
+                payload_messages.append({"role": "system", "content": system_instruction})
+            payload_messages.extend(messages)
+        else:
+            payload_messages = [{"role": "user", "content": prompt}]
+
+        try:
+            async for event in stream_openai_chat_completions(
+                self.client,
+                model=model_id,
+                messages=payload_messages,
+                timeout=self.request_timeout,
+                tools=tools,
+            ):
+                yield event
+            self._model_states[model_id].mark_success()
+        except Exception as exc:
+            classification = self._classify_error(exc)
+            if classification == "user_input":
+                raise UserInputError(str(exc)) from exc
+            retry_after = self._get_retry_after_seconds(exc)
+            self._mark_model_error(model_id, cooldown=classification == "retry", retry_after=retry_after)
+            raise
 
 
 # Global OpenRouter instance

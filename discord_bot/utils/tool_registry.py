@@ -2,10 +2,17 @@ from __future__ import annotations
 
 import os
 from dataclasses import dataclass, field
+from time import perf_counter
 from typing import Any, Awaitable, Callable, Optional
 
 import discord
 
+from tools.availability import compute_tool_availability_decisions
+from tools.audit import record_tool_execution
+from tools.compat import legacy_tool_to_descriptor
+from tools.contracts import ToolTurnContext
+from tools.quarantine import update_quarantine_from_execution
+from tools.registry import get_tool_registry as get_unified_tool_registry
 from utils.db_handler import get_staff_roles
 from utils.logger import get_logger
 from utils.tool_context import ToolContext
@@ -50,6 +57,7 @@ def register_tool(tool: ToolDefinition) -> None:
     if not name:
         raise ValueError("Tool name cannot be empty.")
     _registry[name] = tool
+    get_unified_tool_registry().register_descriptor(legacy_tool_to_descriptor(tool))
 
 
 def get_tool(name: str) -> Optional[ToolDefinition]:
@@ -58,6 +66,53 @@ def get_tool(name: str) -> Optional[ToolDefinition]:
 
 def list_tools() -> list[ToolDefinition]:
     return list(_registry.values())
+
+
+def list_tool_descriptors():
+    return get_unified_tool_registry().list_descriptors()
+
+
+async def get_shadow_availability_report(context: ToolContext) -> dict[str, Any]:
+    legacy_enabled = {tool.name for tool in get_available_tools(context.guild_config)}
+    decisions = await compute_tool_availability_decisions(context=context)
+    shadow_allowed = {decision.public_name for decision in decisions if decision.allowed}
+    return {
+        "legacy_enabled": sorted(legacy_enabled),
+        "shadow_allowed": sorted(shadow_allowed),
+        "only_legacy": sorted(legacy_enabled - shadow_allowed),
+        "only_shadow": sorted(shadow_allowed - legacy_enabled),
+        "decisions": decisions,
+    }
+
+
+async def get_runtime_available_tools(context: ToolContext | ToolTurnContext) -> list[ToolDefinition]:
+    decisions = await compute_tool_availability_decisions(context=context)
+    allowed_names = {decision.public_name for decision in decisions if decision.allowed}
+    tools: list[ToolDefinition] = [tool for tool in _registry.values() if tool.name in allowed_names]
+    missing_names = sorted(allowed_names - {tool.name for tool in tools})
+
+    async def _unsupported_handler(context: ToolContext, args: dict[str, Any]) -> ToolResult:
+        return ToolResult(ok=False, summary="Tool backend is unavailable.")
+
+    registry = get_unified_tool_registry()
+    for name in missing_names:
+        descriptor = registry.resolve_descriptor(name)
+        if descriptor is None:
+            continue
+        input_schema = descriptor.input_schema if isinstance(descriptor.input_schema, dict) else {}
+        tools.append(
+            ToolDefinition(
+                name=descriptor.public_name,
+                description=descriptor.description,
+                args_schema={str(key): str(value) for key, value in input_schema.items()},
+                handler=_unsupported_handler,
+            )
+        )
+    return tools
+
+
+async def render_runtime_tool_definitions(context: ToolContext | ToolTurnContext) -> str:
+    return render_tool_definitions(await get_runtime_available_tools(context))
 
 
 def _is_rag_env_enabled() -> bool:
@@ -109,29 +164,141 @@ def _requires_permission(tool: ToolDefinition) -> int:
 
 async def execute_tool(name: str, args: dict[str, Any], context: ToolContext) -> ToolResult:
     tool = _registry.get(name)
+    descriptor = get_unified_tool_registry().resolve_descriptor(name)
+    timer_started = perf_counter()
     if not tool:
-        return ToolResult(ok=False, summary="Unknown tool.", data={"tool": name})
+        result = ToolResult(ok=False, summary="Unknown tool.", data={"tool": name})
+        await record_tool_execution(
+            descriptor=descriptor,
+            context=context,
+            arguments=args if isinstance(args, dict) else {},
+            result=result,
+            tool_name=name,
+            invocation_mode="model",
+            decision_outcome="unknown",
+            execution_outcome="unavailable",
+            reason_codes=["unknown_tool"],
+            latency_ms=max(0, int((perf_counter() - timer_started) * 1000)),
+            raw_payload=args if isinstance(args, dict) else {},
+            raw_result={"ok": result.ok, "summary": result.summary, "data": result.data},
+        )
+        return result
     if not isinstance(args, dict):
         args = {}
     if not context.guild and not tool.allow_in_dms:
-        return ToolResult(ok=False, summary="This tool is only available in servers.")
+        result = ToolResult(ok=False, summary="This tool is only available in servers.")
+        await record_tool_execution(
+            descriptor=descriptor,
+            context=context,
+            arguments=args,
+            result=result,
+            tool_name=name,
+            invocation_mode="model",
+            decision_outcome="denied",
+            execution_outcome="unavailable",
+            reason_codes=["dm_not_allowed"],
+            latency_ms=max(0, int((perf_counter() - timer_started) * 1000)),
+            raw_payload=args,
+            raw_result={"ok": result.ok, "summary": result.summary, "data": result.data},
+        )
+        return result
     if not is_tool_enabled(tool, context.guild_config):
-        return ToolResult(ok=False, summary="This tool is disabled for this server.")
+        result = ToolResult(ok=False, summary="This tool is disabled for this server.")
+        await record_tool_execution(
+            descriptor=descriptor,
+            context=context,
+            arguments=args,
+            result=result,
+            tool_name=name,
+            invocation_mode="model",
+            decision_outcome="denied",
+            execution_outcome="unavailable",
+            reason_codes=["feature_flag_disabled"],
+            latency_ms=max(0, int((perf_counter() - timer_started) * 1000)),
+            raw_payload=args,
+            raw_result={"ok": result.ok, "summary": result.summary, "data": result.data},
+        )
+        return result
 
     required_level = _requires_permission(tool)
     if required_level:
         level = await _get_permission_level(context.user)
         if level < required_level:
-            return ToolResult(ok=False, summary="You do not have permission to use this tool.")
+            result = ToolResult(ok=False, summary="You do not have permission to use this tool.")
+            await record_tool_execution(
+                descriptor=descriptor,
+                context=context,
+                arguments=args,
+                result=result,
+                tool_name=name,
+                invocation_mode="model",
+                decision_outcome="denied",
+                execution_outcome="denied",
+                reason_codes=["user_permission_denied"],
+                latency_ms=max(0, int((perf_counter() - timer_started) * 1000)),
+                raw_payload=args,
+                raw_result={"ok": result.ok, "summary": result.summary, "data": result.data},
+            )
+            return result
 
     try:
         result = await tool.handler(context, args)
         if not isinstance(result, ToolResult):
-            return ToolResult(ok=False, summary="Tool returned no result.")
+            result = ToolResult(ok=False, summary="Tool returned no result.")
+            outcome = "error"
+            error_category = "invalid_result"
+            reason_codes = ["invalid_tool_result"]
+        else:
+            outcome = "success" if result.ok else "error"
+            error_category = None if result.ok else "tool_error"
+            reason_codes = [] if result.ok else ["tool_returned_error"]
+        await record_tool_execution(
+            descriptor=descriptor,
+            context=context,
+            arguments=args,
+            result=result,
+            tool_name=name,
+            invocation_mode="model",
+            decision_outcome="allowed",
+            execution_outcome=outcome,
+            reason_codes=reason_codes,
+            error_category=error_category,
+            latency_ms=max(0, int((perf_counter() - timer_started) * 1000)),
+            raw_payload=args,
+            raw_result={"ok": result.ok, "summary": result.summary, "data": result.data},
+        )
+        await update_quarantine_from_execution(
+            descriptor=descriptor,
+            guild_id=getattr(getattr(context, "guild", None), "id", None) or getattr(context, "guild_id", None),
+            execution_outcome=outcome,
+            error_category=error_category,
+        )
         return result
     except Exception as exc:
         logger.error("Tool %s failed: %s", name, exc, exc_info=True)
-        return ToolResult(ok=False, summary="Tool execution failed.", data={"error": str(exc)})
+        result = ToolResult(ok=False, summary="Tool execution failed.", data={"error": str(exc)})
+        await record_tool_execution(
+            descriptor=descriptor,
+            context=context,
+            arguments=args,
+            result=result,
+            tool_name=name,
+            invocation_mode="model",
+            decision_outcome="allowed",
+            execution_outcome="error",
+            reason_codes=["tool_exception"],
+            error_category="exception",
+            latency_ms=max(0, int((perf_counter() - timer_started) * 1000)),
+            raw_payload=args,
+            raw_result={"ok": result.ok, "summary": result.summary, "data": result.data},
+        )
+        await update_quarantine_from_execution(
+            descriptor=descriptor,
+            guild_id=getattr(getattr(context, "guild", None), "id", None) or getattr(context, "guild_id", None),
+            execution_outcome="error",
+            error_category="exception",
+        )
+        return result
 
 
 def get_available_tools(guild_config: dict[str, Any]) -> list[ToolDefinition]:
@@ -197,3 +364,10 @@ def register_builtin_tools() -> None:
         register_tool(tool)
 
     _initialized = True
+
+
+def _reset_registry_for_tests() -> None:
+    global _initialized
+    _registry.clear()
+    get_unified_tool_registry().clear()
+    _initialized = False
