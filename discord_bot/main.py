@@ -80,6 +80,26 @@ intents.dm_messages = False
 logger = get_logger(__name__)
 
 
+def _resolve_runtime_guard_path() -> Path:
+    override = os.getenv(RUNTIME_GUARD_PATH_ENV)
+    if override:
+        path = Path(override)
+    else:
+        data_dir = os.getenv("DATABASE_DIR")
+        if data_dir:
+            path = Path(data_dir)
+            if not path.is_absolute():
+                path = BASE_DIR / path
+        else:
+            path = BASE_DIR / "data"
+        path = path / "bot-runtime.lock"
+    return path
+
+
+def _runtime_guard_disabled() -> bool:
+    return str(os.getenv(RUNTIME_GUARD_DISABLE_ENV, "")).lower() in {"1", "true", "yes", "on"}
+
+
 def discover_cogs() -> list[str]:
     """Discover all cogs in the cogs directory."""
     cogs_dir = Path(__file__).parent / COG_PACKAGE

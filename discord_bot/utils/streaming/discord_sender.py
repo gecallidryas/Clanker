@@ -79,15 +79,7 @@ class DiscordReplySession:
         if self.last_message and not self.has_visible_output:
             await self.append_interruption_hint(self.send_policy.truncation_notice)
             return
-        if self.first_message is None:
-            self.first_message = await self.source_message.reply(
-                self.send_policy.truncation_notice,
-                mention_author=False,
-            )
-            self.last_message = self.first_message
-            self.visible_text_parts.append(self.send_policy.truncation_notice)
-            return
-        self.last_message = await self.source_message.channel.send(self.send_policy.truncation_notice)
+        self.last_message = await self._send_chunk(self.send_policy.truncation_notice)
         self.visible_text_parts.append(self.send_policy.truncation_notice)
 
     async def _send_chunk(self, chunk: str):

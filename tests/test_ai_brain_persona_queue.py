@@ -19,6 +19,9 @@ if "utils.rag_store" not in sys.modules:
 from cogs import ai_brain as ai_brain_mod  # noqa: E402
 from utils.persona_queue import PersonaInvocationJob, PersonaQueueManager  # noqa: E402
 
+# The stub is only needed while importing ai_brain for this test module.
+sys.modules.pop("utils.rag_store", None)
+
 
 class _FakeBot:
     def __init__(self):

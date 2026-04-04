@@ -16,6 +16,9 @@ if "utils.rag_store" not in sys.modules:
 
 from cogs.ai_brain import _is_admin_intent_content  # noqa: E402
 
+# The stub is only needed while importing ai_brain for this test module.
+sys.modules.pop("utils.rag_store", None)
+
 
 def test_admin_intent_detects_starboard_setup_text():
     assert _is_admin_intent_content(

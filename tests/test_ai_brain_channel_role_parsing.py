@@ -16,6 +16,9 @@ if "utils.rag_store" not in sys.modules:
 
 from cogs.ai_brain import _extract_channel_request, _extract_role_request  # noqa: E402
 
+# The stub is only needed while importing ai_brain for this test module.
+sys.modules.pop("utils.rag_store", None)
+
 
 def test_extract_channel_request_create_text_under_category():
     parsed = _extract_channel_request('create channel "general-chat" under "community"')
