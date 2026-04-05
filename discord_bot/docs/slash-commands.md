@@ -108,6 +108,11 @@ Some commands require elevated Discord permissions such as `Manage Guild`, `Admi
 
 ## Guild Management
 
+Welcome notes:
+- `/welcome set_message` templates now support literal `@user` as an alias for the joining member mention.
+- Public welcome messages attach a generated `petpet.gif` based on the new member avatar.
+- Optional DM petpet attachments are managed from the welcome panel opened by `/welcome manage`.
+
 | Command | Description | Source |
 | --- | --- | --- |
 | `/autorole manage` | Open the autorole section inside the config panel UX. | `config.py` |
@@ -123,9 +128,9 @@ Some commands require elevated Discord permissions such as `Manage Guild`, `Admi
 | `/welcome clear` | Disable welcome messages and clear the channel. | `config.py` |
 | `/welcome clear_dm_message` | Clear the DM welcome message. | `config.py` |
 | `/welcome clear_message` | Clear the welcome message template. | `config.py` |
-| `/welcome manage` | Open the welcome section inside the config panel UX. | `config.py` |
+| `/welcome manage` | Open the welcome section inside the config panel UX, including the DM petpet toggle. | `config.py` |
 | `/welcome set_dm_message` | Set the DM welcome message. | `config.py` |
-| `/welcome set_message` | Set a custom welcome message template. | `config.py` |
+| `/welcome set_message` | Set a custom welcome message template; supports `@user` and existing welcome placeholders. | `config.py` |
 | `/welcome test` | Send a test welcome message. | `config.py` |
 | `/welcome toggle_dm` | Enable or disable DM welcome messages. | `config.py` |
 | `/welcome view_message` | View the welcome message template. | `config.py` |

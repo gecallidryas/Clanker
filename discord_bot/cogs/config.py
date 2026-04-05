@@ -45,6 +45,7 @@ from utils.db_handler import (
     set_dm_welcome_message,
     set_dm_welcome_enabled,
     get_dm_welcome_enabled,
+    set_dm_welcome_petpet_enabled,
     get_url_safety_config,
     set_url_safety_config,
 )
@@ -1394,6 +1395,7 @@ class Config(commands.Cog):
         embed.add_field(name="Channel", value=f"<#{channel_id}>" if channel_id else "None", inline=False)
         embed.add_field(name="Enabled", value=str(bool(config.get("welcome_enabled"))), inline=True)
         embed.add_field(name="DM welcome", value=str(bool(config.get("dm_welcome_enabled"))), inline=True)
+        embed.add_field(name="DM petpet", value=str(bool(config.get("dm_welcome_petpet_enabled"))), inline=True)
         embed.add_field(
             name="Custom message",
             value="Set" if config.get("welcome_message_template") else "Default",
@@ -1406,6 +1408,7 @@ class Config(commands.Cog):
                 ActionOption("Disable Welcome", "disable", "Clear the welcome channel"),
                 ActionOption("Edit Messages", "edit_messages", "Welcome template and DM welcome message"),
                 ActionOption("Toggle DM Welcome", "toggle_dm", "Enable or disable DM welcome messages"),
+                ActionOption("Toggle DM Petpet", "toggle_dm_petpet", "Enable or disable DM petpet attachments"),
             ],
             on_action=lambda panel_interaction, value: self._handle_welcome_action(panel_interaction, value),
         )
@@ -1452,6 +1455,17 @@ class Config(commands.Cog):
                 title="DM Welcome Toggle",
                 fields=[{"key": "enabled", "label": "Enabled (on/off)", "default": "on", "required": True}],
                 on_submit_callback=lambda modal_interaction, values: self._save_dm_welcome_toggle(modal_interaction, values),
+            )
+            await interaction.response.send_modal(modal)
+            return
+        if value == "toggle_dm_petpet":
+            modal = CallbackFormModal(
+                title="DM Petpet Toggle",
+                fields=[{"key": "enabled", "label": "Enabled (on/off)", "default": "off", "required": True}],
+                on_submit_callback=lambda modal_interaction, values: self._save_dm_welcome_petpet_toggle(
+                    modal_interaction,
+                    values,
+                ),
             )
             await interaction.response.send_modal(modal)
             return
@@ -1504,6 +1518,22 @@ class Config(commands.Cog):
             detail={"enabled": enabled},
         )
         await interaction.response.send_message(f"DM welcome {'enabled' if enabled else 'disabled'}.", ephemeral=True)
+
+    async def _save_dm_welcome_petpet_toggle(self, interaction: discord.Interaction, values: dict[str, str]) -> None:
+        enabled_value = (values.get("enabled") or "").strip().lower()
+        if enabled_value not in {"on", "off", "enable", "disable", "true", "false"}:
+            await interaction.response.send_message("DM petpet must be `on` or `off`.", ephemeral=True)
+            return
+        enabled = enabled_value in {"on", "enable", "true"}
+        await set_dm_welcome_petpet_enabled(interaction.guild.id, enabled)
+        await add_guild_config_audit(
+            interaction.guild.id,
+            interaction.user.id,
+            "welcome_settings_save",
+            summary="DM petpet toggle updated",
+            detail={"enabled": enabled},
+        )
+        await interaction.response.send_message(f"DM petpet {'enabled' if enabled else 'disabled'}.", ephemeral=True)
 
     async def _send_url_safety_panel(self, interaction: discord.Interaction) -> None:
         if not await self._require_guild(interaction):

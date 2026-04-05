@@ -243,6 +243,7 @@ async def _create_guild_config_table(db: aiosqlite.Connection) -> None:
             welcome_message_template TEXT,
             dm_welcome_message TEXT,
             dm_welcome_enabled INTEGER DEFAULT 0,
+            dm_welcome_petpet_enabled INTEGER DEFAULT 0,
             spam_timeout_enabled INTEGER DEFAULT 0,
             spam_max_messages INTEGER DEFAULT 8,
             spam_window_seconds INTEGER DEFAULT 10,
@@ -1241,6 +1242,7 @@ async def _init_guild_schema(db: aiosqlite.Connection) -> None:
             ("welcome_message_template", "TEXT", None),
             ("dm_welcome_message", "TEXT", None),
             ("dm_welcome_enabled", "INTEGER", 0),
+            ("dm_welcome_petpet_enabled", "INTEGER", 0),
             ("spam_timeout_enabled", "INTEGER", 0),
             ("spam_max_messages", "INTEGER", 8),
             ("spam_window_seconds", "INTEGER", 10),
@@ -4840,6 +4842,8 @@ async def get_welcome_config(guild_id: int) -> Dict[str, Any]:
         "welcome_channel_id": config.get("welcome_channel_id"),
         "welcome_enabled": True if enabled is None else bool(enabled),
         "welcome_message_template": config.get("welcome_message_template"),
+        "dm_welcome_enabled": bool(config.get("dm_welcome_enabled") or 0),
+        "dm_welcome_petpet_enabled": bool(config.get("dm_welcome_petpet_enabled") or 0),
     }
 
 
@@ -4879,6 +4883,18 @@ async def get_dm_welcome_enabled(guild_id: int) -> bool:
 async def set_dm_welcome_enabled(guild_id: int, enabled: bool) -> None:
     """Enable or disable DM welcome messages for a guild."""
     await update_guild_config(guild_id, {"dm_welcome_enabled": int(enabled)})
+
+
+async def get_dm_welcome_petpet_enabled(guild_id: int) -> bool:
+    """Return whether DM petpet attachments are enabled for a guild."""
+    config = await get_guild_config(guild_id)
+    enabled = config.get("dm_welcome_petpet_enabled")
+    return bool(enabled) if enabled is not None else False
+
+
+async def set_dm_welcome_petpet_enabled(guild_id: int, enabled: bool) -> None:
+    """Enable or disable DM petpet attachments for a guild."""
+    await update_guild_config(guild_id, {"dm_welcome_petpet_enabled": int(enabled)})
 
 
 async def get_spam_config(guild_id: int) -> Dict[str, Any]:
@@ -4976,6 +4992,7 @@ GUILD_CONFIG_FIELDS: Set[str] = {
     "welcome_message_template",
     "dm_welcome_message",
     "dm_welcome_enabled",
+    "dm_welcome_petpet_enabled",
     "spam_timeout_enabled",
     "spam_max_messages",
     "spam_window_seconds",

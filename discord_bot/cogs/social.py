@@ -8,6 +8,7 @@ Commands:
 """
 
 import random
+from io import BytesIO
 from pathlib import Path
 import discord
 from discord import app_commands
@@ -22,10 +23,12 @@ from utils.db_handler import (
     get_welcome_config,
     get_dm_welcome_message,
     get_dm_welcome_enabled,
+    get_dm_welcome_petpet_enabled,
     set_guild_avatar_path,
 )
 from utils.guild_ai import generate_guild_gemini_text, GuildConfigError
 from utils.logger import get_logger
+from utils.petpet import make_petpet
 from utils.server_profile import set_custom_profile, set_mode_profile, set_member_nickname
 from utils.persona_panel_ui import (
     MANAGE_GUIDANCE,
@@ -229,6 +232,7 @@ class Social(commands.Cog):
     ) -> str:
         ordinal = self._format_ordinal(member_count)
         replacements = {
+            "@user": member.mention,
             "{member}": member.mention,
             "{member_name}": member.display_name,
             "{member_count}": str(member_count),
@@ -248,6 +252,23 @@ class Social(commands.Cog):
         if text.endswith((".", "!", "?", "~")):
             return f"{text} {sentence}"
         return f"{text}. {sentence}"
+
+    async def _build_petpet_bytes(self, member: discord.Member) -> bytes | None:
+        avatar = getattr(member, "display_avatar", None)
+        if avatar is None or not hasattr(avatar, "read"):
+            return None
+        try:
+            avatar_bytes = await avatar.read()
+        except Exception as exc:
+            logger.warning("Failed to fetch welcome avatar for %s: %s", member, exc)
+            return None
+        if not avatar_bytes:
+            return None
+        try:
+            return make_petpet(avatar_bytes)
+        except Exception as exc:
+            logger.warning("Failed to build petpet for %s: %s", member, exc)
+            return None
     
     @commands.command(name="evil", aliases=["uncensored"])
     @commands.has_permissions(manage_guild=True)
@@ -348,6 +369,7 @@ class Social(commands.Cog):
         channel = member.guild.get_channel(channel_id) if channel_id else None
         template = welcome_config.get("welcome_message_template") if welcome_enabled else None
         member_count = int(getattr(member.guild, "member_count", 0) or 0)
+        petpet_bytes: bytes | None = None
 
         if channel:
             if template:
@@ -385,19 +407,32 @@ class Social(commands.Cog):
                 welcome_text = self._ensure_join_count_sentence(welcome_text, member_count)
 
             try:
+                send_kwargs = {
+                    "allowed_mentions": discord.AllowedMentions(users=True, roles=False, everyone=False),
+                }
+                petpet_bytes = await self._build_petpet_bytes(member)
+                if petpet_bytes:
+                    send_kwargs["file"] = discord.File(BytesIO(petpet_bytes), filename="petpet.gif")
                 await channel.send(
                     welcome_text,
-                    allowed_mentions=discord.AllowedMentions(users=True, roles=False, everyone=False),
+                    **send_kwargs,
                 )
             except discord.Forbidden:
                 logger.warning("Missing permissions to send welcome in %s", member.guild.name)
 
         # DM Welcome (Preset message from server staff)
         dm_enabled = await get_dm_welcome_enabled(guild_id)
+        dm_petpet_enabled = await get_dm_welcome_petpet_enabled(guild_id)
         dm_text = await get_dm_welcome_message(guild_id)
         if dm_enabled and dm_text:
             try:
-                await member.send(dm_text)
+                send_kwargs = {}
+                if dm_petpet_enabled:
+                    if petpet_bytes is None:
+                        petpet_bytes = await self._build_petpet_bytes(member)
+                    if petpet_bytes:
+                        send_kwargs["file"] = discord.File(BytesIO(petpet_bytes), filename="petpet.gif")
+                await member.send(dm_text, **send_kwargs)
             except discord.Forbidden:
                 logger.warning("Could not DM %s (DMs closed).", member)
             except Exception as exc:
