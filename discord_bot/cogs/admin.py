@@ -634,7 +634,7 @@ class Admin(commands.Cog):
     @app_commands.describe(name="Model key (optional)")
     async def set_model_slash(self, interaction: discord.Interaction, name: str = None):
         await interaction.response.send_message(
-            "Model settings are now guild-specific. Use `/config model set` or `/config env upload`.",
+            "Model settings are now guild-specific. Use `/config model manage` or `/config env upload`.",
             ephemeral=True,
         )
 

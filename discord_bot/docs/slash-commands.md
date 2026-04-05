@@ -108,11 +108,6 @@ Some commands require elevated Discord permissions such as `Manage Guild`, `Admi
 
 ## Guild Management
 
-Welcome notes:
-- `/welcome set_message` templates now support literal `@user` as an alias for the joining member mention.
-- Public welcome messages attach a generated `petpet.gif` based on the new member avatar.
-- Optional DM petpet attachments are managed from the welcome panel opened by `/welcome manage`.
-
 | Command | Description | Source |
 | --- | --- | --- |
 | `/autorole manage` | Open the autorole section inside the config panel UX. | `config.py` |
@@ -128,9 +123,9 @@ Welcome notes:
 | `/welcome clear` | Disable welcome messages and clear the channel. | `config.py` |
 | `/welcome clear_dm_message` | Clear the DM welcome message. | `config.py` |
 | `/welcome clear_message` | Clear the welcome message template. | `config.py` |
-| `/welcome manage` | Open the welcome section inside the config panel UX, including the DM petpet toggle. | `config.py` |
+| `/welcome manage` | Open the welcome section inside the config panel UX. | `config.py` |
 | `/welcome set_dm_message` | Set the DM welcome message. | `config.py` |
-| `/welcome set_message` | Set a custom welcome message template; supports `@user` and existing welcome placeholders. | `config.py` |
+| `/welcome set_message` | Set a custom welcome message template. | `config.py` |
 | `/welcome test` | Send a test welcome message. | `config.py` |
 | `/welcome toggle_dm` | Enable or disable DM welcome messages. | `config.py` |
 | `/welcome view_message` | View the welcome message template. | `config.py` |
@@ -139,65 +134,31 @@ Welcome notes:
 
 | Command | Description | Source |
 | --- | --- | --- |
-| `/config ai auto_channel_add` | Add a channel to AI auto-response channels. | `config.py` |
-| `/config ai auto_channel_remove` | Remove a channel from AI auto-response channels. | `config.py` |
-| `/config ai auto_threshold` | Set message count threshold for auto channels. | `config.py` |
-| `/config ai cooldown` | Set AI reply cooldown in seconds. | `config.py` |
-| `/config ai cooldown_type` | Set AI reply cooldown scope. | `config.py` |
-| `/config ai self_reply_limit` | Set max self-reply chain depth. | `config.py` |
-| `/config ai stream_budget` | Set streaming flush and send-budget limits. | `config.py` |
-| `/config ai streaming` | Enable or disable streamed AI replies. | `config.py` |
-| `/config ai thought_channel` | Set or clear the dedicated AI thought/debug channel. | `config.py` |
-| `/config ai thought_level` | Set AI thought/debug logging level. | `config.py` |
-| `/config ai thought_modlog` | Allow or deny fallback reuse of the mod-log for AI thought logs. | `config.py` |
-| `/config ai view` | View AI reply gating settings. | `config.py` |
-| `/config ai whitelist_add` | Add a channel to the AI reply whitelist. | `config.py` |
-| `/config ai whitelist_clear` | Clear the AI reply whitelist. | `config.py` |
-| `/config ai whitelist_remove` | Remove a channel from the AI reply whitelist. | `config.py` |
+| `/config ai manage` | Open the AI settings section of the config panel. | `config.py` |
 | `/config auth` | Authenticate for sensitive config operations. | `config.py` |
-| `/config custom_endpoint set` | Set custom endpoint values. | `config.py` |
-| `/config custom_endpoint view` | View custom endpoint settings. | `config.py` |
+| `/config custom_endpoint manage` | Open provider and custom endpoint settings in the config panel. | `config.py` |
 | `/config env example` | Send the guild .env.example template. | `config.py` |
 | `/config env upload` | Upload a .env file for this guild. | `config.py` |
-| `/config keys clear` | Clear all stored API keys. | `config.py` |
-| `/config keys set` | Set an API key for a task. | `config.py` |
-| `/config keys view` | View masked API keys. | `config.py` |
-| `/config model set` | Set a model for a provider. | `config.py` |
-| `/config model view` | View current model settings. | `config.py` |
+| `/config keys manage` | Open provider, key, and model configuration in the config panel. | `config.py` |
+| `/config model manage` | Open provider and model configuration in the config panel. | `config.py` |
 | `/config panel` | Open the primary Discord-native config panel. | `config.py` |
 | `/config password change` | Change the config password. | `config.py` |
 | `/config password reset` | Reset the config password (owner only). | `config.py` |
 | `/config password set` | Set the config password (first time only). | `config.py` |
-| `/config toggle autorole` | Enable or disable auto-role. | `config.py` |
-| `/config toggle emojis` | Enable or disable emoji usage. | `config.py` |
-| `/config toggle evil` | Enable or disable evil mode. | `config.py` |
-| `/config toggle gif_responses` | Enable or disable GIF replies. | `config.py` |
-| `/config toggle image_gen` | Enable or disable image generation. | `config.py` |
-| `/config toggle pin_message` | Enable or disable AI pinning. | `config.py` |
-| `/config toggle profile_peek` | Enable or disable profile picture analysis. | `config.py` |
-| `/config toggle rag` | Enable or disable local RAG retrieval. | `config.py` |
-| `/config toggle self_teaching` | Enable or disable self-teaching. | `config.py` |
-| `/config toggle stickers` | Enable or disable sticker usage. | `config.py` |
-| `/config toggle url_safety` | Enable or disable URL safety checks. | `config.py` |
-| `/config toggle web_search` | Enable or disable web search tools. | `config.py` |
-| `/config toggle welcome` | Enable or disable welcome messages. | `config.py` |
-| `/config toggle youtube` | Enable or disable YouTube processing. | `config.py` |
-| `/config ui` | Open a quick toggle UI panel. | `config.py` |
-| `/config url_safety action` | Set URL safety action (warn/delete). | `config.py` |
-| `/config url_safety allowlist` | Set URL allowlist regex patterns. | `config.py` |
-| `/config url_safety blocklist` | Set URL blocklist regex patterns. | `config.py` |
-| `/config url_safety clear` | Clear URL allowlist or blocklist. | `config.py` |
-| `/config url_safety view` | View URL safety settings. | `config.py` |
+| `/config toggle manage` | Open capability toggles, including evil mode, in the config panel. | `config.py` |
+| `/config url_safety manage` | Open the URL safety section of the config panel. | `config.py` |
 
 ## Tools
 
 | Command | Description | Source |
 | --- | --- | --- |
-| `/tools clear-guild-recency` | Clear the guild-wide short-term recency summary. | `tools_admin.py` |
+| `/tools context clear-guild-recency` | Clear the guild-wide short-term recency summary. | `tools_admin.py` |
+| `/tools context refresh` | Clear short-term channel memory and set a new context boundary. | `tools_admin.py` |
 | `/tools debug raw-capture-disable` | Disable temporary raw tool capture. | `tools_admin.py` |
 | `/tools debug raw-capture-enable` | Temporarily enable raw tool capture for debugging. | `tools_admin.py` |
 | `/tools debug raw-capture-status` | Show whether temporary raw capture is enabled. | `tools_admin.py` |
-| `/tools inspect` | Inspect tool candidates, denied tools, and filtering reasons. | `tools_admin.py` |
+| `/tools info inspect` | Inspect tool candidates, denied tools, and filtering reasons. | `tools_admin.py` |
+| `/tools info status` | Show tool availability for this server. | `tools_admin.py` |
 | `/tools manage` | Open the Discord-native tool management panel. | `tools_admin.py` |
 | `/tools mcp approve-global` | Approve a discovered admin-global MCP tool. | `tools_admin.py` |
 | `/tools mcp approve-guild` | Approve a discovered guild-scoped MCP tool. | `tools_admin.py` |
@@ -217,5 +178,3 @@ Welcome notes:
 | `/tools policy set-tool` | Set guild policy for a specific tool. | `tools_admin.py` |
 | `/tools quarantine clear` | Clear quarantine state for a specific tool in this guild. | `tools_admin.py` |
 | `/tools quarantine status` | Show active tool quarantine state for this guild. | `tools_admin.py` |
-| `/tools refresh` | Clear short-term channel memory and set a new context boundary. | `tools_admin.py` |
-| `/tools status` | Show tool availability for this server. | `tools_admin.py` |

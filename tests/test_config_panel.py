@@ -387,7 +387,6 @@ class PanelViewTests(unittest.IsolatedAsyncioTestCase):
                     "welcome_channel_id": None,
                     "welcome_enabled": 0,
                     "dm_welcome_enabled": 0,
-                    "dm_welcome_petpet_enabled": 0,
                     "welcome_message_template": None,
                 }
             ),
@@ -397,21 +396,6 @@ class PanelViewTests(unittest.IsolatedAsyncioTestCase):
         payload = interaction.response.messages[-1]
         self.assertIsInstance(payload["view"], ActionMenuView)
         self.assertIn("Welcome", payload["embed"].title)
-        field_names = [field.name for field in payload["embed"].fields]
-        self.assertIn("DM petpet", field_names)
-
-    async def test_welcome_dm_petpet_toggle_updates_setting(self):
-        cog = self._make_config_cog()
-        interaction = FakeInteraction(user_id=11)
-
-        with patch("discord_bot.cogs.config.set_dm_welcome_petpet_enabled", AsyncMock()) as setter, patch(
-            "discord_bot.cogs.config.add_guild_config_audit",
-            AsyncMock(),
-        ):
-            await cog._save_dm_welcome_petpet_toggle(interaction, {"enabled": "on"})
-
-        setter.assert_awaited_once_with(interaction.guild.id, True)
-        self.assertIn("DM petpet enabled", interaction.response.messages[-1]["content"])
 
     async def test_staff_manage_opens_panel(self):
         cog = self._make_config_cog()

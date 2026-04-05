@@ -99,6 +99,8 @@ FLAG_LABELS = {
 
 class ToolsAdmin(commands.Cog):
     tools_group = app_commands.Group(name="tools", description="Tool status and configuration")
+    info_group = app_commands.Group(name="info", description="Tool status and inspection", parent=tools_group)
+    context_group = app_commands.Group(name="context", description="Tool context maintenance", parent=tools_group)
     policy_group = app_commands.Group(name="policy", description="Tool policy controls", parent=tools_group)
     debug_group = app_commands.Group(name="debug", description="Tool debug controls", parent=tools_group)
     quarantine_group = app_commands.Group(name="quarantine", description="Tool quarantine controls", parent=tools_group)
@@ -280,7 +282,7 @@ class ToolsAdmin(commands.Cog):
         except (AttributeError, discord.HTTPException):
             pass
 
-    @tools_group.command(name="status", description="Show tool availability for this server.")
+    @info_group.command(name="status", description="Show tool availability for this server.")
     async def tools_status(self, interaction: discord.Interaction):
         if not await self._require_guild(interaction):
             return
@@ -338,7 +340,7 @@ class ToolsAdmin(commands.Cog):
 
         await interaction.response.send_message(embed=embed, ephemeral=True)
 
-    @tools_group.command(name="inspect", description="Inspect tool candidates, denied tools, and filtering reasons.")
+    @info_group.command(name="inspect", description="Inspect tool candidates, denied tools, and filtering reasons.")
     @app_commands.checks.has_permissions(administrator=True)
     async def tools_inspect(self, interaction: discord.Interaction, tool_name: str | None = None):
         if not await self._require_guild(interaction):
@@ -426,7 +428,7 @@ class ToolsAdmin(commands.Cog):
     async def tools_manage_command(self, interaction: discord.Interaction):
         await self.tools_manage(interaction)
 
-    @tools_group.command(
+    @context_group.command(
         name="refresh",
         description="Clear short-term channel memory and set a new context boundary.",
     )
@@ -466,7 +468,7 @@ class ToolsAdmin(commands.Cog):
         )
         await marker_message.edit(content=None, embed=embed)
 
-    @tools_group.command(
+    @context_group.command(
         name="clear-guild-recency",
         description="Clear the guild-wide short-term recency summary.",
     )

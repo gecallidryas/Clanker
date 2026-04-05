@@ -47,12 +47,7 @@ Detailed reference: [feature-config-panel.md](./feature-config-panel.md)
 
 ### Welcome and Autorole
 
-Welcome channel/message settings, DM welcomes, DM petpet attachment toggles, and autorole configuration live under the server settings portion of the config panel.
-
-Current welcome behavior includes:
-- custom welcome templates supporting literal `@user` as an alias for the joining member mention
-- generated public `petpet.gif` attachments based on the new member avatar
-- optional DM petpet attachments controlled from the welcome panel
+Welcome channel/message settings, DM welcomes, and autorole configuration live under the server settings portion of the config panel.
 
 Detailed reference: [feature-config-panel.md](./feature-config-panel.md)
 

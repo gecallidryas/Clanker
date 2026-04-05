@@ -45,7 +45,6 @@ from utils.db_handler import (
     set_dm_welcome_message,
     set_dm_welcome_enabled,
     get_dm_welcome_enabled,
-    set_dm_welcome_petpet_enabled,
     get_url_safety_config,
     set_url_safety_config,
 )
@@ -680,6 +679,8 @@ class Config(commands.Cog):
         if not await self._require_guild(interaction):
             return
         config = await get_guild_config(interaction.guild.id)
+        current_mode = await get_server_mode(interaction.guild.id)
+        evil_enabled = await get_evil_mode(interaction.guild.id)
         embed = discord.Embed(
             title="Capabilities",
             description="Grouped bulk toggles replace the old tiny on/off commands.",
@@ -692,15 +693,30 @@ class Config(commands.Cog):
                 value=f"{group['description']}\nEnabled: {enabled}/{len(group['keys'])}",
                 inline=False,
             )
+        evil_status = "Disabled in default mode" if current_mode == "mode_default" else ("Enabled" if evil_enabled else "Disabled")
+        embed.add_field(
+            name="Evil Mode",
+            value=f"Current mode: {current_mode}\nStatus: {evil_status}",
+            inline=False,
+        )
         view = ActionMenuView(
             invoker_id=interaction.user.id,
             options=[
-                ActionOption(group["title"], group_key, group["description"])
-                for group_key, group in FEATURE_GROUPS.items()
+                *[
+                    ActionOption(group["title"], group_key, group["description"])
+                    for group_key, group in FEATURE_GROUPS.items()
+                ],
+                ActionOption("Evil Mode", "evil_mode", "Manage evil mode inside the panel"),
             ],
-            on_action=lambda panel_interaction, value: self._send_feature_group_panel(panel_interaction, value),
+            on_action=lambda panel_interaction, value: self._handle_capabilities_action(panel_interaction, value),
         )
         await self._send_panel_response(interaction, embed=embed, view=view)
+
+    async def _handle_capabilities_action(self, interaction: discord.Interaction, value: str) -> None:
+        if value == "evil_mode":
+            await self._send_evil_mode_panel(interaction)
+            return
+        await self._send_feature_group_panel(interaction, value)
 
     async def _send_feature_group_panel(self, interaction: discord.Interaction, group_key: str) -> None:
         if not await self._require_guild(interaction):
@@ -724,6 +740,52 @@ class Config(commands.Cog):
             ),
         )
         await self._send_panel_response(interaction, embed=embed, view=view)
+
+    async def _send_evil_mode_panel(self, interaction: discord.Interaction) -> None:
+        if not await self._require_guild(interaction):
+            return
+        current_mode = await get_server_mode(interaction.guild.id)
+        enabled = await get_evil_mode(interaction.guild.id)
+        status = "Disabled in default mode" if current_mode == "mode_default" else ("Enabled" if enabled else "Disabled")
+        embed = discord.Embed(
+            title="Evil Mode",
+            description="Manage evil mode from the panel instead of a dedicated slash toggle.",
+            color=discord.Color.dark_red(),
+        )
+        embed.add_field(name="Server mode", value=current_mode, inline=False)
+        embed.add_field(name="Status", value=status, inline=False)
+        embed.set_footer(text=self._panel_guidance("/config toggle manage"))
+        view = ActionMenuView(
+            invoker_id=interaction.user.id,
+            options=[
+                ActionOption("Enable", "enable", "Turn evil mode on for the current non-default mode"),
+                ActionOption("Disable", "disable", "Turn evil mode off"),
+            ],
+            on_action=lambda panel_interaction, value: self._handle_evil_mode_action(panel_interaction, value),
+        )
+        await self._send_panel_response(interaction, embed=embed, view=view)
+
+    async def _handle_evil_mode_action(self, interaction: discord.Interaction, value: str) -> None:
+        if not await self._require_guild(interaction):
+            return
+        if not await self._require_auth(interaction):
+            return
+        current_mode = await get_server_mode(interaction.guild.id)
+        if current_mode == "mode_default":
+            await set_evil_mode(interaction.guild.id, False)
+            await interaction.response.send_message("Evil Mode is disabled in default mode.", ephemeral=True)
+            return
+        if value == "enable":
+            await set_evil_mode(interaction.guild.id, True)
+            await add_guild_config_audit(interaction.guild.id, interaction.user.id, "evil_mode_on")
+            await interaction.response.send_message("Evil Mode enabled.", ephemeral=True)
+            return
+        if value == "disable":
+            await set_evil_mode(interaction.guild.id, False)
+            await add_guild_config_audit(interaction.guild.id, interaction.user.id, "evil_mode_off")
+            await interaction.response.send_message("Evil Mode disabled.", ephemeral=True)
+            return
+        await interaction.response.send_message("Unknown evil mode action.", ephemeral=True)
 
     def _build_ai_embed(self, config: dict[str, Any]) -> discord.Embed:
         whitelist_ids = self._parse_id_list_field(config.get("ai_channel_whitelist"))
@@ -1395,7 +1457,6 @@ class Config(commands.Cog):
         embed.add_field(name="Channel", value=f"<#{channel_id}>" if channel_id else "None", inline=False)
         embed.add_field(name="Enabled", value=str(bool(config.get("welcome_enabled"))), inline=True)
         embed.add_field(name="DM welcome", value=str(bool(config.get("dm_welcome_enabled"))), inline=True)
-        embed.add_field(name="DM petpet", value=str(bool(config.get("dm_welcome_petpet_enabled"))), inline=True)
         embed.add_field(
             name="Custom message",
             value="Set" if config.get("welcome_message_template") else "Default",
@@ -1408,7 +1469,6 @@ class Config(commands.Cog):
                 ActionOption("Disable Welcome", "disable", "Clear the welcome channel"),
                 ActionOption("Edit Messages", "edit_messages", "Welcome template and DM welcome message"),
                 ActionOption("Toggle DM Welcome", "toggle_dm", "Enable or disable DM welcome messages"),
-                ActionOption("Toggle DM Petpet", "toggle_dm_petpet", "Enable or disable DM petpet attachments"),
             ],
             on_action=lambda panel_interaction, value: self._handle_welcome_action(panel_interaction, value),
         )
@@ -1455,17 +1515,6 @@ class Config(commands.Cog):
                 title="DM Welcome Toggle",
                 fields=[{"key": "enabled", "label": "Enabled (on/off)", "default": "on", "required": True}],
                 on_submit_callback=lambda modal_interaction, values: self._save_dm_welcome_toggle(modal_interaction, values),
-            )
-            await interaction.response.send_modal(modal)
-            return
-        if value == "toggle_dm_petpet":
-            modal = CallbackFormModal(
-                title="DM Petpet Toggle",
-                fields=[{"key": "enabled", "label": "Enabled (on/off)", "default": "off", "required": True}],
-                on_submit_callback=lambda modal_interaction, values: self._save_dm_welcome_petpet_toggle(
-                    modal_interaction,
-                    values,
-                ),
             )
             await interaction.response.send_modal(modal)
             return
@@ -1518,22 +1567,6 @@ class Config(commands.Cog):
             detail={"enabled": enabled},
         )
         await interaction.response.send_message(f"DM welcome {'enabled' if enabled else 'disabled'}.", ephemeral=True)
-
-    async def _save_dm_welcome_petpet_toggle(self, interaction: discord.Interaction, values: dict[str, str]) -> None:
-        enabled_value = (values.get("enabled") or "").strip().lower()
-        if enabled_value not in {"on", "off", "enable", "disable", "true", "false"}:
-            await interaction.response.send_message("DM petpet must be `on` or `off`.", ephemeral=True)
-            return
-        enabled = enabled_value in {"on", "enable", "true"}
-        await set_dm_welcome_petpet_enabled(interaction.guild.id, enabled)
-        await add_guild_config_audit(
-            interaction.guild.id,
-            interaction.user.id,
-            "welcome_settings_save",
-            summary="DM petpet toggle updated",
-            detail={"enabled": enabled},
-        )
-        await interaction.response.send_message(f"DM petpet {'enabled' if enabled else 'disabled'}.", ephemeral=True)
 
     async def _send_url_safety_panel(self, interaction: discord.Interaction) -> None:
         if not await self._require_guild(interaction):
@@ -1974,279 +2007,19 @@ class Config(commands.Cog):
     # Keys
     # =========================
 
-
-    @keys_group.command(name="view", description="View masked API keys.")
+    @keys_group.command(name="manage", description="Open provider, key, and model configuration in the config panel.")
     @app_commands.checks.has_permissions(administrator=True)
-    async def keys_view(self, interaction: discord.Interaction):
-        if not await self._require_guild(interaction):
-            return
-        if not await self._require_auth(interaction):
-            return
-        config = await get_guild_config(interaction.guild.id)
-        embed = discord.Embed(title="Guild API Keys", color=discord.Color.blue())
-
-        def format_group(fields: List[str]) -> str:
-            lines = []
-            for idx, field in enumerate(fields, start=1):
-                value = self._format_key(config.get(field))
-                lines.append(f"{idx}. {value}")
-            return "\n".join(lines) if lines else "Not set"
-
-        embed.add_field(
-            name="Gemini (General)",
-            value=format_group(CATEGORY_FIELDS["general"]),
-            inline=False,
-        )
-        embed.add_field(
-            name="Gemini (Translate)",
-            value=format_group(CATEGORY_FIELDS["translate"]),
-            inline=False,
-        )
-        embed.add_field(
-            name="Gemini (Summarize)",
-            value=format_group(CATEGORY_FIELDS["summarize"]),
-            inline=False,
-        )
-        embed.add_field(
-            name="Gemini (Profile)",
-            value=format_group(CATEGORY_FIELDS["profile"]),
-            inline=False,
-        )
-        embed.add_field(
-            name="OpenRouter (Uncensored)",
-            value=format_group(CATEGORY_FIELDS["uncensored"]),
-            inline=False,
-        )
-        await interaction.response.send_message(embed=embed, ephemeral=True)
-
-    @keys_group.command(name="clear", description="Clear all stored API keys.")
-    @app_commands.checks.has_permissions(administrator=True)
-    @app_commands.describe(category="general, translate, summarize, profile, uncensored", slot="Key slot (1-5)")
-    async def keys_clear(self, interaction: discord.Interaction, category: Optional[str] = None, slot: Optional[int] = None):
-        if not await self._require_guild(interaction):
-            return
-        if not await self._require_auth(interaction):
-            return
-        if not category:
-            await clear_guild_keys(interaction.guild.id)
-            await add_guild_config_audit(interaction.guild.id, interaction.user.id, "key_clear", field="all")
-            await interaction.response.send_message("All keys cleared.", ephemeral=True)
-            return
-
-        if slot is None:
-            await interaction.response.send_message("Specify a slot (1-5).", ephemeral=True)
-            return
-
-        field = self._resolve_category_field(category, slot)
-        if not field:
-            await interaction.response.send_message(
-                "Invalid category or slot. Categories: general, translate, summarize, profile, uncensored.",
-                ephemeral=True,
-            )
-            return
-
-        await update_guild_config(interaction.guild.id, {field: None})
-        await add_guild_config_audit(
-            interaction.guild.id,
-            interaction.user.id,
-            "key_clear",
-            field=field,
-        )
-        await interaction.response.send_message(
-            f"Cleared key slot {slot} for {category}.",
-            ephemeral=True,
-        )
-
-    @keys_group.command(name="set", description="Set an API key for a task.")
-    @app_commands.checks.has_permissions(administrator=True)
-    @app_commands.describe(
-        category="general, translate, summarize, or uncensored",
-        slot="Key slot (1-5)",
-        key="API key value",
-    )
-    async def keys_set(self, interaction: discord.Interaction, category: str, slot: int, key: str):
-        if not await self._require_guild(interaction):
-            return
-        if not await self._require_auth(interaction):
-            return
-        field = self._resolve_category_field(category, slot)
-        if not field:
-            await interaction.response.send_message(
-                "Invalid category or slot. Categories: general, translate, summarize, profile, uncensored.",
-                ephemeral=True,
-            )
-            return
-        encrypted = self.encryption.encrypt(key)
-        await update_guild_config(interaction.guild.id, {field: encrypted})
-        await add_guild_config_audit(
-            interaction.guild.id,
-            interaction.user.id,
-            "key_set",
-            field=field,
-            new_value=self.encryption.mask_key(key),
-        )
-        await interaction.response.send_message(
-            f"Key set for {category} slot {slot}: {self.encryption.mask_key(key)}",
-            ephemeral=True,
-        )
-
-    @keys_set.autocomplete("category")
-    async def keys_set_category_autocomplete(
-        self,
-        interaction: discord.Interaction,
-        current: str,
-    ) -> list[app_commands.Choice[str]]:
-        options = ["general", "translate", "summarize", "profile", "uncensored"]
-        current_lower = current.lower().strip()
-        matches = [opt for opt in options if current_lower in opt]
-        return [app_commands.Choice(name=opt, value=opt) for opt in matches[:25]]
-
-    @keys_set.autocomplete("slot")
-    async def keys_set_slot_autocomplete(
-        self,
-        interaction: discord.Interaction,
-        current: str,
-    ) -> list[app_commands.Choice[int]]:
-        return [app_commands.Choice(name=str(i), value=i) for i in range(1, 6)]
+    async def keys_manage(self, interaction: discord.Interaction):
+        await self._send_provider_panel(interaction)
 
     # =========================
     # Models
     # =========================
 
-
-    @model_group.command(name="view", description="View current model settings.")
+    @model_group.command(name="manage", description="Open provider and model configuration in the config panel.")
     @app_commands.checks.has_permissions(administrator=True)
-    async def model_view(self, interaction: discord.Interaction):
-        if not await self._require_guild(interaction):
-            return
-        config = await get_guild_config(interaction.guild.id)
-        embed = discord.Embed(
-            title="Guild Model Settings",
-            color=discord.Color.blue(),
-        )
-        embed.add_field(
-            name="GEMINI_MODEL (General)",
-            value=config.get("gemini_model") or "Not set",
-            inline=False,
-        )
-        embed.add_field(
-            name="GEMINI_MODEL (Translate)",
-            value=config.get("gemini_translate_model") or "Not set",
-            inline=False,
-        )
-        embed.add_field(
-            name="GEMINI_MODEL (Summarize)",
-            value=config.get("gemini_summarize_model") or "Not set",
-            inline=False,
-        )
-        embed.add_field(
-            name="OPENROUTER_MODEL (Uncensored)",
-            value=config.get("openrouter_model") or "Not set",
-            inline=False,
-        )
-        embed.add_field(
-            name="OPENROUTER_FALLBACK_MODELS",
-            value=config.get("openrouter_fallback_models") or "Not set",
-            inline=False,
-        )
-        await interaction.response.send_message(embed=embed, ephemeral=True)
-
-    @model_group.command(name="set", description="Set a model for a provider.")
-    @app_commands.checks.has_permissions(administrator=True)
-    @app_commands.describe(category="general, translate, summarize, or uncensored", model="Model key or full ID")
-    async def model_set(self, interaction: discord.Interaction, category: str, model: str):
-        if not await self._require_guild(interaction):
-            return
-        if not await self._require_auth(interaction):
-            return
-        category = category.lower().strip()
-        model = model.strip()
-
-        config = await get_guild_config(interaction.guild.id)
-        updates: Dict[str, Optional[str]] = {}
-        warnings: List[str] = []
-
-        if category in ("general",):
-            normalized = normalize_gemini_model(model) or model
-            if normalized not in RECOMMENDED_GEMINI_MODELS:
-                warnings.append("GEMINI_MODEL is not in the recommended list.")
-            updates["gemini_model"] = normalized
-            old_value = config.get("gemini_model")
-        elif category in ("translate",):
-            normalized = normalize_gemini_model(model) or model
-            if normalized not in RECOMMENDED_GEMINI_MODELS:
-                warnings.append("GEMINI_TRANSLATE_MODEL is not in the recommended list.")
-            updates["gemini_translate_model"] = normalized
-            old_value = config.get("gemini_translate_model")
-        elif category in ("summarize", "summary", "summarisation", "summarise"):
-            normalized = normalize_gemini_model(model) or model
-            if normalized not in RECOMMENDED_GEMINI_MODELS:
-                warnings.append("GEMINI_SUMMARIZE_MODEL is not in the recommended list.")
-            updates["gemini_summarize_model"] = normalized
-            old_value = config.get("gemini_summarize_model")
-        elif category in ("uncensored", "openrouter"):
-            normalized = normalize_openrouter_model(model) or model
-            if normalized not in RECOMMENDED_OPENROUTER_MODELS:
-                warnings.append("OPENROUTER_MODEL is not in the recommended list.")
-            updates["openrouter_model"] = normalized
-            old_value = config.get("openrouter_model")
-        else:
-            await interaction.response.send_message(
-                "Unknown category. Use `general`, `translate`, `summarize`, or `uncensored`.",
-                ephemeral=True,
-            )
-            return
-
-        await update_guild_config(interaction.guild.id, updates)
-        await add_guild_config_audit(
-            interaction.guild.id,
-            interaction.user.id,
-            "model_change",
-            field=category,
-            old_value=old_value,
-            new_value=(
-                updates.get("gemini_model")
-                or updates.get("gemini_translate_model")
-                or updates.get("gemini_summarize_model")
-                or updates.get("openrouter_model")
-            ),
-        )
-
-        message = f"Model updated for {category}."
-        if warnings:
-            message += "\n" + "\n".join(f"Warning: {w}" for w in warnings)
-        await interaction.response.send_message(message, ephemeral=True)
-
-    @model_set.autocomplete("category")
-    async def model_set_category_autocomplete(
-        self,
-        interaction: discord.Interaction,
-        current: str,
-    ) -> list[app_commands.Choice[str]]:
-        options = ["general", "translate", "summarize", "uncensored"]
-        current_lower = current.lower().strip()
-        matches = [opt for opt in options if current_lower in opt]
-        return [app_commands.Choice(name=opt, value=opt) for opt in matches[:25]]
-
-    @model_set.autocomplete("model")
-    async def model_set_model_autocomplete(
-        self,
-        interaction: discord.Interaction,
-        current: str,
-    ) -> list[app_commands.Choice[str]]:
-        category = None
-        try:
-            category = str(interaction.namespace.category).lower()
-        except Exception:
-            category = ""
-        current_lower = (current or "").lower().strip()
-
-        if category in ("uncensored", "openrouter"):
-            options = list(dict.fromkeys(list(OPENROUTER_MODELS.keys()) + RECOMMENDED_OPENROUTER_MODELS))
-        else:
-            options = RECOMMENDED_GEMINI_MODELS
-        matches = [opt for opt in options if current_lower in opt.lower()]
-        return [app_commands.Choice(name=opt, value=opt) for opt in matches[:25]]
+    async def model_manage(self, interaction: discord.Interaction):
+        await self._send_provider_panel(interaction)
 
     # =========================
     # Env
@@ -2465,564 +2238,19 @@ class Config(commands.Cog):
     # Toggle
     # =========================
 
-
-    @toggle_group.command(name="evil", description="Enable or disable evil mode.")
+    @toggle_group.command(name="manage", description="Open capability toggles in the config panel.")
     @app_commands.checks.has_permissions(administrator=True)
-    @app_commands.describe(state="on/off (leave empty to view)")
-    async def toggle_evil(self, interaction: discord.Interaction, state: Optional[str] = None):
-        if not await self._require_guild(interaction):
-            return
-        current_mode = await get_server_mode(interaction.guild.id)
-        if current_mode == "mode_default":
-            await set_evil_mode(interaction.guild.id, False)
-            await interaction.response.send_message(
-                "Evil Mode is disabled in default mode.",
-                ephemeral=True,
-            )
-            return
-        if not state:
-            current = await get_evil_mode(interaction.guild.id)
-            status = "ENABLED" if current else "DISABLED"
-            await interaction.response.send_message(
-                f"Evil Mode is currently **{status}**.",
-                ephemeral=True,
-            )
-            return
-        if not await self._require_auth(interaction):
-            return
-        state_value = state.lower().strip()
-        if state_value in {"on", "enable", "true", "yes"}:
-            await set_evil_mode(interaction.guild.id, True)
-            await add_guild_config_audit(interaction.guild.id, interaction.user.id, "evil_mode_on")
-            await interaction.response.send_message("Evil Mode enabled.", ephemeral=True)
-        elif state_value in {"off", "disable", "false", "no"}:
-            await set_evil_mode(interaction.guild.id, False)
-            await add_guild_config_audit(interaction.guild.id, interaction.user.id, "evil_mode_off")
-            await interaction.response.send_message("Evil Mode disabled.", ephemeral=True)
-        else:
-            await interaction.response.send_message("Usage: `/config toggle evil on|off`", ephemeral=True)
-
-    @toggle_group.command(name="autorole", description="Enable or disable auto-role.")
-    @app_commands.checks.has_permissions(administrator=True)
-    @app_commands.describe(state="on/off (leave empty to view)")
-    async def toggle_autorole(self, interaction: discord.Interaction, state: Optional[str] = None):
-        if not await self._require_guild(interaction):
-            return
-        if not state:
-            config = await get_autorole_config(interaction.guild.id)
-            status = "ENABLED" if config.get("autorole_enabled") else "DISABLED"
-            await interaction.response.send_message(
-                f"Auto-role is currently **{status}**.{self._manage_panel_hint('/config panel', '/autorole manage')}",
-                ephemeral=True,
-            )
-            return
-        if not await self._require_auth(interaction):
-            return
-        state_value = state.lower().strip()
-        if state_value in {"on", "enable", "true", "yes"}:
-            await set_autorole_enabled(interaction.guild.id, True)
-            await add_guild_config_audit(interaction.guild.id, interaction.user.id, "autorole_on")
-            await interaction.response.send_message(
-                f"Auto-role enabled.{self._manage_panel_hint('/config panel', '/autorole manage')}",
-                ephemeral=True,
-            )
-        elif state_value in {"off", "disable", "false", "no"}:
-            await set_autorole_enabled(interaction.guild.id, False)
-            await add_guild_config_audit(interaction.guild.id, interaction.user.id, "autorole_off")
-            await interaction.response.send_message(
-                f"Auto-role disabled.{self._manage_panel_hint('/config panel', '/autorole manage')}",
-                ephemeral=True,
-            )
-        else:
-            await interaction.response.send_message(
-                f"Usage: `/config toggle autorole on|off`.{self._manage_panel_hint('/config panel', '/autorole manage')}",
-                ephemeral=True,
-            )
-
-    @toggle_group.command(name="welcome", description="Enable or disable welcome messages.")
-    @app_commands.checks.has_permissions(administrator=True)
-    @app_commands.describe(state="on/off (leave empty to view)")
-    async def toggle_welcome(self, interaction: discord.Interaction, state: Optional[str] = None):
-        if not await self._require_guild(interaction):
-            return
-        if not state:
-            config = await get_welcome_config(interaction.guild.id)
-            status = "ENABLED" if config.get("welcome_enabled") else "DISABLED"
-            await interaction.response.send_message(
-                f"Welcome messages are currently **{status}**.{self._manage_panel_hint('/config panel', '/welcome manage')}",
-                ephemeral=True,
-            )
-            return
-        if not await self._require_auth(interaction):
-            return
-        state_value = state.lower().strip()
-        if state_value in {"on", "enable", "true", "yes"}:
-            await set_welcome_enabled(interaction.guild.id, True)
-            await add_guild_config_audit(interaction.guild.id, interaction.user.id, "welcome_on")
-            await interaction.response.send_message(
-                f"Welcome messages enabled.{self._manage_panel_hint('/config panel', '/welcome manage')}",
-                ephemeral=True,
-            )
-        elif state_value in {"off", "disable", "false", "no"}:
-            await set_welcome_enabled(interaction.guild.id, False)
-            await add_guild_config_audit(interaction.guild.id, interaction.user.id, "welcome_off")
-            await interaction.response.send_message(
-                f"Welcome messages disabled.{self._manage_panel_hint('/config panel', '/welcome manage')}",
-                ephemeral=True,
-            )
-        else:
-            await interaction.response.send_message(
-                f"Usage: `/config toggle welcome on|off`.{self._manage_panel_hint('/config panel', '/welcome manage')}",
-                ephemeral=True,
-            )
-
-    async def _toggle_feature_flag(
-        self,
-        interaction: discord.Interaction,
-        flag_name: str,
-        label: str,
-        state: Optional[str],
-    ) -> None:
-        if not await self._require_guild(interaction):
-            return
-        if not state:
-            config = await get_guild_config(interaction.guild.id)
-            enabled = bool(config.get(flag_name) or 0)
-            status = "ENABLED" if enabled else "DISABLED"
-            await interaction.response.send_message(
-                f"{label} is currently **{status}**.{self._tools_panel_hint()}",
-                ephemeral=True,
-            )
-            return
-        if not await self._require_auth(interaction):
-            return
-        state_value = state.lower().strip()
-        if state_value in {"on", "enable", "true", "yes"}:
-            await update_guild_config(interaction.guild.id, {flag_name: 1})
-            await add_guild_config_audit(interaction.guild.id, interaction.user.id, f"{flag_name}_on")
-            await interaction.response.send_message(f"{label} enabled.{self._tools_panel_hint()}", ephemeral=True)
-        elif state_value in {"off", "disable", "false", "no"}:
-            await update_guild_config(interaction.guild.id, {flag_name: 0})
-            await add_guild_config_audit(interaction.guild.id, interaction.user.id, f"{flag_name}_off")
-            await interaction.response.send_message(f"{label} disabled.{self._tools_panel_hint()}", ephemeral=True)
-        else:
-            await interaction.response.send_message(f"Usage: `on` or `off`.{self._tools_panel_hint()}", ephemeral=True)
-
-    @toggle_group.command(name="web_search", description="Enable or disable web search tools.")
-    @app_commands.checks.has_permissions(administrator=True)
-    @app_commands.describe(state="on/off (leave empty to view)")
-    async def toggle_web_search(self, interaction: discord.Interaction, state: Optional[str] = None):
-        await self._toggle_feature_flag(interaction, "web_search_enabled", "Web search", state)
-
-    @toggle_group.command(name="image_gen", description="Enable or disable image generation.")
-    @app_commands.checks.has_permissions(administrator=True)
-    @app_commands.describe(state="on/off (leave empty to view)")
-    async def toggle_image_gen(self, interaction: discord.Interaction, state: Optional[str] = None):
-        await self._toggle_feature_flag(interaction, "image_gen_enabled", "Image generation", state)
-
-    @toggle_group.command(name="stickers", description="Enable or disable sticker usage.")
-    @app_commands.checks.has_permissions(administrator=True)
-    @app_commands.describe(state="on/off (leave empty to view)")
-    async def toggle_stickers(self, interaction: discord.Interaction, state: Optional[str] = None):
-        await self._toggle_feature_flag(interaction, "sticker_usage_enabled", "Sticker usage", state)
-
-    @toggle_group.command(name="emojis", description="Enable or disable emoji usage.")
-    @app_commands.checks.has_permissions(administrator=True)
-    @app_commands.describe(state="on/off (leave empty to view)")
-    async def toggle_emojis(self, interaction: discord.Interaction, state: Optional[str] = None):
-        await self._toggle_feature_flag(interaction, "emoji_usage_enabled", "Emoji usage", state)
-
-    @toggle_group.command(name="pin_message", description="Enable or disable AI pinning.")
-    @app_commands.checks.has_permissions(administrator=True)
-    @app_commands.describe(state="on/off (leave empty to view)")
-    async def toggle_pin_message(self, interaction: discord.Interaction, state: Optional[str] = None):
-        await self._toggle_feature_flag(interaction, "pin_message_enabled", "Pin message", state)
-
-    @toggle_group.command(name="self_teaching", description="Enable or disable self-teaching.")
-    @app_commands.checks.has_permissions(administrator=True)
-    @app_commands.describe(state="on/off (leave empty to view)")
-    async def toggle_self_teaching(self, interaction: discord.Interaction, state: Optional[str] = None):
-        await self._toggle_feature_flag(interaction, "self_teaching_enabled", "Self teaching", state)
-
-    @toggle_group.command(name="youtube", description="Enable or disable YouTube processing.")
-    @app_commands.checks.has_permissions(administrator=True)
-    @app_commands.describe(state="on/off (leave empty to view)")
-    async def toggle_youtube(self, interaction: discord.Interaction, state: Optional[str] = None):
-        await self._toggle_feature_flag(interaction, "youtube_enabled", "YouTube processing", state)
-
-    @toggle_group.command(name="profile_peek", description="Enable or disable profile picture analysis.")
-    @app_commands.checks.has_permissions(administrator=True)
-    @app_commands.describe(state="on/off (leave empty to view)")
-    async def toggle_profile_peek(self, interaction: discord.Interaction, state: Optional[str] = None):
-        await self._toggle_feature_flag(interaction, "profile_peek_enabled", "Profile peek", state)
-
-    @toggle_group.command(name="rag", description="Enable or disable local RAG retrieval.")
-    @app_commands.checks.has_permissions(administrator=True)
-    @app_commands.describe(state="on/off (leave empty to view)")
-    async def toggle_rag(self, interaction: discord.Interaction, state: Optional[str] = None):
-        await self._toggle_feature_flag(interaction, "rag_enabled", "RAG retrieval", state)
-
-    @toggle_group.command(name="gif_responses", description="Enable or disable GIF replies.")
-    @app_commands.checks.has_permissions(administrator=True)
-    @app_commands.describe(state="on/off (leave empty to view)")
-    async def toggle_gif_responses(self, interaction: discord.Interaction, state: Optional[str] = None):
-        await self._toggle_feature_flag(interaction, "gif_responses_enabled", "GIF responses", state)
-
-    @toggle_group.command(name="url_safety", description="Enable or disable URL safety checks.")
-    @app_commands.checks.has_permissions(administrator=True)
-    @app_commands.describe(state="on/off (leave empty to view)")
-    async def toggle_url_safety(self, interaction: discord.Interaction, state: Optional[str] = None):
-        await self._toggle_feature_flag(interaction, "url_safety_enabled", "URL safety", state)
+    async def toggle_manage(self, interaction: discord.Interaction):
+        await self._send_capabilities_panel(interaction)
 
     # =========================
     # AI Reply Behavior
     # =========================
 
-    @ai_group.command(name="view", description="View AI reply gating settings.")
+    @ai_group.command(name="manage", description="Open AI settings in the config panel.")
     @app_commands.checks.has_permissions(administrator=True)
-    async def ai_view(self, interaction: discord.Interaction):
-        if not await self._require_guild(interaction):
-            return
-        if not await self._require_auth(interaction):
-            return
-
-        config = await get_guild_config(interaction.guild.id)
-        whitelist_ids = self._parse_id_list_field(config.get("ai_channel_whitelist"))
-        auto_ids = self._parse_id_list_field(config.get("ai_auto_channels"))
-        cooldown = int(config.get("ai_reply_cooldown_seconds") or 0)
-        cooldown_type = str(config.get("ai_reply_cooldown_type") or "per_user")
-        self_reply_limit = int(config.get("ai_self_reply_limit") or 3)
-        multi_persona_enabled = bool(config.get("ai_multi_persona_enabled") or 0)
-        triggered_persona_limit = int(config.get("ai_triggered_persona_limit") or 1)
-        persona_webhooks_enabled = bool(config.get("ai_persona_webhooks_enabled", 1))
-        auto_threshold = int(config.get("ai_auto_threshold") or 0)
-        streaming_enabled = bool(config.get("ai_streaming_enabled", 1))
-        stream_min_flush_chars = int(config.get("ai_stream_min_flush_chars") or 120)
-        stream_stall_seconds = float(config.get("ai_stream_stall_seconds") or 2.0)
-        stream_min_interval_seconds = float(config.get("ai_stream_min_interval_seconds") or 1.0)
-        stream_max_messages = int(config.get("ai_stream_max_messages") or 6)
-        stream_max_total_chars = int(config.get("ai_stream_max_total_chars") or 6000)
-        thought_channel_id = config.get("ai_thought_channel_id")
-        thought_log_level = str(config.get("ai_thought_log_level") or "off")
-        thought_log_allow_mod_log = bool(config.get("ai_thought_log_allow_mod_log") or 0)
-
-        def _render_channels(ids: list[int]) -> str:
-            if not ids:
-                return "None"
-            return ", ".join(f"<#{channel_id}>" for channel_id in ids)
-
-        embed = discord.Embed(title="AI Reply Settings", color=discord.Color.blue())
-        embed.add_field(name="Reply Cooldown (seconds)", value=str(cooldown), inline=False)
-        embed.add_field(name="Reply Cooldown Scope", value=cooldown_type, inline=False)
-        embed.add_field(name="Self-reply chain limit", value=str(self_reply_limit), inline=False)
-        embed.add_field(
-            name="Persona runtime",
-            value=(
-                f"multi_persona={multi_persona_enabled}, "
-                f"triggered_limit={triggered_persona_limit}, "
-                f"webhook_identity={persona_webhooks_enabled}"
-            ),
-            inline=False,
-        )
-        embed.add_field(name="Channel whitelist", value=_render_channels(whitelist_ids), inline=False)
-        embed.add_field(name="Auto channels", value=_render_channels(auto_ids), inline=False)
-        embed.add_field(name="Auto threshold", value=str(auto_threshold), inline=False)
-        embed.add_field(name="Streaming enabled", value=str(streaming_enabled), inline=False)
-        embed.add_field(
-            name="Stream budget",
-            value=(
-                f"min_flush_chars={stream_min_flush_chars}, "
-                f"stall={stream_stall_seconds:.1f}s, "
-                f"min_interval={stream_min_interval_seconds:.1f}s, "
-                f"max_messages={stream_max_messages}, "
-                f"max_total_chars={stream_max_total_chars}"
-            ),
-            inline=False,
-        )
-        embed.add_field(
-            name="Thought log",
-            value=(
-                f"level={thought_log_level}, "
-                f"channel={'<#{0}>'.format(thought_channel_id) if thought_channel_id else 'None'}, "
-                f"allow_mod_log_reuse={thought_log_allow_mod_log}"
-            ),
-            inline=False,
-        )
-        await interaction.response.send_message(embed=embed, ephemeral=True)
-
-    @ai_group.command(name="cooldown", description="Set AI reply cooldown in seconds.")
-    @app_commands.checks.has_permissions(administrator=True)
-    @app_commands.describe(seconds="0 disables cooldown")
-    async def ai_set_cooldown(self, interaction: discord.Interaction, seconds: int):
-        if not await self._require_guild(interaction):
-            return
-        if not await self._require_auth(interaction):
-            return
-        if seconds < 0 or seconds > 3600:
-            await interaction.response.send_message("Use a value between 0 and 3600.", ephemeral=True)
-            return
-        await update_guild_config(interaction.guild.id, {"ai_reply_cooldown_seconds": int(seconds)})
-        await add_guild_config_audit(interaction.guild.id, interaction.user.id, "ai_reply_cooldown_seconds_set")
-        await interaction.response.send_message(f"AI reply cooldown set to {seconds}s.", ephemeral=True)
-
-    @ai_group.command(name="cooldown_type", description="Set AI reply cooldown scope.")
-    @app_commands.checks.has_permissions(administrator=True)
-    @app_commands.describe(
-        scope="off, per_user, per_channel, server_wide, strict_server_wide",
-    )
-    async def ai_set_cooldown_type(self, interaction: discord.Interaction, scope: str):
-        if not await self._require_guild(interaction):
-            return
-        if not await self._require_auth(interaction):
-            return
-        normalized = (scope or "").strip().lower()
-        valid = {"off", "per_user", "per_channel", "server_wide", "strict_server_wide"}
-        if normalized not in valid:
-            await interaction.response.send_message(
-                "Use one of: off, per_user, per_channel, server_wide, strict_server_wide.",
-                ephemeral=True,
-            )
-            return
-        await update_guild_config(interaction.guild.id, {"ai_reply_cooldown_type": normalized})
-        await add_guild_config_audit(interaction.guild.id, interaction.user.id, "ai_reply_cooldown_type_set")
-        await interaction.response.send_message(
-            f"AI reply cooldown scope set to `{normalized}`.",
-            ephemeral=True,
-        )
-
-    @ai_group.command(name="self_reply_limit", description="Set max self-reply chain depth.")
-    @app_commands.checks.has_permissions(administrator=True)
-    @app_commands.describe(limit="Maximum consecutive reply chain depth (1-20)")
-    async def ai_set_self_reply_limit(self, interaction: discord.Interaction, limit: int):
-        if not await self._require_guild(interaction):
-            return
-        if not await self._require_auth(interaction):
-            return
-        if limit < 1 or limit > 20:
-            await interaction.response.send_message("Use a value between 1 and 20.", ephemeral=True)
-            return
-        await update_guild_config(interaction.guild.id, {"ai_self_reply_limit": int(limit)})
-        await add_guild_config_audit(interaction.guild.id, interaction.user.id, "ai_self_reply_limit_set")
-        await interaction.response.send_message(f"AI self-reply chain limit set to {limit}.", ephemeral=True)
-
-    @ai_group.command(name="auto_threshold", description="Set message count threshold for auto channels.")
-    @app_commands.checks.has_permissions(administrator=True)
-    @app_commands.describe(threshold="0 disables auto-channel threshold behavior")
-    async def ai_set_auto_threshold(self, interaction: discord.Interaction, threshold: int):
-        if not await self._require_guild(interaction):
-            return
-        if not await self._require_auth(interaction):
-            return
-        if threshold < 0 or threshold > 20:
-            await interaction.response.send_message("Use a value between 0 and 20.", ephemeral=True)
-            return
-        await update_guild_config(interaction.guild.id, {"ai_auto_threshold": int(threshold)})
-        await add_guild_config_audit(interaction.guild.id, interaction.user.id, "ai_auto_threshold_set")
-        await interaction.response.send_message(f"AI auto-channel threshold set to {threshold}.", ephemeral=True)
-
-    @ai_group.command(name="whitelist_add", description="Add a channel to the AI reply whitelist.")
-    @app_commands.checks.has_permissions(administrator=True)
-    async def ai_whitelist_add(self, interaction: discord.Interaction, channel: discord.TextChannel):
-        if not await self._require_guild(interaction):
-            return
-        if not await self._require_auth(interaction):
-            return
-        config = await get_guild_config(interaction.guild.id)
-        current = self._parse_id_list_field(config.get("ai_channel_whitelist"))
-        if channel.id not in current:
-            current.append(channel.id)
-        await update_guild_config(interaction.guild.id, {"ai_channel_whitelist": json.dumps(current)})
-        await add_guild_config_audit(interaction.guild.id, interaction.user.id, "ai_whitelist_add")
-        await interaction.response.send_message(f"Added {channel.mention} to AI reply whitelist.", ephemeral=True)
-
-    @ai_group.command(name="whitelist_remove", description="Remove a channel from the AI reply whitelist.")
-    @app_commands.checks.has_permissions(administrator=True)
-    async def ai_whitelist_remove(self, interaction: discord.Interaction, channel: discord.TextChannel):
-        if not await self._require_guild(interaction):
-            return
-        if not await self._require_auth(interaction):
-            return
-        config = await get_guild_config(interaction.guild.id)
-        current = self._parse_id_list_field(config.get("ai_channel_whitelist"))
-        current = [channel_id for channel_id in current if channel_id != channel.id]
-        await update_guild_config(interaction.guild.id, {"ai_channel_whitelist": json.dumps(current)})
-        await add_guild_config_audit(interaction.guild.id, interaction.user.id, "ai_whitelist_remove")
-        await interaction.response.send_message(f"Removed {channel.mention} from AI reply whitelist.", ephemeral=True)
-
-    @ai_group.command(name="whitelist_clear", description="Clear the AI reply whitelist.")
-    @app_commands.checks.has_permissions(administrator=True)
-    async def ai_whitelist_clear(self, interaction: discord.Interaction):
-        if not await self._require_guild(interaction):
-            return
-        if not await self._require_auth(interaction):
-            return
-        await update_guild_config(interaction.guild.id, {"ai_channel_whitelist": None})
-        await add_guild_config_audit(interaction.guild.id, interaction.user.id, "ai_whitelist_clear")
-        await interaction.response.send_message("AI reply whitelist cleared.", ephemeral=True)
-
-    @ai_group.command(name="auto_channel_add", description="Add a channel to AI auto-response channels.")
-    @app_commands.checks.has_permissions(administrator=True)
-    async def ai_auto_channel_add(self, interaction: discord.Interaction, channel: discord.TextChannel):
-        if not await self._require_guild(interaction):
-            return
-        if not await self._require_auth(interaction):
-            return
-        config = await get_guild_config(interaction.guild.id)
-        current = self._parse_id_list_field(config.get("ai_auto_channels"))
-        if channel.id not in current:
-            current.append(channel.id)
-        await update_guild_config(interaction.guild.id, {"ai_auto_channels": json.dumps(current)})
-        await add_guild_config_audit(interaction.guild.id, interaction.user.id, "ai_auto_channel_add")
-        await interaction.response.send_message(f"Added {channel.mention} to AI auto channels.", ephemeral=True)
-
-    @ai_group.command(name="auto_channel_remove", description="Remove a channel from AI auto-response channels.")
-    @app_commands.checks.has_permissions(administrator=True)
-    async def ai_auto_channel_remove(self, interaction: discord.Interaction, channel: discord.TextChannel):
-        if not await self._require_guild(interaction):
-            return
-        if not await self._require_auth(interaction):
-            return
-        config = await get_guild_config(interaction.guild.id)
-        current = self._parse_id_list_field(config.get("ai_auto_channels"))
-        current = [channel_id for channel_id in current if channel_id != channel.id]
-        await update_guild_config(interaction.guild.id, {"ai_auto_channels": json.dumps(current)})
-        await add_guild_config_audit(interaction.guild.id, interaction.user.id, "ai_auto_channel_remove")
-        await interaction.response.send_message(f"Removed {channel.mention} from AI auto channels.", ephemeral=True)
-
-    @ai_group.command(name="streaming", description="Enable or disable streamed AI replies.")
-    @app_commands.checks.has_permissions(administrator=True)
-    @app_commands.describe(state="on/off")
-    async def ai_set_streaming(self, interaction: discord.Interaction, state: str):
-        if not await self._require_guild(interaction):
-            return
-        if not await self._require_auth(interaction):
-            return
-        normalized = (state or "").strip().lower()
-        if normalized not in {"on", "off", "enable", "disable", "true", "false"}:
-            await interaction.response.send_message("Use `on` or `off`.", ephemeral=True)
-            return
-        enabled = normalized in {"on", "enable", "true"}
-        await update_guild_config(interaction.guild.id, {"ai_streaming_enabled": int(enabled)})
-        await add_guild_config_audit(interaction.guild.id, interaction.user.id, "ai_streaming_enabled_set")
-        await interaction.response.send_message(
-            f"AI streaming {'enabled' if enabled else 'disabled'}.",
-            ephemeral=True,
-        )
-
-    @ai_group.command(name="stream_budget", description="Set streaming flush and send-budget limits.")
-    @app_commands.checks.has_permissions(administrator=True)
-    @app_commands.describe(
-        min_flush_chars="Minimum buffered characters before soft flush (20-1000)",
-        stall_seconds="Fallback stall flush timer in seconds (1-30)",
-        min_interval_seconds="Minimum seconds between sends (0-10)",
-        max_messages="Maximum streamed Discord messages per turn (1-20)",
-        max_total_chars="Maximum total visible characters per turn (500-20000)",
-    )
-    async def ai_set_stream_budget(
-        self,
-        interaction: discord.Interaction,
-        min_flush_chars: int,
-        stall_seconds: float,
-        min_interval_seconds: float,
-        max_messages: int,
-        max_total_chars: int,
-    ):
-        if not await self._require_guild(interaction):
-            return
-        if not await self._require_auth(interaction):
-            return
-        if not 20 <= min_flush_chars <= 1000:
-            await interaction.response.send_message("min_flush_chars must be between 20 and 1000.", ephemeral=True)
-            return
-        if not 1 <= stall_seconds <= 30:
-            await interaction.response.send_message("stall_seconds must be between 1 and 30.", ephemeral=True)
-            return
-        if not 0 <= min_interval_seconds <= 10:
-            await interaction.response.send_message("min_interval_seconds must be between 0 and 10.", ephemeral=True)
-            return
-        if not 1 <= max_messages <= 20:
-            await interaction.response.send_message("max_messages must be between 1 and 20.", ephemeral=True)
-            return
-        if not 500 <= max_total_chars <= 20000:
-            await interaction.response.send_message("max_total_chars must be between 500 and 20000.", ephemeral=True)
-            return
-        await update_guild_config(
-            interaction.guild.id,
-            {
-                "ai_stream_min_flush_chars": int(min_flush_chars),
-                "ai_stream_stall_seconds": float(stall_seconds),
-                "ai_stream_min_interval_seconds": float(min_interval_seconds),
-                "ai_stream_max_messages": int(max_messages),
-                "ai_stream_max_total_chars": int(max_total_chars),
-            },
-        )
-        await add_guild_config_audit(interaction.guild.id, interaction.user.id, "ai_stream_budget_set")
-        await interaction.response.send_message("AI streaming budget updated.", ephemeral=True)
-
-    @ai_group.command(name="thought_channel", description="Set or clear the dedicated AI thought/debug channel.")
-    @app_commands.checks.has_permissions(administrator=True)
-    @app_commands.describe(channel="Leave empty to clear the dedicated thought channel")
-    async def ai_set_thought_channel(
-        self,
-        interaction: discord.Interaction,
-        channel: Optional[discord.TextChannel] = None,
-    ):
-        if not await self._require_guild(interaction):
-            return
-        if not await self._require_auth(interaction):
-            return
-        await update_guild_config(
-            interaction.guild.id,
-            {"ai_thought_channel_id": channel.id if channel else None},
-        )
-        await add_guild_config_audit(interaction.guild.id, interaction.user.id, "ai_thought_channel_set")
-        if channel:
-            await interaction.response.send_message(
-                f"AI thought/debug logs will use {channel.mention}.",
-                ephemeral=True,
-            )
-        else:
-            await interaction.response.send_message("AI thought/debug channel cleared.", ephemeral=True)
-
-    @ai_group.command(name="thought_level", description="Set AI thought/debug logging level.")
-    @app_commands.checks.has_permissions(administrator=True)
-    @app_commands.describe(level="off, summary, raw_debug")
-    async def ai_set_thought_level(self, interaction: discord.Interaction, level: str):
-        if not await self._require_guild(interaction):
-            return
-        if not await self._require_auth(interaction):
-            return
-        normalized = (level or "").strip().lower()
-        if normalized not in {"off", "summary", "raw_debug"}:
-            await interaction.response.send_message("Use one of: off, summary, raw_debug.", ephemeral=True)
-            return
-        await update_guild_config(interaction.guild.id, {"ai_thought_log_level": normalized})
-        await add_guild_config_audit(interaction.guild.id, interaction.user.id, "ai_thought_log_level_set")
-        await interaction.response.send_message(f"AI thought log level set to `{normalized}`.", ephemeral=True)
-
-    @ai_group.command(name="thought_modlog", description="Allow or deny fallback reuse of the mod-log for AI thought logs.")
-    @app_commands.checks.has_permissions(administrator=True)
-    @app_commands.describe(state="on/off")
-    async def ai_set_thought_modlog(self, interaction: discord.Interaction, state: str):
-        if not await self._require_guild(interaction):
-            return
-        if not await self._require_auth(interaction):
-            return
-        normalized = (state or "").strip().lower()
-        if normalized not in {"on", "off", "enable", "disable", "true", "false"}:
-            await interaction.response.send_message("Use `on` or `off`.", ephemeral=True)
-            return
-        enabled = normalized in {"on", "enable", "true"}
-        await update_guild_config(interaction.guild.id, {"ai_thought_log_allow_mod_log": int(enabled)})
-        await add_guild_config_audit(
-            interaction.guild.id,
-            interaction.user.id,
-            "ai_thought_log_allow_mod_log_set",
-        )
-        await interaction.response.send_message(
-            f"AI thought log mod-log reuse {'enabled' if enabled else 'disabled'}.",
-            ephemeral=True,
-        )
+    async def ai_manage(self, interaction: discord.Interaction):
+        await self._send_ai_panel(interaction)
 
     async def _open_config_panel(self, interaction: discord.Interaction):
         if not await self._require_guild(interaction):
@@ -3040,119 +2268,14 @@ class Config(commands.Cog):
     async def config_panel(self, interaction: discord.Interaction):
         await self._open_config_panel(interaction)
 
-    @config.command(name="ui", description="Open a quick toggle UI panel.")
-    @app_commands.checks.has_permissions(administrator=True)
-    async def config_ui(self, interaction: discord.Interaction):
-        if not await self._require_guild(interaction):
-            return
-        await interaction.response.send_message(
-            "Use `/config panel` for the new admin UX. `/config ui` is now a legacy shortcut.",
-            ephemeral=True,
-        )
-
     # =========================
     # URL Safety
     # =========================
 
-    @url_safety_group.command(name="view", description="View URL safety settings.")
+    @url_safety_group.command(name="manage", description="Open URL safety settings in the config panel.")
     @app_commands.checks.has_permissions(administrator=True)
-    async def url_safety_view(self, interaction: discord.Interaction):
-        if not await self._require_guild(interaction):
-            return
-        if not await self._require_auth(interaction):
-            return
-        config = await get_url_safety_config(interaction.guild.id)
-
-        def format_list(raw: Optional[str]) -> str:
-            if not raw:
-                return "Not set"
-            lines = [line.strip() for line in raw.splitlines() if line.strip()]
-            if len(lines) > 6:
-                return "\n".join(lines[:6]) + "\n..."
-            return "\n".join(lines)
-
-        embed = discord.Embed(title="URL Safety Settings", color=discord.Color.blue())
-        embed.add_field(
-            name="Enabled",
-            value="Yes" if config.get("url_safety_enabled") else "No",
-            inline=False,
-        )
-        embed.add_field(
-            name="Action",
-            value=config.get("url_safety_action") or "warn",
-            inline=False,
-        )
-        embed.add_field(
-            name="Allowlist (regex)",
-            value=format_list(config.get("url_allowlist")),
-            inline=False,
-        )
-        embed.add_field(
-            name="Blocklist (regex)",
-            value=format_list(config.get("url_blocklist")),
-            inline=False,
-        )
-        await interaction.response.send_message(embed=embed, ephemeral=True)
-
-    @url_safety_group.command(name="action", description="Set URL safety action (warn/delete).")
-    @app_commands.checks.has_permissions(administrator=True)
-    @app_commands.describe(action="warn or delete")
-    async def url_safety_action(self, interaction: discord.Interaction, action: str):
-        if not await self._require_guild(interaction):
-            return
-        if not await self._require_auth(interaction):
-            return
-        action_value = (action or "").strip().lower()
-        if action_value not in {"warn", "delete"}:
-            await interaction.response.send_message("Action must be `warn` or `delete`.", ephemeral=True)
-            return
-        await set_url_safety_config(interaction.guild.id, {"url_safety_action": action_value})
-        await add_guild_config_audit(interaction.guild.id, interaction.user.id, "url_safety_action")
-        await interaction.response.send_message(
-            f"URL safety action set to **{action_value}**.",
-            ephemeral=True,
-        )
-
-    @url_safety_group.command(name="allowlist", description="Set URL allowlist regex patterns.")
-    @app_commands.checks.has_permissions(administrator=True)
-    @app_commands.describe(patterns="One pattern per line or comma-separated")
-    async def url_safety_allowlist(self, interaction: discord.Interaction, patterns: str):
-        if not await self._require_guild(interaction):
-            return
-        if not await self._require_auth(interaction):
-            return
-        await set_url_safety_config(interaction.guild.id, {"url_allowlist": patterns.strip()})
-        await add_guild_config_audit(interaction.guild.id, interaction.user.id, "url_safety_allowlist")
-        await interaction.response.send_message("URL allowlist updated.", ephemeral=True)
-
-    @url_safety_group.command(name="blocklist", description="Set URL blocklist regex patterns.")
-    @app_commands.checks.has_permissions(administrator=True)
-    @app_commands.describe(patterns="One pattern per line or comma-separated")
-    async def url_safety_blocklist(self, interaction: discord.Interaction, patterns: str):
-        if not await self._require_guild(interaction):
-            return
-        if not await self._require_auth(interaction):
-            return
-        await set_url_safety_config(interaction.guild.id, {"url_blocklist": patterns.strip()})
-        await add_guild_config_audit(interaction.guild.id, interaction.user.id, "url_safety_blocklist")
-        await interaction.response.send_message("URL blocklist updated.", ephemeral=True)
-
-    @url_safety_group.command(name="clear", description="Clear URL allowlist or blocklist.")
-    @app_commands.checks.has_permissions(administrator=True)
-    @app_commands.describe(target="allowlist or blocklist")
-    async def url_safety_clear(self, interaction: discord.Interaction, target: str):
-        if not await self._require_guild(interaction):
-            return
-        if not await self._require_auth(interaction):
-            return
-        target_value = (target or "").strip().lower()
-        if target_value not in {"allowlist", "blocklist"}:
-            await interaction.response.send_message("Target must be `allowlist` or `blocklist`.", ephemeral=True)
-            return
-        field = "url_allowlist" if target_value == "allowlist" else "url_blocklist"
-        await set_url_safety_config(interaction.guild.id, {field: None})
-        await add_guild_config_audit(interaction.guild.id, interaction.user.id, f"url_safety_clear_{target_value}")
-        await interaction.response.send_message(f"Cleared URL {target_value}.", ephemeral=True)
+    async def url_safety_manage(self, interaction: discord.Interaction):
+        await self._send_url_safety_panel(interaction)
 
     def _parse_env(self, content: str) -> Tuple[Dict[str, str], List[str], List[str], List[str]]:
         parsed: Dict[str, str] = {}
@@ -3184,70 +2307,10 @@ class Config(commands.Cog):
     # Custom Endpoint
     # =========================
 
-    @custom_endpoint_group.command(name="view", description="View custom endpoint settings.")
+    @custom_endpoint_group.command(name="manage", description="Open provider and custom endpoint settings in the config panel.")
     @app_commands.checks.has_permissions(administrator=True)
-    async def custom_endpoint_view(self, interaction: discord.Interaction):
-        if not await self._require_guild(interaction):
-            return
-        config = await get_guild_config(interaction.guild.id)
-        enabled = bool(config.get("custom_endpoint_enabled") or 0)
-        embed = discord.Embed(title="Custom Endpoint Settings", color=discord.Color.blue())
-        embed.add_field(name="Enabled", value=str(enabled), inline=False)
-        embed.add_field(name="Endpoint URL", value=config.get("custom_endpoint_url") or "Not set", inline=False)
-        embed.add_field(name="Model", value=config.get("custom_model_name") or "Not set", inline=False)
-        embed.add_field(
-            name="Capabilities",
-            value=config.get("custom_model_capabilities") or "Not set",
-            inline=False,
-        )
-        await interaction.response.send_message(embed=embed, ephemeral=True)
-
-    @custom_endpoint_group.command(name="set", description="Set custom endpoint values.")
-    @app_commands.checks.has_permissions(administrator=True)
-    @app_commands.describe(
-        url="Base URL for OpenAI-compatible endpoint",
-        model="Model name",
-        capabilities="Comma-separated capabilities (openai_compat, streaming, tools, vision, video)",
-        enabled="on/off",
-        api_key="API key (optional)",
-    )
-    async def custom_endpoint_set(
-        self,
-        interaction: discord.Interaction,
-        url: Optional[str] = None,
-        model: Optional[str] = None,
-        capabilities: Optional[str] = None,
-        enabled: Optional[str] = None,
-        api_key: Optional[str] = None,
-    ):
-        if not await self._require_guild(interaction):
-            return
-        if not await self._require_auth(interaction):
-            return
-
-        updates: Dict[str, Optional[str]] = {}
-        if url is not None:
-            updates["custom_endpoint_url"] = url.strip() if url.strip() else None
-        if model is not None:
-            updates["custom_model_name"] = model.strip() if model.strip() else None
-        if capabilities is not None:
-            updates["custom_model_capabilities"] = capabilities.strip() if capabilities.strip() else None
-        if enabled is not None:
-            enabled_value = enabled.lower().strip()
-            if enabled_value in {"on", "enable", "true", "yes"}:
-                updates["custom_endpoint_enabled"] = 1
-            elif enabled_value in {"off", "disable", "false", "no"}:
-                updates["custom_endpoint_enabled"] = 0
-        if api_key is not None:
-            updates["custom_endpoint_api_key"] = self.encryption.encrypt(api_key.strip()) if api_key.strip() else None
-
-        if not updates:
-            await interaction.response.send_message("No changes provided.", ephemeral=True)
-            return
-
-        await update_guild_config(interaction.guild.id, updates)
-        await add_guild_config_audit(interaction.guild.id, interaction.user.id, "custom_endpoint_set")
-        await interaction.response.send_message("Custom endpoint updated.", ephemeral=True)
+    async def custom_endpoint_manage(self, interaction: discord.Interaction):
+        await self._send_provider_panel(interaction)
 
     # =========================
     # Auto-role
