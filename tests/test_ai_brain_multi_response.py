@@ -61,6 +61,16 @@ def test_processing_ack_ignores_messages_with_links():
     assert _is_processing_ack_response(text) is False
 
 
+def test_time_awareness_prompt_instructions_reference_get_current_time():
+    section = ai_brain_mod.section_from_lines(
+        "TIME AWARENESS",
+        ai_brain_mod.TIME_AWARENESS_TOOL_LINES,
+    )
+    assert section is not None
+    assert "get_current_time" in section.body
+    assert "America/Denver" in section.body
+
+
 class _FakeContextBuffer:
     def __init__(self):
         self.entries = []

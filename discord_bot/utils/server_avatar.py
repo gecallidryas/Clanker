@@ -1,5 +1,6 @@
 from __future__ import annotations
 
+import inspect
 from pathlib import Path
 from typing import Optional
 
@@ -52,11 +53,31 @@ def _load_avatar_bytes(path: Path) -> Optional[bytes]:
     return data
 
 
+def _get_client_user(bot: discord.Client) -> Optional[discord.ClientUser]:
+    return getattr(bot, "user", None)
+
+
+def _get_bot_member(bot: discord.Client, guild_id: int) -> Optional[discord.Member]:
+    guild = bot.get_guild(guild_id)
+    if not guild:
+        return None
+    return guild.me or guild.get_member(bot.user.id if bot.user else 0)
+
+
+def _member_edit_supports(member: discord.Member, *fields: str) -> bool:
+    try:
+        parameters = inspect.signature(member.edit).parameters
+    except (TypeError, ValueError):
+        return False
+    return all(field in parameters for field in fields)
+
+
 async def set_server_avatar(
     bot: discord.Client,
     guild_id: int,
     avatar_bytes: bytes,
 ) -> tuple[bool, str]:
+    """Update the bot avatar, preferring the per-guild member profile on supported versions."""
     if not avatar_bytes:
         return False, "missing"
     if len(avatar_bytes) > MAX_AVATAR_BYTES:
@@ -70,12 +91,20 @@ async def set_server_avatar(
     if not guild:
         return False, "guild"
 
-    member = guild.me or guild.get_member(bot.user.id if bot.user else 0)
+    member = _get_bot_member(bot, guild_id)
     if not member:
         return False, "member"
 
     try:
-        await member.edit(avatar=avatar_bytes)
+        if _member_edit_supports(member, "avatar"):
+            await member.edit(avatar=avatar_bytes)
+        else:
+            user = _get_client_user(bot)
+            if not user:
+                return False, "user"
+            await user.edit(avatar=avatar_bytes)
+    except TypeError:
+        return False, "unsupported"
     except discord.Forbidden:
         return False, "forbidden"
     except discord.HTTPException:
@@ -89,6 +118,7 @@ async def clear_server_avatar(
     bot: discord.Client,
     guild_id: int,
 ) -> tuple[bool, str]:
+    """Clear the bot avatar, preferring the per-guild member profile on supported versions."""
     allowed, reason = await can_update_guild_avatar(guild_id)
     if not allowed:
         return False, reason
@@ -97,12 +127,20 @@ async def clear_server_avatar(
     if not guild:
         return False, "guild"
 
-    member = guild.me or guild.get_member(bot.user.id if bot.user else 0)
+    member = _get_bot_member(bot, guild_id)
     if not member:
         return False, "member"
 
     try:
-        await member.edit(avatar=None)
+        if _member_edit_supports(member, "avatar"):
+            await member.edit(avatar=None)
+        else:
+            user = _get_client_user(bot)
+            if not user:
+                return False, "user"
+            await user.edit(avatar=None)
+    except TypeError:
+        return False, "unsupported"
     except discord.Forbidden:
         return False, "forbidden"
     except discord.HTTPException:

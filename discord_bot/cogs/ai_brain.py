@@ -11,9 +11,8 @@ Features:
     - Chain memory for multi-user attribution
 
 Usage:
-    !mode femboy    - Switch to obedient femboy brother
-    !mode tsundere  - Switch to tsundere younger sister  
-    !mode oneesan   - Switch to caring older sister
+    /persona manage - Manage active persona and presentation
+    !evil on/off    - Toggle uncensored mode
 """
 
 from collections import deque
@@ -91,7 +90,11 @@ from tools.transports.prompt_emulated import (
     render_prompt_tool_definitions,
     strip_prompt_tool_call,
 )
-from utils.rag_store import get_rag_context
+try:
+    from utils.rag_store import get_rag_context
+except ImportError:  # pragma: no cover - lightweight environments may omit optional RAG deps.
+    async def get_rag_context(*args, **kwargs):
+        return ""
 from utils.text_splitter import split_message
 from utils.context_builder import (
     build_structured_prompt,
@@ -247,6 +250,12 @@ If you need a tool, respond ONLY with a tool code block in this schema:
 Do NOT include any other text outside the tool block.
 If the user asks what you can do, call the `review_capabilities` tool.
 """.strip()
+
+TIME_AWARENESS_TOOL_LINES = [
+    "Use get_current_time before answering any question that depends on the current date or time.",
+    "Call get_current_time for words like now, today, tomorrow, yesterday, tonight, later, this morning, and current time.",
+    "Interpret relative dates using the tool output in America/Denver instead of guessing from model knowledge.",
+]
 
 DEFAULT_ROLE_PERMISSIONS = discord.Permissions(
     view_channel=True,
@@ -3201,7 +3210,7 @@ class AIBrain(commands.Cog):
 
         commands_help = """
 You can explain these commands to the user if asked:
-- !mode <type>: Switch personality (femboy, tsundere, oneesan)
+- /persona manage: Manage active persona and presentation
 - !affection / !mood: Check relationship/server mood
 - !headpat / !hug: Give affection (+pts)
 - !evil on/off: Toggle uncensored mode
@@ -3216,7 +3225,8 @@ You can explain these commands to the user if asked:
 - /tools status: Show enabled tool capabilities
 - /tools refresh: Reset channel short-term memory and context boundary
 - /personal privacy: Opt out of personal memory
-- !stats / !ping: Bot status
+- Ask me in chat to create or delete roles, channels, and categories
+- !about / !ping: Bot status and bot info
 """.strip()
 
         expression_summary_lines: list[str] = []
@@ -3361,6 +3371,9 @@ You can explain these commands to the user if asked:
         section_commands = section_from_text("COMMAND REFERENCE", commands_help)
         if section_commands:
             section_order.append(section_commands)
+        section_time_awareness = section_from_lines("TIME AWARENESS", TIME_AWARENESS_TOOL_LINES)
+        if section_time_awareness:
+            section_order.append(section_time_awareness)
         section_tools = section_from_text("AVAILABLE TOOLS", tools_section)
         if section_tools:
             section_order.append(section_tools)

@@ -1,11 +1,15 @@
 from __future__ import annotations
 
+import inspect
 from pathlib import Path
 from typing import Optional
 
 import discord
 
 from utils.db_handler import DATA_DIR
+from utils.logger import get_logger
+
+logger = get_logger(__name__)
 
 MAX_BANNER_BYTES = 500 * 1024
 BANNER_DIR = DATA_DIR / "banners"
@@ -38,6 +42,18 @@ def _get_bot_member(bot: discord.Client, guild_id: int) -> Optional[discord.Memb
     return guild.me or guild.get_member(bot.user.id if bot.user else 0)
 
 
+def _get_client_user(bot: discord.Client) -> Optional[discord.ClientUser]:
+    return getattr(bot, "user", None)
+
+
+def _member_edit_supports(member: discord.Member, *fields: str) -> bool:
+    try:
+        parameters = inspect.signature(member.edit).parameters
+    except (TypeError, ValueError):
+        return False
+    return all(field in parameters for field in fields)
+
+
 async def set_member_profile(
     bot: discord.Client,
     guild_id: int,
@@ -45,12 +61,37 @@ async def set_member_profile(
     banner_bytes: Optional[bytes] = None,
     bio: Optional[str] = None,
 ) -> tuple[bool, str]:
-    """Update the bot's per-guild profile (banner/bio)."""
+    """Update the bot profile, preferring per-guild edits on supported discord.py versions."""
     member = _get_bot_member(bot, guild_id)
     if not member:
         return False, "member"
+
+    if _member_edit_supports(member, "banner", "bio"):
+        try:
+            await member.edit(banner=banner_bytes, bio=bio)
+        except TypeError:
+            return False, "unsupported"
+        except discord.Forbidden:
+            return False, "forbidden"
+        except discord.HTTPException:
+            return False, "http"
+        return True, "ok"
+
+    user = _get_client_user(bot)
+    if not user:
+        return False, "user"
+
+    if banner_bytes is None:
+        return False, "unsupported"
+
+    if bio:
+        logger.debug(
+            "Ignoring unsupported bot bio update for guild %s; falling back to client-user banner edit only.",
+            guild_id,
+        )
+
     try:
-        await member.edit(banner=banner_bytes, bio=bio)
+        await user.edit(banner=banner_bytes)
     except TypeError:
         return False, "unsupported"
     except discord.Forbidden:

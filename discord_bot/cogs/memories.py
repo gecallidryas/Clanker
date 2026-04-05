@@ -37,6 +37,7 @@ from utils.db_handler import (
     find_user_by_alias,
 )
 from utils.database_summarizer import DatabaseSummarizer
+from utils.interaction_status import send_mode_thinking
 from utils.logger import get_logger
 from utils.i18n import get_locale_from_guild, get_locale_from_interaction, t
 from utils.memory_limits import get_memory_limit_error_message, validate_fact_content
@@ -707,10 +708,11 @@ class Memories(commands.Cog):
                 ephemeral=True,
             )
             return
-        await interaction.response.defer(thinking=True)
+        await send_mode_thinking(interaction)
 
         await create_user(interaction.guild.id, target.id)
         if await get_personal_memory_opt_out(interaction.guild.id, target.id):
+            await interaction.delete_original_response()
             await interaction.followup.send(
                 f"{target.display_name} has opted out of personal memory in this server.",
                 ephemeral=True,
@@ -724,6 +726,7 @@ class Memories(commands.Cog):
             for item in summarized:
                 item_validation = validate_fact_content(item)
                 if not item_validation.is_valid:
+                    await interaction.delete_original_response()
                     await interaction.followup.send(
                         get_memory_limit_error_message(item_validation),
                         ephemeral=True,
@@ -735,14 +738,20 @@ class Memories(commands.Cog):
             for item in validated_items:
                 await add_fact(interaction.guild.id, target.id, item)
 
-            await interaction.followup.send(
-                f"Updated memory for {target.display_name} with {len(summarized)} fact(s)."
+            await interaction.edit_original_response(
+                content=f"Updated memory for {target.display_name} with {len(summarized)} fact(s).",
+                embed=None,
+                view=None,
             )
             return
 
         await add_fact(interaction.guild.id, target.id, fact)
         target_text = f" for {target.display_name}" if target.id != interaction.user.id else ""
-        await interaction.followup.send(f"Got it! I'll remember that{target_text}.")
+        await interaction.edit_original_response(
+            content=f"Got it! I'll remember that{target_text}.",
+            embed=None,
+            view=None,
+        )
 
     @remember_group.command(name="server", description="Save a server memory.")
     @app_commands.describe(fact="Server-wide memory entry")
@@ -772,7 +781,7 @@ class Memories(commands.Cog):
             )
             return
 
-        await interaction.response.defer(thinking=True, ephemeral=True)
+        await send_mode_thinking(interaction, ephemeral=True)
 
         clean_fact = fact.strip()
         existing = await get_server_memory(interaction.guild.id)
@@ -787,9 +796,10 @@ class Memories(commands.Cog):
             for item in summarized:
                 item_validation = validate_fact_content(item)
                 if not item_validation.is_valid:
-                    await interaction.followup.send(
-                        get_memory_limit_error_message(item_validation),
-                        ephemeral=True,
+                    await interaction.edit_original_response(
+                        content=get_memory_limit_error_message(item_validation),
+                        embed=None,
+                        view=None,
                     )
                     return
                 validated_items.append(item)
@@ -802,9 +812,10 @@ class Memories(commands.Cog):
                     source="manual",
                     learned_from_user_id=interaction.user.id,
                 )
-            await interaction.followup.send(
-                f"Updated server memory with {len(validated_items)} reconciled fact(s).",
-                ephemeral=True,
+            await interaction.edit_original_response(
+                content=f"Updated server memory with {len(validated_items)} reconciled fact(s).",
+                embed=None,
+                view=None,
             )
             return
 
@@ -815,9 +826,10 @@ class Memories(commands.Cog):
             learned_from_user_id=interaction.user.id,
         )
         locale = get_locale_from_interaction(interaction)
-        await interaction.followup.send(
-            t("remember.server.saved", locale),
-            ephemeral=True,
+        await interaction.edit_original_response(
+            content=t("remember.server.saved", locale),
+            embed=None,
+            view=None,
         )
 
     @app_commands.command(name="forget", description="Clear stored memory.")
@@ -1192,7 +1204,7 @@ class Memories(commands.Cog):
         target = member or interaction.user
         
         # Defer response since this takes time
-        await interaction.response.defer(thinking=True)
+        await send_mode_thinking(interaction)
 
         try:
             from utils.api_manager import UserInputError
@@ -1213,6 +1225,7 @@ class Memories(commands.Cog):
                     continue
 
             if len(messages) < 10:
+                await interaction.delete_original_response()
                 await interaction.followup.send(
                     f"Not enough messages for {target.display_name}. Need 10, found {len(messages)}.",
                     ephemeral=True
@@ -1250,12 +1263,14 @@ Write the analysis:"""
             try:
                 response, _ = await generate_guild_gemini_profile_text(interaction.guild.id, prompt)
             except GuildConfigError:
+                await interaction.delete_original_response()
                 await interaction.followup.send(
                     "Profile analysis not configured. Ask admin to set GEMINI_PROFILE_KEY.",
                     ephemeral=True,
                 )
                 return
             except UserInputError:
+                await interaction.delete_original_response()
                 await interaction.followup.send("Could not analyze - content may be sensitive.", ephemeral=True)
                 return
 
@@ -1267,10 +1282,11 @@ Write the analysis:"""
             embed.set_thumbnail(url=target.display_avatar.url)
             embed.set_footer(text=f"Based on {len(messages)} messages | By {interaction.user.display_name}")
 
-            await interaction.followup.send(embed=embed)
+            await interaction.edit_original_response(content=None, embed=embed, view=None)
 
         except Exception as e:
             logger.error("Error in analyze: %s", e, exc_info=True)
+            await interaction.delete_original_response()
             await interaction.followup.send("Something went wrong. Try again later.", ephemeral=True)
 
 

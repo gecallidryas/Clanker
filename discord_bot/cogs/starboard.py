@@ -313,11 +313,18 @@ class Starboard(commands.Cog):
             if not isinstance(starboard_channel, discord.TextChannel):
                 return
 
+            if effective_count < threshold:
+                if entry:
+                    try:
+                        existing = await starboard_channel.fetch_message(entry["starboard_message_id"])
+                        await existing.delete()
+                    except (discord.NotFound, discord.Forbidden, discord.HTTPException):
+                        pass
+                    await clear_starboard_entry(guild_id, message_id)
+                return
+
             if not emoji_display:
                 emoji_display = entry.get("emoji_used") if entry else "⭐"
-
-            if effective_count < threshold and not entry:
-                return
 
             starboard_message_id = await self._create_or_update_starboard_message(
                 starboard_channel,

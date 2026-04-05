@@ -1,11 +1,10 @@
 """
 Utilities Cog for Femmy Discord Bot
 ====================================
-General utility commands including help, stats, translation, and more.
+General utility commands including help, about, translation, and more.
 
 Commands:
     !help [command]  - Show help for all or specific commands
-    !stats           - Display bot statistics
     !reload [cog]    - Reload cogs (owner only)
     !translate       - Translate text using Gemini
     !tldr [count]    - Summarize the last N messages
@@ -25,7 +24,7 @@ import discord
 from discord import app_commands
 from discord.ext import commands
 
-from utils.db_handler import get_server_mode, get_stats, increment_stat
+from utils.db_handler import get_server_mode, get_stats, increment_stat, get_custom_persona_by_mode_key
 from modes import get_mode_profile
 from utils.guild_ai import (
     generate_guild_gemini_text,
@@ -35,6 +34,7 @@ from utils.guild_ai import (
 )
 from utils.rate_limiter import ai_limiter, get_rate_limit_message
 from utils.logger import get_logger
+from utils.interaction_status import get_mode_display_name, send_mode_thinking
 
 
 # ============================================
@@ -75,18 +75,18 @@ HELP_COMMANDS = {
     },
     "personality": {
         "visibility": "public",
-        "prefix": ["!modes", "!currentmode"],
-        "slash": ["/modes", "/currentmode"],
+        "prefix": [],
+        "slash": [],
     },
     "personality_admin": {
         "visibility": "admin",
-        "prefix": ["!mode", "!evil"],
-        "slash": ["/mode", "/evil"],
+        "prefix": ["!evil"],
+        "slash": ["/evil"],
     },
     "utility": {
         "visibility": "public",
-        "prefix": ["!help", "!ping", "!stats", "!usage", "!about", "!translate", "!remind", "!reminders"],
-        "slash": ["/help", "/ping", "/stats", "/about", "/translate", "/tldr", "/generate_embed", "/remind", "/reminders", "/remindcancel", "/usage"],
+        "prefix": ["!help", "!ping", "!usage", "!about", "!translate", "!remind", "!reminders"],
+        "slash": ["/help", "/ping", "/about", "/translate", "/tldr", "/generate_embed", "/remind", "/reminders", "/remindcancel", "/usage"],
     },
     "moderation": {
         "visibility": "admin",
@@ -104,13 +104,6 @@ HELP_COMMANDS = {
             "/starboard ignore",
             "/starboard unignore",
             "/starboard ignored",
-            "/manage create_category",
-            "/manage create_text_channel",
-            "/manage create_voice_channel",
-            "/manage create_role",
-            "/manage delete_category",
-            "/manage delete_channel",
-            "/manage delete_role",
         ],
     },
     "config": {
@@ -157,7 +150,7 @@ HELP_COMMANDS = {
     "autorole": {
         "visibility": "admin",
         "prefix": [],
-        "slash": ["/autorole set", "/autorole clear", "/autorole view"],
+        "slash": ["/autorole manage"],
     },
     "welcome": {
         "visibility": "admin",
@@ -177,7 +170,7 @@ HELP_COMMANDS = {
     "persona": {
         "visibility": "admin",
         "prefix": [],
-        "slash": ["/persona create", "/persona list", "/persona preview", "/persona edit", "/persona delete"],
+        "slash": ["/persona manage", "/persona edit", "/persona delete"],
     },
 }
 
@@ -291,6 +284,79 @@ class Utilities(commands.Cog):
         if mode == "mode_default":
             return "Clanker"
         return "Femmy"
+
+    async def _build_about_embed(self, guild: discord.Guild | None) -> discord.Embed:
+        mode = await get_server_mode(guild.id) if guild else "mode_default"
+        bot_name = await get_mode_display_name(guild.id if guild else None, mode)
+        bio = None
+
+        if guild:
+            bios = getattr(self.bot, "mode_bio_by_guild", None) or {}
+            bio = bios.get(guild.id)
+        current_mode_label = bot_name
+        if not bio and guild and mode.startswith("custom_"):
+            persona = await get_custom_persona_by_mode_key(guild.id, mode)
+            if persona:
+                bio = persona.get("bio")
+                current_mode_label = str(persona.get("name") or bot_name)
+        if not bio:
+            profile = get_mode_profile(mode)
+            bio = profile.bio
+            current_mode_label = profile.display_name
+
+        now = datetime.now()
+        uptime = now - self.start_time
+        days = uptime.days
+        hours, remainder = divmod(uptime.seconds, 3600)
+        minutes, seconds = divmod(remainder, 60)
+
+        if days > 0:
+            uptime_str = f"{days}d {hours}h {minutes}m"
+        elif hours > 0:
+            uptime_str = f"{hours}h {minutes}m {seconds}s"
+        else:
+            uptime_str = f"{minutes}m {seconds}s"
+
+        process = psutil.Process()
+        memory_mb = process.memory_info().rss / 1024 / 1024
+        total_users = sum(g.member_count or 0 for g in self.bot.guilds)
+        stats = await get_stats()
+
+        embed = discord.Embed(
+            title=f"🤖 About {bot_name}",
+            description=f"{bio}\n\nAn advanced AI Discord bot with multiple personalities!",
+            color=discord.Color.pink(),
+        )
+        embed.add_field(
+            name="✨ Features",
+            value=(
+                "• Multiple personality modes\n"
+                "• AI-powered conversations\n"
+                "• Image analysis\n"
+                "• Affection & Mood system\n"
+                "• Reminders & Translation"
+            ),
+            inline=False,
+        )
+        embed.add_field(name="⏱️ Uptime", value=uptime_str, inline=True)
+        embed.add_field(name="🏠 Servers", value=str(len(self.bot.guilds)), inline=True)
+        embed.add_field(name="👥 Users", value=f"{total_users:,}", inline=True)
+        embed.add_field(
+            name="💬 Messages Processed",
+            value=f"{stats.get('messages_processed', 0):,}",
+            inline=True,
+        )
+        embed.add_field(
+            name="🖼️ Images Analyzed",
+            value=f"{stats.get('images_analyzed', 0):,}",
+            inline=True,
+        )
+        embed.add_field(name="💾 Memory", value=f"{memory_mb:.1f} MB", inline=True)
+        if guild:
+            embed.add_field(name="🎭 Current Mode", value=current_mode_label, inline=True)
+        embed.add_field(name="🔗 Commands", value="Use `!help`", inline=True)
+        embed.set_footer(text="Powered by Gemini AI ♡")
+        return embed
     
     # ============================================
     # Help Command
@@ -352,79 +418,6 @@ class Utilities(commands.Cog):
             color=discord.Color.pink()
         )
 
-        await ctx.send(embed=embed)
-    
-    # ============================================
-    # Stats Command
-    # ============================================
-    
-    @commands.command(name="stats", aliases=["status", "botstats"])
-    async def show_stats(self, ctx: commands.Context):
-        """Display bot statistics and uptime."""
-        stats = await get_stats()
-        
-        # Calculate uptime
-        now = datetime.now()
-        uptime = now - self.start_time
-        days = uptime.days
-        hours, remainder = divmod(uptime.seconds, 3600)
-        minutes, seconds = divmod(remainder, 60)
-        
-        if days > 0:
-            uptime_str = f"{days}d {hours}h {minutes}m"
-        elif hours > 0:
-            uptime_str = f"{hours}h {minutes}m {seconds}s"
-        else:
-            uptime_str = f"{minutes}m {seconds}s"
-        
-        # Memory usage
-        process = psutil.Process()
-        memory_mb = process.memory_info().rss / 1024 / 1024
-        
-        # Count users
-        total_users = sum(g.member_count or 0 for g in self.bot.guilds)
-        
-        embed = discord.Embed(
-            title="📊 Bot Statistics",
-            color=discord.Color.blue()
-        )
-        
-        embed.add_field(name="⏱️ Uptime", value=uptime_str, inline=True)
-        embed.add_field(name="🏠 Servers", value=str(len(self.bot.guilds)), inline=True)
-        embed.add_field(name="👥 Users", value=f"{total_users:,}", inline=True)
-        
-        embed.add_field(
-            name="💬 Messages Processed",
-            value=f"{stats.get('messages_processed', 0):,}",
-            inline=True
-        )
-        embed.add_field(
-            name="🖼️ Images Analyzed",
-            value=f"{stats.get('images_analyzed', 0):,}",
-            inline=True
-        )
-        embed.add_field(
-            name="💾 Memory",
-            value=f"{memory_mb:.1f} MB",
-            inline=True
-        )
-        
-        # Get current mode
-        if ctx.guild:
-            mode = await get_server_mode(ctx.guild.id)
-            mode_display = {
-                "mode_femboy": "🎀 Femboy",
-                "mode_tsundere": "😤 Tsundere",
-                "mode_oneesan": "💕 Onee-san"
-            }
-            embed.add_field(
-                name="🎭 Current Mode",
-                value=mode_display.get(mode, mode),
-                inline=True
-            )
-        
-        embed.set_footer(text="Powered by Gemini AI ♡")
-        
         await ctx.send(embed=embed)
     
     # ============================================
@@ -649,36 +642,7 @@ Provide a clear, bulleted summary:
     @commands.command(name="about", aliases=["info", "botinfo"])
     async def about(self, ctx: commands.Context):
         """Display information about the bot."""
-        mode = await get_server_mode(ctx.guild.id) if ctx.guild else "mode_default"
-        bot_name = self._get_bot_name(mode)
-        bio = None
-        if ctx.guild:
-            bios = getattr(self.bot, "mode_bio_by_guild", None) or {}
-            bio = bios.get(ctx.guild.id)
-        if not bio:
-            bio = get_mode_profile(mode).bio
-        embed = discord.Embed(
-            title=f"🤖 About {bot_name}",
-            description=f"{bio}\n\nAn advanced AI Discord bot with multiple personalities!",
-            color=discord.Color.pink()
-        )
-        
-        embed.add_field(
-            name="✨ Features",
-            value=(
-                "• Three personality modes\n"
-                "• AI-powered conversations\n"
-                "• Image analysis\n"
-                "• Affection & Mood system\n"
-                "• Reminders & Translation"
-            ),
-            inline=False
-        )
-        
-        embed.add_field(name="📊 Servers", value=str(len(self.bot.guilds)), inline=True)
-        embed.add_field(name="🔗 Commands", value="Use `!help`", inline=True)
-        embed.set_footer(text="Powered by Gemini AI ♡")
-        
+        embed = await self._build_about_embed(ctx.guild)
         await ctx.send(embed=embed)
 
     @app_commands.command(name="help", description="Show help for commands.")
@@ -736,74 +700,11 @@ Provide a clear, bulleted summary:
 
         await interaction.response.send_message(embed=embed)
 
-    @app_commands.command(name="stats", description="Display bot statistics.")
-    async def show_stats_slash(self, interaction: discord.Interaction):
-        stats = await get_stats()
-
-        now = datetime.now()
-        uptime = now - self.start_time
-        days = uptime.days
-        hours, remainder = divmod(uptime.seconds, 3600)
-        minutes, seconds = divmod(remainder, 60)
-
-        if days > 0:
-            uptime_str = f"{days}d {hours}h {minutes}m"
-        elif hours > 0:
-            uptime_str = f"{hours}h {minutes}m {seconds}s"
-        else:
-            uptime_str = f"{minutes}m {seconds}s"
-
-        process = psutil.Process()
-        memory_mb = process.memory_info().rss / 1024 / 1024
-
-        total_users = sum(g.member_count or 0 for g in self.bot.guilds)
-
-        embed = discord.Embed(
-            title="📊 Bot Statistics",
-            color=discord.Color.blue(),
-        )
-
-        embed.add_field(name="⏱️ Uptime", value=uptime_str, inline=True)
-        embed.add_field(name="🏠 Servers", value=str(len(self.bot.guilds)), inline=True)
-        embed.add_field(name="👥 Users", value=f"{total_users:,}", inline=True)
-
-        embed.add_field(
-            name="💬 Messages Processed",
-            value=f"{stats.get('messages_processed', 0):,}",
-            inline=True,
-        )
-        embed.add_field(
-            name="🖼️ Images Analyzed",
-            value=f"{stats.get('images_analyzed', 0):,}",
-            inline=True,
-        )
-        embed.add_field(
-            name="💾 Memory",
-            value=f"{memory_mb:.1f} MB",
-            inline=True,
-        )
-
-        if interaction.guild:
-            mode = await get_server_mode(interaction.guild.id)
-            mode_display = {
-                "mode_femboy": "🎀 Femboy",
-                "mode_tsundere": "😤 Tsundere",
-                "mode_oneesan": "💖 Onee-san",
-            }
-            embed.add_field(
-                name="🎭 Current Mode",
-                value=mode_display.get(mode, mode),
-                inline=True,
-            )
-
-        embed.set_footer(text="Powered by Gemini AI ♡")
-        await interaction.response.send_message(embed=embed)
-
     @app_commands.command(name="reload", description="Reload a cog or all cogs (owner only).")
     @app_commands.describe(cog_name="Cog name or 'all'")
     @app_commands.check(_is_owner_check)
     async def reload_cog_slash(self, interaction: discord.Interaction, cog_name: str = None):
-        await interaction.response.defer(thinking=True)
+        await send_mode_thinking(interaction)
 
         cogs_dir = Path(__file__).parent
         available_cogs = [
@@ -813,9 +714,8 @@ Provide a clear, bulleted summary:
 
         if cog_name is None:
             cog_list = ", ".join(f"`{c}`" for c in sorted(available_cogs))
-            await interaction.followup.send(
-                f"**Available cogs:**\n{cog_list}\n\n"
-                f"Use `!reload <cog>` or `!reload all`"
+            await interaction.edit_original_response(
+                content=f"**Available cogs:**\n{cog_list}\n\nUse `!reload <cog>` or `!reload all`"
             )
             return
 
@@ -833,19 +733,19 @@ Provide a clear, bulleted summary:
             result = f"✅ Reloaded: {', '.join(success)}"
             if failed:
                 result += f"\n❌ Failed: {', '.join(failed)}"
-            await interaction.followup.send(result)
+            await interaction.edit_original_response(content=result)
             return
 
         cog_name = cog_name.lower()
         if cog_name not in available_cogs:
-            await interaction.followup.send(f"❌ Cog `{cog_name}` not found!")
+            await interaction.edit_original_response(content=f"❌ Cog `{cog_name}` not found!")
             return
 
         try:
             await self.bot.reload_extension(f"cogs.{cog_name}")
-            await interaction.followup.send(f"✅ Reloaded `{cog_name}`!")
+            await interaction.edit_original_response(content=f"✅ Reloaded `{cog_name}`!")
         except Exception as e:
-            await interaction.followup.send(f"❌ Failed to reload `{cog_name}`: {e}")
+            await interaction.edit_original_response(content=f"❌ Failed to reload `{cog_name}`: {e}")
 
     @app_commands.command(name="translate", description="Translate text to another language.")
     @app_commands.describe(query="Text and target language, e.g. 'hello to japanese'")
@@ -878,7 +778,7 @@ Provide a clear, bulleted summary:
             )
             return
 
-        await interaction.response.defer(thinking=True)
+        await send_mode_thinking(interaction)
 
         prompt = f"""
 Translate the following text to {target_lang}.
@@ -893,12 +793,14 @@ Text to translate:
             translation, _ = await generate_guild_gemini_translate_text(interaction.guild.id, prompt)
             translation = translation.strip()
         except RuntimeError:
+            await interaction.delete_original_response()
             await interaction.followup.send(
                 "? Translation service busy, try again later!",
                 ephemeral=True,
             )
             return
         except GuildConfigError:
+            await interaction.delete_original_response()
             await interaction.followup.send(
                 "? This server hasn't configured Gemini keys yet. "
                 "Ask an admin to upload keys with /config env upload.",
@@ -906,6 +808,7 @@ Text to translate:
             )
             return
         except Exception as e:
+            await interaction.delete_original_response()
             await interaction.followup.send(
                 f"? Translation failed: {e}",
                 ephemeral=True,
@@ -919,7 +822,7 @@ Text to translate:
         embed.add_field(name="Original", value=text[:1024], inline=False)
         embed.add_field(name=f"? {target_lang.title()}", value=translation[:1024], inline=False)
 
-        await interaction.followup.send(embed=embed)
+        await interaction.edit_original_response(content=None, embed=embed)
 
         try:
             await increment_stat(
@@ -951,7 +854,7 @@ Text to translate:
             )
             return
 
-        await interaction.response.defer(thinking=True)
+        await send_mode_thinking(interaction)
 
         ai_prompt = f"""
 You are a JSON generator for Discord embeds.
@@ -977,12 +880,14 @@ User request:
         try:
             response_text, _ = await generate_guild_gemini_text(interaction.guild.id, ai_prompt)
         except RuntimeError:
+            await interaction.delete_original_response()
             await interaction.followup.send(
                 "Embed generator busy, try again later.",
                 ephemeral=True,
             )
             return
         except GuildConfigError:
+            await interaction.delete_original_response()
             await interaction.followup.send(
                 "This server hasn't configured Gemini keys yet. "
                 "Ask an admin to upload keys with /config env upload.",
@@ -990,11 +895,13 @@ User request:
             )
             return
         except Exception as e:
+            await interaction.delete_original_response()
             await interaction.followup.send(f"Embed generation failed: {e}", ephemeral=True)
             return
 
         data = _extract_embed_json(response_text)
         if not data:
+            await interaction.delete_original_response()
             await interaction.followup.send(
                 "AI didn't return valid embed JSON. Try rephrasing.",
                 ephemeral=True,
@@ -1023,7 +930,7 @@ User request:
         if footer:
             embed.set_footer(text=str(footer)[:2048])
 
-        await interaction.followup.send(embed=embed)
+        await interaction.edit_original_response(content=None, embed=embed)
 
         try:
             await increment_stat(
@@ -1113,36 +1020,7 @@ Provide a clear, bulleted summary:
 
     @app_commands.command(name="about", description="Display information about the bot.")
     async def about_slash(self, interaction: discord.Interaction):
-        mode = await get_server_mode(interaction.guild.id) if interaction.guild else "mode_default"
-        bot_name = self._get_bot_name(mode)
-        bio = None
-        if interaction.guild:
-            bios = getattr(self.bot, "mode_bio_by_guild", None) or {}
-            bio = bios.get(interaction.guild.id)
-        if not bio:
-            bio = get_mode_profile(mode).bio
-        embed = discord.Embed(
-            title=f"🤖 About {bot_name}",
-            description=f"{bio}\n\nAn advanced AI Discord bot with multiple personalities!",
-            color=discord.Color.pink(),
-        )
-
-        embed.add_field(
-            name="✨ Features",
-            value=(
-                "• Three personality modes\n"
-                "• AI-powered conversations\n"
-                "• Image analysis\n"
-                "• Affection & Mood system\n"
-                "• Reminders & Translation"
-            ),
-            inline=False,
-        )
-
-        embed.add_field(name="📊 Servers", value=str(len(self.bot.guilds)), inline=True)
-        embed.add_field(name="🔗 Commands", value="Use `!help`", inline=True)
-        embed.set_footer(text="Powered by Gemini AI ♡")
-
+        embed = await self._build_about_embed(interaction.guild)
         await interaction.response.send_message(embed=embed)
 
 

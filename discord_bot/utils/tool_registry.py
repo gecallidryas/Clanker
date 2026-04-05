@@ -325,6 +325,7 @@ def register_builtin_tools() -> None:
     if _initialized:
         return
 
+    from utils.time_tools import tool_get_current_time
     from utils.web_search import tool_web_search, tool_fetch_url
     from utils.image_generation import tool_generate_image
     from utils.expression_tools import (
@@ -346,6 +347,7 @@ def register_builtin_tools() -> None:
 
     for tool in [
         tool_review_capabilities,
+        tool_get_current_time,
         tool_web_search,
         tool_fetch_url,
         tool_generate_image,

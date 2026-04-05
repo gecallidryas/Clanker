@@ -2,12 +2,60 @@ import importlib
 import os
 import sys
 import tempfile
+import types
 import unittest
 from pathlib import Path
 from types import SimpleNamespace
 
 ROOT = Path(__file__).resolve().parents[1]
 sys.path.insert(0, str(ROOT / "discord_bot"))
+
+if "duckduckgo_search" not in sys.modules:
+    duckduckgo_search_stub = types.ModuleType("duckduckgo_search")
+
+    class _DummyDDGS:
+        pass
+
+    duckduckgo_search_stub.DDGS = _DummyDDGS
+    sys.modules["duckduckgo_search"] = duckduckgo_search_stub
+
+if "trafilatura" not in sys.modules:
+    trafilatura_stub = types.ModuleType("trafilatura")
+    trafilatura_stub.extract = lambda *args, **kwargs: ""
+    sys.modules["trafilatura"] = trafilatura_stub
+
+if "openai" not in sys.modules:
+    openai_stub = types.ModuleType("openai")
+
+    class _DummyAsyncOpenAI:
+        pass
+
+    openai_stub.AsyncOpenAI = _DummyAsyncOpenAI
+    sys.modules["openai"] = openai_stub
+
+if "pytube" not in sys.modules:
+    pytube_stub = types.ModuleType("pytube")
+
+    class _DummyYouTube:
+        def __init__(self, *args, **kwargs):
+            self.title = ""
+            self.author = ""
+            self.length = 0
+            self.description = ""
+
+    pytube_stub.YouTube = _DummyYouTube
+    sys.modules["pytube"] = pytube_stub
+
+if "youtube_transcript_api" not in sys.modules:
+    transcript_stub = types.ModuleType("youtube_transcript_api")
+
+    class _DummyYouTubeTranscriptApi:
+        @staticmethod
+        def get_transcript(*args, **kwargs):
+            return []
+
+    transcript_stub.YouTubeTranscriptApi = _DummyYouTubeTranscriptApi
+    sys.modules["youtube_transcript_api"] = transcript_stub
 
 from tools.contracts import ToolCallEnvelope, ToolDescriptor, ToolInvocationMode, ToolSourceType
 
@@ -38,14 +86,17 @@ class ToolExecutorTests(unittest.IsolatedAsyncioTestCase):
         self._env = os.environ.copy()
         self._tmp = tempfile.TemporaryDirectory()
         os.environ["DATABASE_DIR"] = self._tmp.name
+        sys.modules.pop("aiosqlite", None)
 
         from utils import db_handler as db_handler_mod
+        from utils import time_tools as time_tools_mod
         from utils import tool_registry as tool_registry_mod
         from tools import executor as executor_mod
         from tools import policy_engine as policy_engine_mod
 
         self.db_handler = importlib.reload(db_handler_mod)
         self.tool_registry = importlib.reload(tool_registry_mod)
+        self.time_tools = importlib.reload(time_tools_mod)
         self.executor = importlib.reload(executor_mod)
         self.policy_engine = importlib.reload(policy_engine_mod)
         self.tool_registry._reset_registry_for_tests()
@@ -121,3 +172,18 @@ class ToolExecutorTests(unittest.IsolatedAsyncioTestCase):
 
         assert result.ok is False
         assert result.data["reason_code"] == "invalid_arguments"
+
+    async def test_executor_runs_get_current_time_tool(self):
+        self.tool_registry.register_builtin_tools()
+        await self.db_handler.init_db()
+
+        envelope = ToolCallEnvelope(
+            call_id="clock-1",
+            tool_name="get_current_time",
+            arguments={},
+            invocation_mode=ToolInvocationMode.MODEL,
+        )
+        result = await self.executor.execute_tool_envelope(envelope, _make_context(111))
+
+        assert result.ok is True
+        assert result.data["timezone"] == "America/Denver"

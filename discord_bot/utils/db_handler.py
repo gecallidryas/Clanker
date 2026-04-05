@@ -137,6 +137,10 @@ async def _sqlite_connect(path: str):
     raise TypeError("aiosqlite.connect returned an unsupported connection object")
 
 
+def _serialize_timestamp(value: datetime) -> str:
+    return value.isoformat()
+
+
 async def _ensure_global_db() -> None:
     global _global_initialized
     if _global_initialized:
@@ -168,7 +172,7 @@ async def _ensure_global_db() -> None:
         """)
         await db.execute("""
             INSERT OR IGNORE INTO bot_stats (id, start_time) VALUES (1, ?)
-        """, (datetime.now(),))
+        """, (_utcnow().isoformat(),))
         await _init_expression_catalog_schema(db)
         await _init_tooling_global_schema(db)
         await db.commit()
@@ -2760,7 +2764,7 @@ async def add_reminder(user_id: int, guild_id: int, channel_id: int,
         cursor = await db.execute("""
             INSERT INTO reminders (user_id, guild_id, channel_id, message, remind_at)
             VALUES (?, ?, ?, ?, ?)
-        """, (user_id, guild_id, channel_id, message, remind_at))
+        """, (user_id, guild_id, channel_id, message, _serialize_timestamp(remind_at)))
         await db.commit()
         return cursor.lastrowid
 
@@ -2786,7 +2790,7 @@ async def get_due_reminders() -> List[Dict[str, Any]]:
             async with db.execute("""
                 SELECT * FROM reminders 
                 WHERE remind_at <= ? AND completed = FALSE
-            """, (datetime.now(),)) as cursor:
+            """, (_serialize_timestamp(datetime.now()),)) as cursor:
                 due.extend([dict(row) async for row in cursor])
     return due
 
@@ -3313,7 +3317,7 @@ async def mark_starboard_entry_deleted(guild_id: int, original_message_id: int) 
             """UPDATE starboard_entries
                SET is_deleted = 1, deleted_at = ?
                WHERE guild_id = ? AND original_message_id = ?""",
-            (datetime.now(), guild_id, original_message_id),
+            (_serialize_timestamp(datetime.now()), guild_id, original_message_id),
         )
         await db.commit()
         return cursor.rowcount > 0
@@ -4009,7 +4013,7 @@ async def create_pending_fact(
     expires_minutes: int = 5
 ) -> int:
     """Create a pending fact awaiting confirmation."""
-    expires_at = datetime.now() + __import__('datetime').timedelta(minutes=expires_minutes)
+    expires_at = _serialize_timestamp(datetime.now() + __import__('datetime').timedelta(minutes=expires_minutes))
     async with guild_db(guild_id) as db:
         cursor = await db.execute(
             """INSERT INTO pending_facts 
@@ -4072,7 +4076,7 @@ async def cleanup_expired_pending_facts(guild_id: int) -> int:
     async with guild_db(guild_id) as db:
         cursor = await db.execute(
             "DELETE FROM pending_facts WHERE expires_at < ?",
-            (datetime.now(),)
+            (_serialize_timestamp(datetime.now()),)
         )
         await db.commit()
         return cursor.rowcount

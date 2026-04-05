@@ -18,6 +18,7 @@ from utils.db_handler import (
     get_guild_config,
 )
 from utils.database_summarizer import DatabaseSummarizer
+from utils.interaction_status import send_mode_thinking
 from utils.rag_documents import extract_text_from_bytes
 from utils.rag_store import store_document
 from utils.i18n import get_locale_from_interaction, t
@@ -65,7 +66,7 @@ class Teach(commands.Cog):
             return
         clean_attribute = attribute.strip()
         clean_value = value.strip()
-        await interaction.response.defer(thinking=True, ephemeral=True)
+        await send_mode_thinking(interaction, ephemeral=True)
 
         existing = await get_persona_attributes(interaction.guild.id)
         summarized = (
@@ -79,16 +80,18 @@ class Teach(commands.Cog):
             for item_attribute, item_value in summarized:
                 item_attr_validation = validate_attribute_content(item_attribute)
                 if not item_attr_validation.is_valid:
-                    await interaction.followup.send(
-                        get_memory_limit_error_message(item_attr_validation),
-                        ephemeral=True,
+                    await interaction.edit_original_response(
+                        content=get_memory_limit_error_message(item_attr_validation),
+                        embed=None,
+                        view=None,
                     )
                     return
                 item_value_validation = validate_attribute_content(item_value)
                 if not item_value_validation.is_valid:
-                    await interaction.followup.send(
-                        get_memory_limit_error_message(item_value_validation),
-                        ephemeral=True,
+                    await interaction.edit_original_response(
+                        content=get_memory_limit_error_message(item_value_validation),
+                        embed=None,
+                        view=None,
                     )
                     return
                 validated_items.append((item_attribute, item_value))
@@ -98,7 +101,11 @@ class Teach(commands.Cog):
             await add_persona_attribute(interaction.guild.id, clean_attribute, clean_value, interaction.user.id)
 
         locale = get_locale_from_interaction(interaction)
-        await interaction.followup.send(t("teach.attribute.saved", locale), ephemeral=True)
+        await interaction.edit_original_response(
+            content=t("teach.attribute.saved", locale),
+            embed=None,
+            view=None,
+        )
 
     @teach_group.command(name="sampledialogue", description="Teach a sample dialogue line.")
     @app_commands.describe(speaker="Speaker name", dialogue="Dialogue line")
@@ -128,7 +135,7 @@ class Teach(commands.Cog):
             return
         clean_speaker = speaker.strip()
         clean_dialogue = dialogue.strip()
-        await interaction.response.defer(thinking=True, ephemeral=True)
+        await send_mode_thinking(interaction, ephemeral=True)
 
         existing = await get_sample_dialogues(interaction.guild.id)
         summarized = (
@@ -142,16 +149,18 @@ class Teach(commands.Cog):
             for item_speaker, item_dialogue in summarized:
                 item_speaker_validation = validate_attribute_content(item_speaker)
                 if not item_speaker_validation.is_valid:
-                    await interaction.followup.send(
-                        get_memory_limit_error_message(item_speaker_validation),
-                        ephemeral=True,
+                    await interaction.edit_original_response(
+                        content=get_memory_limit_error_message(item_speaker_validation),
+                        embed=None,
+                        view=None,
                     )
                     return
                 item_dialogue_validation = validate_sample_dialogue_content(item_dialogue)
                 if not item_dialogue_validation.is_valid:
-                    await interaction.followup.send(
-                        get_memory_limit_error_message(item_dialogue_validation),
-                        ephemeral=True,
+                    await interaction.edit_original_response(
+                        content=get_memory_limit_error_message(item_dialogue_validation),
+                        embed=None,
+                        view=None,
                     )
                     return
                 validated_items.append((item_speaker, item_dialogue))
@@ -161,7 +170,11 @@ class Teach(commands.Cog):
             await add_sample_dialogue(interaction.guild.id, clean_speaker, clean_dialogue, interaction.user.id)
 
         locale = get_locale_from_interaction(interaction)
-        await interaction.followup.send(t("teach.sampledialogue.saved", locale), ephemeral=True)
+        await interaction.edit_original_response(
+            content=t("teach.sampledialogue.saved", locale),
+            embed=None,
+            view=None,
+        )
 
     @teach_group.command(name="document", description="Upload a document for RAG memory.")
     @app_commands.describe(file="Text, markdown, or PDF file", title="Optional title")
@@ -190,17 +203,22 @@ class Teach(commands.Cog):
             await interaction.response.send_message("File too large (max 8 MB).", ephemeral=True)
             return
 
-        await interaction.response.defer(thinking=True)
+        await send_mode_thinking(interaction, ephemeral=True)
         data = await file.read()
         text = extract_text_from_bytes(data, file.filename)
         if not text:
-            await interaction.followup.send("Unsupported file type. Use .txt, .md, or .pdf.", ephemeral=True)
+            await interaction.edit_original_response(
+                content="Unsupported file type. Use .txt, .md, or .pdf.",
+                embed=None,
+                view=None,
+            )
             return
         text_validation = validate_document_text(text)
         if not text_validation.is_valid:
-            await interaction.followup.send(
-                get_memory_limit_error_message(text_validation),
-                ephemeral=True,
+            await interaction.edit_original_response(
+                content=get_memory_limit_error_message(text_validation),
+                embed=None,
+                view=None,
             )
             return
         doc_title = title or file.filename
@@ -214,13 +232,18 @@ class Teach(commands.Cog):
                 metadata={"filename": file.filename},
             )
         except Exception as exc:
-            await interaction.followup.send(f"Failed to store document: {exc}", ephemeral=True)
+            await interaction.edit_original_response(
+                content=f"Failed to store document: {exc}",
+                embed=None,
+                view=None,
+            )
             return
 
         locale = get_locale_from_interaction(interaction)
-        await interaction.followup.send(
-            t("teach.document.saved", locale, doc_id=doc_id, chunks=chunk_count),
-            ephemeral=True,
+        await interaction.edit_original_response(
+            content=t("teach.document.saved", locale, doc_id=doc_id, chunks=chunk_count),
+            embed=None,
+            view=None,
         )
 
     @personal_group.command(name="privacy", description="Opt in or out of personal memory.")

@@ -1,3 +1,9 @@
+import sys
+from pathlib import Path
+
+ROOT = Path(__file__).resolve().parents[1]
+sys.path.insert(0, str(ROOT / "discord_bot"))
+
 from utils.tool_registry import (
     ToolDefinition,
     _reset_registry_for_tests,
@@ -61,3 +67,23 @@ def test_legacy_registration_mirrors_into_unified_registry():
         },
         "additionalProperties": False,
     }
+
+
+def test_get_current_time_registration_uses_builtin_utility_descriptor():
+    async def _noop(context, args):
+        return None
+
+    tool = ToolDefinition(
+        name="get_current_time",
+        description="Current bot time",
+        args_schema={},
+        handler=_noop,
+    )
+
+    register_tool(tool)
+
+    descriptor = get_unified_tool_registry().resolve_descriptor("get_current_time")
+    assert descriptor is not None
+    assert descriptor.tool_id == "builtin:get_current_time"
+    assert descriptor.category == "utility"
+    assert descriptor.side_effect_level == "read"

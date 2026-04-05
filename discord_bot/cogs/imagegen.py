@@ -11,6 +11,7 @@ from utils.tool_context import ToolContext
 from utils.tool_registry import get_tool, is_tool_enabled, register_builtin_tools
 from utils.image_generation import tool_generate_image
 from utils.i18n import get_locale_from_interaction, t
+from utils.interaction_status import send_mode_thinking
 
 
 class ImageGen(commands.Cog):
@@ -39,7 +40,7 @@ class ImageGen(commands.Cog):
             )
             return
 
-        await interaction.response.defer(thinking=True)
+        await send_mode_thinking(interaction, ephemeral=True)
         context = ToolContext(
             bot=self.bot,
             guild=interaction.guild,
@@ -51,11 +52,12 @@ class ImageGen(commands.Cog):
         )
         result = await tool.handler(context, {"prompt": prompt})
         if not result.ok:
-            await interaction.followup.send(result.summary, ephemeral=True)
+            await interaction.edit_original_response(content=result.summary, embed=None, view=None)
             return
-        await interaction.followup.send(
-            t("imagegen.generated", get_locale_from_interaction(interaction)),
-            ephemeral=True,
+        await interaction.edit_original_response(
+            content=t("imagegen.generated", get_locale_from_interaction(interaction)),
+            embed=None,
+            view=None,
         )
 
 

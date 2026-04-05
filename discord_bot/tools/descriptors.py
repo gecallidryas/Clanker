@@ -8,6 +8,7 @@ UNCATEGORIZED_TOOL_CATEGORY = normalize_tool_category("uncategorized")
 
 LEGACY_TOOL_CATEGORIES: dict[str, str] = {
     "review_capabilities": "utility",
+    "get_current_time": "utility",
     "web_search": "discovery",
     "fetch_url": "discovery",
     "generate_image": "media",

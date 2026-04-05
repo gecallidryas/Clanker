@@ -131,7 +131,7 @@ class ContinueToNormalPromptsView(discord.ui.View):
 
         if not self.cog.has_pending(self.guild_id, self.user_id):
             await interaction.response.send_message(
-                "This creation session expired. Please run /persona create again.",
+                "This creation session expired. Reopen `/persona manage` and start Create Persona again.",
                 ephemeral=True,
             )
             return
@@ -162,7 +162,7 @@ class ContinueToEvilPromptsView(discord.ui.View):
 
         if not self.cog.has_pending(self.guild_id, self.user_id):
             await interaction.response.send_message(
-                "This creation session expired. Please run /persona create again.",
+                "This creation session expired. Reopen `/persona manage` and start Create Persona again.",
                 ephemeral=True,
             )
             return
@@ -360,7 +360,7 @@ class PersonaNormalPromptModal(discord.ui.Modal):
         pending = self.cog.get_pending(self.guild_id, self.user_id)
         if not pending:
             await interaction.response.send_message(
-                "This creation session expired. Please run /persona create again.",
+                "This creation session expired. Reopen `/persona manage` and start Create Persona again.",
                 ephemeral=True,
             )
             return
@@ -442,7 +442,7 @@ class PersonaEvilPromptModal(discord.ui.Modal):
         pending = self.cog.get_pending(self.guild_id, self.user_id)
         if not pending:
             await interaction.response.send_message(
-                "This creation session expired. Please run /persona create again.",
+                "This creation session expired. Reopen `/persona manage` and start Create Persona again.",
                 ephemeral=True,
             )
             return
@@ -871,7 +871,7 @@ class Persona(commands.Cog):
         pending = self.pop_pending(guild_id, user_id)
         if not pending:
             await interaction.response.send_message(
-                "This creation session expired. Please run /persona create again.",
+                "This creation session expired. Reopen `/persona manage` and start Create Persona again.",
                 ephemeral=True,
             )
             return
@@ -974,7 +974,7 @@ class Persona(commands.Cog):
         self.record_creation(guild_id, user_id)
 
         await interaction.followup.send(
-            f"Custom persona **{pending.name}** created! Use `!mode {pending.name}` or `/mode {pending.name}`. {MANAGE_GUIDANCE}",
+            f"Custom persona **{pending.name}** created! {MANAGE_GUIDANCE}",
             ephemeral=True,
         )
 
@@ -982,80 +982,6 @@ class Persona(commands.Cog):
     @app_commands.checks.has_permissions(manage_guild=True)
     async def manage_personas(self, interaction: discord.Interaction):
         await open_persona_manage_panel(interaction, bot=self.bot)
-
-    @persona_group.command(name="create", description="Create a custom persona.")
-    @app_commands.checks.has_permissions(manage_guild=True)
-    async def create_persona_alias(self, interaction: discord.Interaction):
-        await self._open_basic_modal(interaction)
-
-    @persona_group.command(name="list", description="List custom personas.")
-    async def list_personas(self, interaction: discord.Interaction):
-        if not interaction.guild:
-            await interaction.response.send_message("Use this command in a server.", ephemeral=True)
-            return
-
-        personas = await get_guild_custom_personas(interaction.guild.id)
-        if not personas:
-            await interaction.response.send_message("No custom personas found.", ephemeral=True)
-            return
-
-        embed = discord.Embed(
-            title="Custom Personas",
-            color=discord.Color.blue(),
-        )
-
-        for persona in personas[:10]:
-            name = persona.get("name", "Unnamed")
-            mode_key = persona.get("mode_key", "")
-            bio = persona.get("bio") or "No bio provided."
-            embed.add_field(
-                name=name,
-                value=f"Mode: `{mode_key}`\n{bio[:200]}",
-                inline=False,
-            )
-
-        if len(personas) > 10:
-            embed.set_footer(text=f"And {len(personas) - 10} more...")
-        else:
-            embed.set_footer(text=MANAGE_GUIDANCE)
-
-        await interaction.response.send_message(embed=embed, ephemeral=True)
-
-    @persona_group.command(name="preview", description="Preview a custom persona.")
-    async def preview_persona(self, interaction: discord.Interaction, name: str):
-        if not interaction.guild:
-            await interaction.response.send_message("Use this command in a server.", ephemeral=True)
-            return
-
-        persona = await get_custom_persona_by_name(interaction.guild.id, name)
-        if not persona:
-            await interaction.response.send_message("Persona not found.", ephemeral=True)
-            return
-
-        embed = discord.Embed(
-            title=persona.get("name", "Custom Persona"),
-            description=persona.get("bio") or "No bio provided.",
-            color=discord.Color.purple(),
-        )
-        embed.add_field(name="Mode Key", value=f"`{persona.get('mode_key', '')}`", inline=False)
-        embed.add_field(
-            name="Avatar",
-            value="Set" if persona.get("avatar_path") else "Not set",
-            inline=True,
-        )
-        embed.add_field(
-            name="Banner",
-            value="Set" if persona.get("banner_path") else "Not set",
-            inline=True,
-        )
-        embed.add_field(
-            name="Evil Prompt",
-            value="Yes" if persona.get("evil_prompt") else "No",
-            inline=True,
-        )
-        embed.set_footer(text=MANAGE_GUIDANCE)
-
-        await interaction.response.send_message(embed=embed, ephemeral=True)
 
     @persona_group.command(name="edit", description="Edit a custom persona.")
     @app_commands.checks.has_permissions(manage_guild=True)
