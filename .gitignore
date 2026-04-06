@@ -37,3 +37,5 @@ logs/
 # Artifacts (brain folder from Gemini)
 .gemini/
 ssh-key-2026-01-11.key
+.worktrees/
+worktrees/
