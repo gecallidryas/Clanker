@@ -8,6 +8,7 @@ import io
 import json
 from pathlib import Path
 from typing import Any, Awaitable, Callable, Dict, List, Optional, Sequence, Tuple
+from io import BytesIO
 
 import discord
 from discord import app_commands
@@ -56,6 +57,7 @@ from utils.guild_ai import (
 from utils.api_manager import normalize_openrouter_model, normalize_gemini_model, OPENROUTER_MODELS
 from utils.rate_limiter import RateLimiter
 from utils.logger import get_logger
+from utils.petpet import make_petpet
 from utils.i18n import get_locale_from_interaction, t
 from utils.admin_panel_logic import ConfigAction, diff_toggle_states, reconcile_id_lists, requires_auth
 from utils.admin_panel_views import AuthRequiredView
@@ -1473,6 +1475,26 @@ class Config(commands.Cog):
             ),
             inline=False,
         )
+        embed.add_field(
+            name="Image enabled",
+            value="Yes" if config.get("welcome_image_enabled") else "No",
+            inline=True,
+        )
+        embed.add_field(
+            name="Image template",
+            value=self._summarize_welcome_image_template(config.get("welcome_image_template")),
+            inline=True,
+        )
+        embed.add_field(
+            name="Image destination",
+            value=self._summarize_welcome_image_destination(config.get("welcome_image_destination")),
+            inline=True,
+        )
+        embed.add_field(
+            name="Image channel",
+            value=f"<#{config.get('welcome_image_channel_id')}>" if config.get("welcome_image_channel_id") else "None",
+            inline=False,
+        )
         embed.set_footer(text="Standalone welcome commands were folded into `/welcome manage`.")
         view = ActionMenuView(
             invoker_id=interaction.user.id,
@@ -1485,7 +1507,12 @@ class Config(commands.Cog):
                 ActionOption("Edit DM Message", "edit_dm_message", "Set the DM onboarding message"),
                 ActionOption("Clear DM Message", "clear_dm_message", "Remove the DM onboarding message"),
                 ActionOption("Toggle DM Welcome", "toggle_dm", "Enable or disable DM welcome messages"),
+                ActionOption("Toggle Welcome Image", "toggle_image", "Enable or disable the welcome image attachment"),
+                ActionOption("Edit Image Template", "edit_image_template", "Set the welcome image template"),
+                ActionOption("Edit Image Destination", "edit_image_destination", "Set where the welcome image is sent"),
+                ActionOption("Set Image Channel", "set_image_channel", "Choose the welcome image channel"),
                 ActionOption("Send Test Message", "test_message", "Send a welcome preview to the configured channel"),
+                ActionOption("Send Test Image", "test_image", "Send a welcome image preview"),
             ],
             on_action=lambda panel_interaction, value: self._handle_welcome_action(panel_interaction, value),
         )
@@ -1572,8 +1599,70 @@ class Config(commands.Cog):
                 return
             await self._toggle_dm_welcome(interaction)
             return
+        if value == "toggle_image":
+            if not await self._ensure_welcome_auth(interaction):
+                return
+            await self._toggle_welcome_image(interaction)
+            return
+        if value == "edit_image_template":
+            if not await self._ensure_welcome_auth(interaction):
+                return
+            config = await get_welcome_config(interaction.guild.id)
+            modal = CallbackFormModal(
+                title="Welcome Image Template",
+                fields=[
+                    {
+                        "key": "template",
+                        "label": "Image template",
+                        "default": config.get("welcome_image_template"),
+                        "required": False,
+                        "style": discord.TextStyle.short,
+                        "placeholder": "pettinghand or catmunch",
+                        "max_length": 64,
+                    },
+                ],
+                on_submit_callback=lambda modal_interaction, values: self._save_welcome_image_template(modal_interaction, values),
+            )
+            await interaction.response.send_modal(modal)
+            return
+        if value == "edit_image_destination":
+            if not await self._ensure_welcome_auth(interaction):
+                return
+            config = await get_welcome_config(interaction.guild.id)
+            modal = CallbackFormModal(
+                title="Welcome Image Destination",
+                fields=[
+                    {
+                        "key": "destination",
+                        "label": "Destination",
+                        "default": config.get("welcome_image_destination"),
+                        "required": False,
+                        "style": discord.TextStyle.short,
+                        "placeholder": "welcome_channel, specific_channel, or dm",
+                        "max_length": 64,
+                    },
+                ],
+                on_submit_callback=lambda modal_interaction, values: self._save_welcome_image_destination(modal_interaction, values),
+            )
+            await interaction.response.send_modal(modal)
+            return
+        if value == "set_image_channel":
+            if not await self._ensure_welcome_auth(interaction):
+                return
+            view = SingleChannelPickerView(
+                invoker_id=interaction.user.id,
+                placeholder="Select welcome image channel",
+                apply_channel=lambda channel_id: self._set_welcome_image_channel(interaction.guild.id, interaction.user.id, channel_id),
+            )
+            await self._send_panel_response(interaction, content="Choose the welcome image channel.", view=view)
+            return
         if value == "test_message":
             await self._send_welcome_test(interaction)
+            return
+        if value == "test_image":
+            if not await self._ensure_welcome_auth(interaction):
+                return
+            await self._send_welcome_image_test(interaction)
             return
         await interaction.response.send_message("Unknown welcome action.", ephemeral=True)
 
@@ -1602,6 +1691,21 @@ class Config(commands.Cog):
         if len(collapsed) <= 140:
             return collapsed
         return f"{collapsed[:137]}..."
+
+    @staticmethod
+    def _summarize_welcome_image_template(value: Optional[str]) -> str:
+        cleaned = (value or "").strip()
+        return cleaned or "pettinghand"
+
+    @staticmethod
+    def _summarize_welcome_image_destination(value: Optional[str]) -> str:
+        cleaned = (value or "").strip().lower()
+        labels = {
+            "welcome_channel": "Welcome channel",
+            "specific_channel": "Specific channel",
+            "dm": "DM",
+        }
+        return labels.get(cleaned, cleaned or "Welcome channel")
 
     @staticmethod
     def _normalize_welcome_text(value: Optional[str]) -> str:
@@ -1701,6 +1805,126 @@ class Config(commands.Cog):
             f"DM welcome {'enabled' if enabled else 'disabled'}.",
             ephemeral=True,
         )
+
+    async def _toggle_welcome_image(self, interaction: discord.Interaction) -> None:
+        config = await get_welcome_config(interaction.guild.id)
+        enabled = not bool(config.get("welcome_image_enabled"))
+        await update_guild_config(interaction.guild.id, {"welcome_image_enabled": int(enabled)})
+        await add_guild_config_audit(
+            interaction.guild.id,
+            interaction.user.id,
+            "welcome_settings_save",
+            summary=f"Welcome image {'enabled' if enabled else 'disabled'}",
+            detail={"welcome_image_enabled": enabled},
+        )
+        await interaction.response.send_message(
+            f"Welcome image {'enabled' if enabled else 'disabled'}.",
+            ephemeral=True,
+        )
+
+    async def _save_welcome_image_template(self, interaction: discord.Interaction, values: dict[str, str]) -> None:
+        cleaned = self._normalize_welcome_text(values.get("template")).lower()
+        if not cleaned:
+            await interaction.response.send_message("Template cannot be empty.", ephemeral=True)
+            return
+        if len(cleaned) > 64:
+            await interaction.response.send_message("Template is too long.", ephemeral=True)
+            return
+        await update_guild_config(interaction.guild.id, {"welcome_image_template": cleaned})
+        await add_guild_config_audit(
+            interaction.guild.id,
+            interaction.user.id,
+            "welcome_settings_save",
+            summary="Welcome image template updated",
+            detail={"welcome_image_template": cleaned},
+        )
+        await interaction.response.send_message("Welcome image template updated.", ephemeral=True)
+
+    async def _save_welcome_image_destination(self, interaction: discord.Interaction, values: dict[str, str]) -> None:
+        cleaned = self._normalize_welcome_text(values.get("destination")).lower()
+        if cleaned not in {"welcome_channel", "specific_channel", "dm"}:
+            await interaction.response.send_message(
+                "Destination must be one of: `welcome_channel`, `specific_channel`, or `dm`.",
+                ephemeral=True,
+            )
+            return
+        await update_guild_config(interaction.guild.id, {"welcome_image_destination": cleaned})
+        await add_guild_config_audit(
+            interaction.guild.id,
+            interaction.user.id,
+            "welcome_settings_save",
+            summary="Welcome image destination updated",
+            detail={"welcome_image_destination": cleaned},
+        )
+        await interaction.response.send_message("Welcome image destination updated.", ephemeral=True)
+
+    async def _set_welcome_image_channel(self, guild_id: int, user_id: int, channel_id: int) -> str:
+        await update_guild_config(guild_id, {"welcome_image_channel_id": channel_id})
+        await add_guild_config_audit(
+            guild_id,
+            user_id,
+            "welcome_settings_save",
+            target_type="channel",
+            target_id=str(channel_id),
+            summary="Welcome image channel updated",
+        )
+        return f"Welcome image channel set to <#{channel_id}>."
+
+    async def _send_welcome_image_test(self, interaction: discord.Interaction) -> None:
+        config = await get_welcome_config(interaction.guild.id)
+        template = (config.get("welcome_image_template") or "pettinghand").strip().lower()
+        destination = (config.get("welcome_image_destination") or "welcome_channel").strip().lower()
+        avatar = getattr(interaction.user, "display_avatar", None)
+        if avatar is None:
+            await interaction.response.send_message("Could not read your avatar.", ephemeral=True)
+            return
+        if hasattr(avatar, "replace"):
+            try:
+                avatar = avatar.replace(size=128, static_format="png")
+            except TypeError:
+                try:
+                    avatar = avatar.replace(size=128, format="png")
+                except TypeError:
+                    avatar = avatar.replace(size=128)
+        if not hasattr(avatar, "read"):
+            await interaction.response.send_message("Could not read your avatar.", ephemeral=True)
+            return
+
+        if template != "pettinghand":
+            await interaction.response.send_message(
+                "Welcome image tests are currently available for the pettinghand template only.",
+                ephemeral=True,
+            )
+            return
+
+        avatar_bytes = await avatar.read()
+        file = discord.File(BytesIO(make_petpet(avatar_bytes)), filename="pettinghand.gif")
+        channel = None
+        if destination == "dm":
+            channel = interaction.user
+        elif destination == "specific_channel":
+            channel_id = config.get("welcome_image_channel_id")
+            if not channel_id:
+                await interaction.response.send_message("Set a welcome image channel first.", ephemeral=True)
+                return
+            channel = interaction.guild.get_channel(channel_id)
+        else:
+            channel_id = config.get("welcome_channel_id")
+            if not channel_id:
+                await interaction.response.send_message("Set a welcome channel first.", ephemeral=True)
+                return
+            channel = interaction.guild.get_channel(channel_id)
+
+        if channel is None:
+            await interaction.response.send_message("Target channel not found.", ephemeral=True)
+            return
+
+        await channel.send(
+            "Welcome image preview.",
+            file=file,
+            allowed_mentions=discord.AllowedMentions(users=True, roles=False, everyone=False),
+        )
+        await interaction.response.send_message("Sent a welcome image preview.", ephemeral=True)
 
     async def _send_welcome_test(self, interaction: discord.Interaction) -> None:
         config = await get_welcome_config(interaction.guild.id)

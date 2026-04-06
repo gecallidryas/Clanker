@@ -3,13 +3,14 @@ import sys
 import unittest
 from pathlib import Path
 
-sys.path.insert(0, "/mnt/e/femboibot/discord_bot")
+ROOT = Path(__file__).resolve().parents[2]
+sys.path.insert(0, str(ROOT / "discord_bot"))
 
 from cogs.config import Config
 
 
 def _load_help_commands() -> dict:
-    source = Path("/mnt/e/femboibot/discord_bot/cogs/utilities.py").read_text(encoding="utf-8")
+    source = (ROOT / "discord_bot" / "cogs" / "utilities.py").read_text(encoding="utf-8")
     tree = ast.parse(source)
     for node in tree.body:
         if isinstance(node, ast.Assign):
@@ -128,7 +129,7 @@ class AdminSurfaceConsolidationTests(unittest.TestCase):
 
     def test_welcome_manage_panel_exposes_integrated_actions(self) -> None:
         action_values = _load_action_option_values(
-            "/mnt/e/femboibot/discord_bot/cogs/config.py",
+            str(ROOT / "discord_bot" / "cogs" / "config.py"),
             "_send_welcome_panel",
         )
         self.assertEqual(
@@ -142,7 +143,12 @@ class AdminSurfaceConsolidationTests(unittest.TestCase):
                 "edit_dm_message",
                 "clear_dm_message",
                 "toggle_dm",
+                "toggle_image",
+                "edit_image_template",
+                "edit_image_destination",
+                "set_image_channel",
                 "test_message",
+                "test_image",
             ],
         )
 
