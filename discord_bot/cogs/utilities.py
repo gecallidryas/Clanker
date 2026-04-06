@@ -165,17 +165,7 @@ HELP_COMMANDS = {
     "welcome": {
         "visibility": "admin",
         "prefix": [],
-        "slash": [
-            "/welcome channel",
-            "/welcome clear",
-            "/welcome test",
-            "/welcome set_message",
-            "/welcome view_message",
-            "/welcome clear_message",
-            "/welcome set_dm_message",
-            "/welcome clear_dm_message",
-            "/welcome toggle_dm",
-        ],
+        "slash": ["/welcome manage"],
     },
     "persona": {
         "visibility": "admin",

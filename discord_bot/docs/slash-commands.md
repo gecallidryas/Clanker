@@ -119,16 +119,7 @@ Some commands require elevated Discord permissions such as `Manage Guild`, `Admi
 | `/staff list` | List configured bot staff roles. | `config.py` |
 | `/staff manage` | Open the staff section inside the config panel UX. | `config.py` |
 | `/staff remove` | Remove a role from bot staff. | `config.py` |
-| `/welcome channel` | Set the welcome channel. | `config.py` |
-| `/welcome clear` | Disable welcome messages and clear the channel. | `config.py` |
-| `/welcome clear_dm_message` | Clear the DM welcome message. | `config.py` |
-| `/welcome clear_message` | Clear the welcome message template. | `config.py` |
-| `/welcome manage` | Open the welcome section inside the config panel UX. | `config.py` |
-| `/welcome set_dm_message` | Set the DM welcome message. | `config.py` |
-| `/welcome set_message` | Set a custom welcome message template. | `config.py` |
-| `/welcome test` | Send a test welcome message. | `config.py` |
-| `/welcome toggle_dm` | Enable or disable DM welcome messages. | `config.py` |
-| `/welcome view_message` | View the welcome message template. | `config.py` |
+| `/welcome manage` | Open the feature-packed welcome admin panel for channel, template, DM, toggle, and test actions. | `config.py` |
 
 ## Config
 

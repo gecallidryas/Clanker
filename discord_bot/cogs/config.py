@@ -1450,25 +1450,42 @@ class Config(commands.Cog):
         config = await get_welcome_config(interaction.guild.id)
         embed = discord.Embed(
             title="Welcome",
-            description="Channel and message controls for welcome and DM onboarding.",
+            description="Manage channel welcome flow, templates, DM onboarding, and test sends from one panel.",
             color=discord.Color.orange(),
         )
         channel_id = config.get("welcome_channel_id")
         embed.add_field(name="Channel", value=f"<#{channel_id}>" if channel_id else "None", inline=False)
-        embed.add_field(name="Enabled", value=str(bool(config.get("welcome_enabled"))), inline=True)
-        embed.add_field(name="DM welcome", value=str(bool(config.get("dm_welcome_enabled"))), inline=True)
+        embed.add_field(name="Enabled", value="Yes" if config.get("welcome_enabled") else "No", inline=True)
+        embed.add_field(name="DM welcome", value="Yes" if config.get("dm_welcome_enabled") else "No", inline=True)
         embed.add_field(
-            name="Custom message",
-            value="Set" if config.get("welcome_message_template") else "Default",
-            inline=True,
+            name="Welcome message",
+            value=self._summarize_welcome_text(
+                config.get("welcome_message_template"),
+                empty="Default AI-generated welcome",
+            ),
+            inline=False,
         )
+        embed.add_field(
+            name="DM message",
+            value=self._summarize_welcome_text(
+                config.get("dm_welcome_message"),
+                empty="Not set",
+            ),
+            inline=False,
+        )
+        embed.set_footer(text="Standalone welcome commands were folded into `/welcome manage`.")
         view = ActionMenuView(
             invoker_id=interaction.user.id,
             options=[
                 ActionOption("Set Channel", "set_channel", "Choose the welcome channel"),
+                ActionOption("Toggle Welcome", "toggle_enabled", "Enable or disable welcome messages without clearing the channel"),
                 ActionOption("Disable Welcome", "disable", "Clear the welcome channel"),
-                ActionOption("Edit Messages", "edit_messages", "Welcome template and DM welcome message"),
+                ActionOption("Edit Welcome Message", "edit_welcome_message", "Set the public welcome message template"),
+                ActionOption("Clear Welcome Message", "clear_welcome_message", "Return to the default welcome message"),
+                ActionOption("Edit DM Message", "edit_dm_message", "Set the DM onboarding message"),
+                ActionOption("Clear DM Message", "clear_dm_message", "Remove the DM onboarding message"),
                 ActionOption("Toggle DM Welcome", "toggle_dm", "Enable or disable DM welcome messages"),
+                ActionOption("Send Test Message", "test_message", "Send a welcome preview to the configured channel"),
             ],
             on_action=lambda panel_interaction, value: self._handle_welcome_action(panel_interaction, value),
         )
@@ -1476,6 +1493,8 @@ class Config(commands.Cog):
 
     async def _handle_welcome_action(self, interaction: discord.Interaction, value: str) -> None:
         if value == "set_channel":
+            if not await self._ensure_welcome_auth(interaction):
+                return
             view = SingleChannelPickerView(
                 invoker_id=interaction.user.id,
                 placeholder="Select welcome channel",
@@ -1483,42 +1502,246 @@ class Config(commands.Cog):
             )
             await self._send_panel_response(interaction, content="Choose the welcome channel.", view=view)
             return
+        if value == "toggle_enabled":
+            if not await self._ensure_welcome_auth(interaction):
+                return
+            await self._toggle_welcome_enabled(interaction)
+            return
         if value == "disable":
+            if not await self._ensure_welcome_auth(interaction):
+                return
             await set_welcome_channel_id(interaction.guild.id, None)
             await set_welcome_enabled(interaction.guild.id, False)
             await add_guild_config_audit(interaction.guild.id, interaction.user.id, "welcome_settings_save", summary="Welcome disabled")
             await interaction.response.send_message("Welcome messages disabled.", ephemeral=True)
             return
-        if value == "edit_messages":
+        if value == "edit_welcome_message":
+            if not await self._ensure_welcome_auth(interaction):
+                return
+            config = await get_welcome_config(interaction.guild.id)
             modal = CallbackFormModal(
-                title="Welcome Messages",
+                title="Welcome Template",
                 fields=[
                     {
-                        "key": "welcome_message_template",
+                        "key": "template",
                         "label": "Welcome template",
+                        "default": config.get("welcome_message_template"),
                         "required": False,
                         "style": discord.TextStyle.paragraph,
-                    },
-                    {
-                        "key": "dm_welcome_message",
-                        "label": "DM welcome message",
-                        "required": False,
-                        "style": discord.TextStyle.paragraph,
+                        "placeholder": "Use {member}, {member_name}, {member_count}, {member_ordinal}, {guild}.",
+                        "max_length": 3500,
                     },
                 ],
-                on_submit_callback=lambda modal_interaction, values: self._save_welcome_messages(modal_interaction, values),
+                on_submit_callback=lambda modal_interaction, values: self._save_welcome_template(modal_interaction, values),
             )
             await interaction.response.send_modal(modal)
+            return
+        if value == "clear_welcome_message":
+            if not await self._ensure_welcome_auth(interaction):
+                return
+            await self._clear_welcome_template(interaction)
+            return
+        if value == "edit_dm_message":
+            if not await self._ensure_welcome_auth(interaction):
+                return
+            config = await get_welcome_config(interaction.guild.id)
+            modal = CallbackFormModal(
+                title="DM Welcome Message",
+                fields=[
+                    {
+                        "key": "message",
+                        "label": "DM welcome message",
+                        "default": config.get("dm_welcome_message"),
+                        "required": False,
+                        "style": discord.TextStyle.paragraph,
+                        "placeholder": "Use \\n for line breaks if you want to type escapes.",
+                        "max_length": 3500,
+                    },
+                ],
+                on_submit_callback=lambda modal_interaction, values: self._save_dm_welcome_message(modal_interaction, values),
+            )
+            await interaction.response.send_modal(modal)
+            return
+        if value == "clear_dm_message":
+            if not await self._ensure_welcome_auth(interaction):
+                return
+            await self._clear_dm_welcome_message(interaction)
             return
         if value == "toggle_dm":
-            modal = CallbackFormModal(
-                title="DM Welcome Toggle",
-                fields=[{"key": "enabled", "label": "Enabled (on/off)", "default": "on", "required": True}],
-                on_submit_callback=lambda modal_interaction, values: self._save_dm_welcome_toggle(modal_interaction, values),
-            )
-            await interaction.response.send_modal(modal)
+            if not await self._ensure_welcome_auth(interaction):
+                return
+            await self._toggle_dm_welcome(interaction)
+            return
+        if value == "test_message":
+            await self._send_welcome_test(interaction)
             return
         await interaction.response.send_message("Unknown welcome action.", ephemeral=True)
+
+    async def _ensure_welcome_auth(self, interaction: discord.Interaction) -> bool:
+        password_configured, authenticated = await self._auth_status(interaction.guild.id, interaction.user.id)
+        if not password_configured:
+            await interaction.response.send_message(
+                "This change requires a config password first. Use `/config password set`, then reopen `/welcome manage`.",
+                ephemeral=True,
+            )
+            return False
+        if not authenticated:
+            await interaction.response.send_message(
+                "Authentication required. Use `/config auth` and then reopen `/welcome manage`.",
+                ephemeral=True,
+            )
+            return False
+        return True
+
+    @staticmethod
+    def _summarize_welcome_text(value: Optional[str], *, empty: str) -> str:
+        cleaned = (value or "").strip()
+        if not cleaned:
+            return empty
+        collapsed = " ".join(cleaned.split())
+        if len(collapsed) <= 140:
+            return collapsed
+        return f"{collapsed[:137]}..."
+
+    @staticmethod
+    def _normalize_welcome_text(value: Optional[str]) -> str:
+        return (value or "").strip().replace("\\n", "\n")
+
+    async def _toggle_welcome_enabled(self, interaction: discord.Interaction) -> None:
+        config = await get_welcome_config(interaction.guild.id)
+        currently_enabled = bool(config.get("welcome_enabled"))
+        channel_id = config.get("welcome_channel_id")
+        if not currently_enabled and not channel_id:
+            await interaction.response.send_message(
+                "Set a welcome channel before enabling welcome messages.",
+                ephemeral=True,
+            )
+            return
+        enabled = not currently_enabled
+        await set_welcome_enabled(interaction.guild.id, enabled)
+        await add_guild_config_audit(
+            interaction.guild.id,
+            interaction.user.id,
+            "welcome_settings_save",
+            summary=f"Welcome {'enabled' if enabled else 'disabled'}",
+            detail={"welcome_enabled": enabled},
+        )
+        await interaction.response.send_message(
+            f"Welcome messages {'enabled' if enabled else 'disabled'}.",
+            ephemeral=True,
+        )
+
+    async def _save_welcome_template(self, interaction: discord.Interaction, values: dict[str, str]) -> None:
+        cleaned = self._normalize_welcome_text(values.get("template"))
+        if not cleaned:
+            await interaction.response.send_message("Template cannot be empty.", ephemeral=True)
+            return
+        if len(cleaned) > 3500:
+            await interaction.response.send_message(
+                "Template is too long. Please keep it under 3500 characters.",
+                ephemeral=True,
+            )
+            return
+        await set_welcome_message_template(interaction.guild.id, cleaned)
+        await add_guild_config_audit(
+            interaction.guild.id,
+            interaction.user.id,
+            "welcome_template_set",
+        )
+        await interaction.response.send_message("Welcome template updated.", ephemeral=True)
+
+    async def _clear_welcome_template(self, interaction: discord.Interaction) -> None:
+        await set_welcome_message_template(interaction.guild.id, None)
+        await add_guild_config_audit(
+            interaction.guild.id,
+            interaction.user.id,
+            "welcome_template_clear",
+        )
+        await interaction.response.send_message("Welcome template cleared.", ephemeral=True)
+
+    async def _save_dm_welcome_message(self, interaction: discord.Interaction, values: dict[str, str]) -> None:
+        cleaned = self._normalize_welcome_text(values.get("message"))
+        if not cleaned:
+            await interaction.response.send_message("Message cannot be empty.", ephemeral=True)
+            return
+        if len(cleaned) > 3500:
+            await interaction.response.send_message(
+                "Message is too long. Please keep it under 3500 characters.",
+                ephemeral=True,
+            )
+            return
+        await set_dm_welcome_message(interaction.guild.id, cleaned)
+        await add_guild_config_audit(
+            interaction.guild.id,
+            interaction.user.id,
+            "dm_welcome_set",
+        )
+        await interaction.response.send_message("DM welcome message updated.", ephemeral=True)
+
+    async def _clear_dm_welcome_message(self, interaction: discord.Interaction) -> None:
+        await set_dm_welcome_message(interaction.guild.id, None)
+        await add_guild_config_audit(
+            interaction.guild.id,
+            interaction.user.id,
+            "dm_welcome_clear",
+        )
+        await interaction.response.send_message("DM welcome message cleared.", ephemeral=True)
+
+    async def _toggle_dm_welcome(self, interaction: discord.Interaction) -> None:
+        enabled = not await get_dm_welcome_enabled(interaction.guild.id)
+        await set_dm_welcome_enabled(interaction.guild.id, enabled)
+        await add_guild_config_audit(
+            interaction.guild.id,
+            interaction.user.id,
+            "welcome_settings_save",
+            summary="DM welcome toggle updated",
+            detail={"enabled": enabled},
+        )
+        await interaction.response.send_message(
+            f"DM welcome {'enabled' if enabled else 'disabled'}.",
+            ephemeral=True,
+        )
+
+    async def _send_welcome_test(self, interaction: discord.Interaction) -> None:
+        config = await get_welcome_config(interaction.guild.id)
+        channel_id = config.get("welcome_channel_id")
+        if not channel_id:
+            await interaction.response.send_message("No welcome channel set.", ephemeral=True)
+            return
+        channel = interaction.guild.get_channel(channel_id)
+        if not isinstance(channel, discord.TextChannel):
+            await interaction.response.send_message("Welcome channel not found.", ephemeral=True)
+            return
+        template = config.get("welcome_message_template")
+        if template:
+            member_count = int(getattr(interaction.guild, "member_count", 0) or 0)
+            ordinal = self._format_ordinal(member_count)
+            welcome_text = (
+                template
+                .replace("@user", interaction.user.mention)
+                .replace("{member}", interaction.user.mention)
+                .replace("{member_name}", interaction.user.display_name)
+                .replace("{member_count}", str(member_count))
+                .replace("{member_ordinal}", ordinal)
+                .replace("{guild}", interaction.guild.name)
+            )
+        else:
+            welcome_text = f"Test welcome message for {interaction.user.mention}!"
+        await channel.send(
+            welcome_text,
+            allowed_mentions=discord.AllowedMentions(users=True, roles=False, everyone=False),
+        )
+        await interaction.response.send_message("Sent a test welcome message.", ephemeral=True)
+
+    @staticmethod
+    def _format_ordinal(number: int) -> str:
+        if number <= 0:
+            return str(number)
+        if 10 <= (number % 100) <= 20:
+            suffix = "th"
+        else:
+            suffix = {1: "st", 2: "nd", 3: "rd"}.get(number % 10, "th")
+        return f"{number}{suffix}"
 
     async def _set_welcome_channel(self, guild_id: int, user_id: int, channel_id: int) -> str:
         await set_welcome_channel_id(guild_id, channel_id)
@@ -1532,41 +1755,6 @@ class Config(commands.Cog):
             summary="Welcome channel updated",
         )
         return f"Welcome messages will use <#{channel_id}>."
-
-    async def _save_welcome_messages(self, interaction: discord.Interaction, values: dict[str, str]) -> None:
-        template = (values.get("welcome_message_template") or "").strip()
-        dm_message = (values.get("dm_welcome_message") or "").strip()
-        if template:
-            await set_welcome_message_template(interaction.guild.id, template.replace("\\n", "\n"))
-        if dm_message:
-            await set_dm_welcome_message(interaction.guild.id, dm_message.replace("\\n", "\n"))
-        if not template and not dm_message:
-            await interaction.response.send_message("No welcome-message changes submitted.", ephemeral=True)
-            return
-        await add_guild_config_audit(
-            interaction.guild.id,
-            interaction.user.id,
-            "welcome_settings_save",
-            summary="Welcome message settings updated",
-            detail={"template_updated": bool(template), "dm_updated": bool(dm_message)},
-        )
-        await interaction.response.send_message("Welcome messages updated.", ephemeral=True)
-
-    async def _save_dm_welcome_toggle(self, interaction: discord.Interaction, values: dict[str, str]) -> None:
-        enabled_value = (values.get("enabled") or "").strip().lower()
-        if enabled_value not in {"on", "off", "enable", "disable", "true", "false"}:
-            await interaction.response.send_message("DM welcome must be `on` or `off`.", ephemeral=True)
-            return
-        enabled = enabled_value in {"on", "enable", "true"}
-        await set_dm_welcome_enabled(interaction.guild.id, enabled)
-        await add_guild_config_audit(
-            interaction.guild.id,
-            interaction.user.id,
-            "welcome_settings_save",
-            summary="DM welcome toggle updated",
-            detail={"enabled": enabled},
-        )
-        await interaction.response.send_message(f"DM welcome {'enabled' if enabled else 'disabled'}.", ephemeral=True)
 
     async def _send_url_safety_panel(self, interaction: discord.Interaction) -> None:
         if not await self._require_guild(interaction):
@@ -2329,188 +2517,6 @@ class Config(commands.Cog):
     @app_commands.checks.has_permissions(administrator=True)
     async def welcome_manage(self, interaction: discord.Interaction):
         await self._send_welcome_panel(interaction)
-
-    @welcome_group.command(name="channel", description="Set the welcome channel.")
-    @app_commands.checks.has_permissions(administrator=True)
-    @app_commands.describe(channel="Channel for welcome messages")
-    async def welcome_channel(self, interaction: discord.Interaction, channel: discord.TextChannel):
-        if not await self._require_guild(interaction):
-            return
-        if not await self._require_auth(interaction):
-            return
-        await set_welcome_channel_id(interaction.guild.id, channel.id)
-        await set_welcome_enabled(interaction.guild.id, True)
-        await interaction.response.send_message(
-            f"Welcome messages will be sent to {channel.mention}. Use `/config panel` or `/welcome manage` for future edits.",
-            ephemeral=True,
-        )
-
-    @welcome_group.command(name="clear", description="Disable welcome messages and clear the channel.")
-    @app_commands.checks.has_permissions(administrator=True)
-    async def welcome_clear(self, interaction: discord.Interaction):
-        if not await self._require_guild(interaction):
-            return
-        if not await self._require_auth(interaction):
-            return
-        await set_welcome_channel_id(interaction.guild.id, None)
-        await set_welcome_enabled(interaction.guild.id, False)
-        await interaction.response.send_message(
-            "Welcome messages disabled. Use `/config panel` or `/welcome manage` for future edits.",
-            ephemeral=True,
-        )
-
-    @welcome_group.command(name="test", description="Send a test welcome message.")
-    @app_commands.checks.has_permissions(administrator=True)
-    async def welcome_test(self, interaction: discord.Interaction):
-        if not await self._require_guild(interaction):
-            return
-        config = await get_welcome_config(interaction.guild.id)
-        channel_id = config.get("welcome_channel_id")
-        if not channel_id:
-            await interaction.response.send_message("No welcome channel set.", ephemeral=True)
-            return
-        channel = interaction.guild.get_channel(channel_id)
-        if not channel:
-            await interaction.response.send_message("Welcome channel not found.", ephemeral=True)
-            return
-        await channel.send(f"Test welcome message for {interaction.user.mention}!")
-        await interaction.response.send_message("Sent a test welcome message.", ephemeral=True)
-
-    @welcome_group.command(name="set_message", description="Set a custom welcome message template.")
-    @app_commands.checks.has_permissions(administrator=True)
-    @app_commands.describe(
-        template="Use {member}, {member_name}, {member_count}, {member_ordinal}, {guild}."
-    )
-    async def welcome_set_message(self, interaction: discord.Interaction, template: str):
-        if not await self._require_guild(interaction):
-            return
-        if not await self._require_auth(interaction):
-            return
-        cleaned = (template or "").strip()
-        cleaned = cleaned.replace("\\n", "\n")
-        if not cleaned:
-            await interaction.response.send_message("Template cannot be empty.", ephemeral=True)
-            return
-        if len(cleaned) > 3500:
-            await interaction.response.send_message(
-                "Template is too long. Please keep it under 3500 characters.",
-                ephemeral=True,
-            )
-            return
-        await set_welcome_message_template(interaction.guild.id, cleaned)
-        await add_guild_config_audit(
-            interaction.guild.id,
-            interaction.user.id,
-            "welcome_template_set",
-        )
-        await interaction.response.send_message("Welcome template updated.", ephemeral=True)
-
-    @welcome_group.command(name="view_message", description="View the welcome message template.")
-    @app_commands.checks.has_permissions(administrator=True)
-    async def welcome_view_message(self, interaction: discord.Interaction):
-        if not await self._require_guild(interaction):
-            return
-        config = await get_welcome_config(interaction.guild.id)
-        template = config.get("welcome_message_template")
-        if not template:
-            await interaction.response.send_message("No custom welcome template set.", ephemeral=True)
-            return
-        await interaction.response.send_message(
-            f"Current template:\n{template}{self._manage_panel_hint('/config panel', '/welcome manage')}",
-            ephemeral=True,
-        )
-
-    @welcome_group.command(name="clear_message", description="Clear the welcome message template.")
-    @app_commands.checks.has_permissions(administrator=True)
-    async def welcome_clear_message(self, interaction: discord.Interaction):
-        if not await self._require_guild(interaction):
-            return
-        if not await self._require_auth(interaction):
-            return
-        await set_welcome_message_template(interaction.guild.id, None)
-        await add_guild_config_audit(
-            interaction.guild.id,
-            interaction.user.id,
-            "welcome_template_clear",
-        )
-        await interaction.response.send_message("Welcome template cleared.", ephemeral=True)
-
-    @welcome_group.command(name="set_dm_message", description="Set the DM welcome message.")
-    @app_commands.checks.has_permissions(administrator=True)
-    @app_commands.describe(message="Message sent to new members via DM (use \\n for line breaks)")
-    async def welcome_set_dm_message(self, interaction: discord.Interaction, message: str):
-        if not await self._require_guild(interaction):
-            return
-        if not await self._require_auth(interaction):
-            return
-        cleaned = (message or "").strip()
-        cleaned = cleaned.replace("\\n", "\n")
-        if not cleaned:
-            await interaction.response.send_message("Message cannot be empty.", ephemeral=True)
-            return
-        if len(cleaned) > 3500:
-            await interaction.response.send_message(
-                "Message is too long. Please keep it under 3500 characters.",
-                ephemeral=True,
-            )
-            return
-        await set_dm_welcome_message(interaction.guild.id, cleaned)
-        await add_guild_config_audit(
-            interaction.guild.id,
-            interaction.user.id,
-            "dm_welcome_set",
-        )
-        await interaction.response.send_message("DM welcome message updated.", ephemeral=True)
-
-    @welcome_group.command(name="clear_dm_message", description="Clear the DM welcome message.")
-    @app_commands.checks.has_permissions(administrator=True)
-    async def welcome_clear_dm_message(self, interaction: discord.Interaction):
-        if not await self._require_guild(interaction):
-            return
-        if not await self._require_auth(interaction):
-            return
-        await set_dm_welcome_message(interaction.guild.id, None)
-        await add_guild_config_audit(
-            interaction.guild.id,
-            interaction.user.id,
-            "dm_welcome_clear",
-        )
-        await interaction.response.send_message("DM welcome message cleared.", ephemeral=True)
-
-    @welcome_group.command(name="toggle_dm", description="Enable or disable DM welcome messages.")
-    @app_commands.checks.has_permissions(administrator=True)
-    @app_commands.describe(state="on/off (leave empty to view)")
-    async def welcome_toggle_dm(self, interaction: discord.Interaction, state: Optional[str] = None):
-        if not await self._require_guild(interaction):
-            return
-        if not state:
-            enabled = await get_dm_welcome_enabled(interaction.guild.id)
-            await interaction.response.send_message(
-                f"DM welcome messages are currently **{'ENABLED' if enabled else 'DISABLED'}**.",
-                ephemeral=True,
-            )
-            return
-        if not await self._require_auth(interaction):
-            return
-        state_value = state.lower().strip()
-        if state_value in {"on", "enable", "true", "yes"}:
-            await set_dm_welcome_enabled(interaction.guild.id, True)
-            await add_guild_config_audit(
-                interaction.guild.id,
-                interaction.user.id,
-                "dm_welcome_on",
-            )
-            await interaction.response.send_message("DM welcome messages enabled.", ephemeral=True)
-        elif state_value in {"off", "disable", "false", "no"}:
-            await set_dm_welcome_enabled(interaction.guild.id, False)
-            await add_guild_config_audit(
-                interaction.guild.id,
-                interaction.user.id,
-                "dm_welcome_off",
-            )
-            await interaction.response.send_message("DM welcome messages disabled.", ephemeral=True)
-        else:
-            await interaction.response.send_message("Usage: `/welcome toggle_dm on|off`", ephemeral=True)
 
     # =========================
     # Staff Roles
