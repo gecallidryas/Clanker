@@ -95,7 +95,12 @@ Settings exposed through `/welcome manage`, `/autorole manage`, `/staff manage`,
 - welcome enabled state
 - welcome channel
 - welcome message template
+- welcome image enabled state
+- welcome image template (`pettinghand` or `catmunch`)
+- welcome image destination (`welcome_channel`, `specific_channel`, or `dm`)
+- welcome image channel override for `specific_channel` routing
 - DM welcome message and DM toggle
+- welcome image DM delivery is independent from the DM welcome text toggle
 - autorole enabled state
 - autorole role ID
 - bot staff roles and levels

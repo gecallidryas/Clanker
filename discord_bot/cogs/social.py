@@ -8,6 +8,7 @@ Commands:
 """
 
 import random
+from io import BytesIO
 from pathlib import Path
 import discord
 from discord import app_commands
@@ -27,6 +28,7 @@ from utils.db_handler import (
 from utils.guild_ai import generate_guild_gemini_text, GuildConfigError
 from utils.logger import get_logger
 from utils.server_profile import set_custom_profile, set_mode_profile, set_member_nickname
+from utils.welcome_images import render_welcome_image
 from utils.persona_panel_ui import (
     MANAGE_GUIDANCE,
     set_persona_evil_mode,
@@ -248,6 +250,62 @@ class Social(commands.Cog):
         if text.endswith((".", "!", "?", "~")):
             return f"{text} {sentence}"
         return f"{text}. {sentence}"
+
+    async def _read_member_avatar_bytes(self, member: discord.Member) -> bytes | None:
+        avatar = getattr(member, "display_avatar", None)
+        if avatar is None:
+            return None
+        if hasattr(avatar, "replace"):
+            try:
+                avatar = avatar.replace(size=256, static_format="png")
+            except TypeError:
+                try:
+                    avatar = avatar.replace(size=256, format="png")
+                except TypeError:
+                    avatar = avatar.replace(size=256)
+        if not hasattr(avatar, "read"):
+            return None
+        return await avatar.read()
+
+    def _resolve_welcome_image_target(self, member: discord.Member, welcome_config: dict):
+        destination = (welcome_config.get("welcome_image_destination") or "welcome_channel").strip().lower()
+        if destination == "dm":
+            return member
+        if destination == "specific_channel":
+            channel_id = welcome_config.get("welcome_image_channel_id")
+        else:
+            channel_id = welcome_config.get("welcome_channel_id")
+        if not channel_id:
+            return None
+        channel = member.guild.get_channel(channel_id)
+        if channel is None or not hasattr(channel, "send"):
+            return None
+        return channel
+
+    async def _send_welcome_image(self, member: discord.Member, welcome_config: dict, member_count: int) -> None:
+        if not welcome_config.get("welcome_image_enabled"):
+            return
+        target = self._resolve_welcome_image_target(member, welcome_config)
+        if target is None:
+            return
+        try:
+            avatar_bytes = await self._read_member_avatar_bytes(member)
+            if avatar_bytes is None:
+                return
+            image = render_welcome_image(
+                template=welcome_config.get("welcome_image_template") or "pettinghand",
+                avatar_bytes=avatar_bytes,
+                member_name=member.display_name,
+                join_ordinal=self._format_ordinal(member_count),
+            )
+            await target.send(
+                file=discord.File(BytesIO(image.data), filename=image.filename),
+                allowed_mentions=discord.AllowedMentions(users=True, roles=False, everyone=False),
+            )
+        except discord.Forbidden:
+            logger.warning("Missing permissions to send welcome image in %s", member.guild.name)
+        except Exception as exc:
+            logger.warning("Welcome image failed for %s in %s: %s", member, member.guild.name, exc)
     
     @commands.command(name="evil", aliases=["uncensored"])
     @commands.has_permissions(manage_guild=True)
@@ -391,6 +449,8 @@ class Social(commands.Cog):
                 )
             except discord.Forbidden:
                 logger.warning("Missing permissions to send welcome in %s", member.guild.name)
+
+        await self._send_welcome_image(member, welcome_config, member_count)
 
         # DM Welcome (Preset message from server staff)
         dm_enabled = await get_dm_welcome_enabled(guild_id)

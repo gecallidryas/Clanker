@@ -119,7 +119,7 @@ Some commands require elevated Discord permissions such as `Manage Guild`, `Admi
 | `/staff list` | List configured bot staff roles. | `config.py` |
 | `/staff manage` | Open the staff section inside the config panel UX. | `config.py` |
 | `/staff remove` | Remove a role from bot staff. | `config.py` |
-| `/welcome manage` | Open the feature-packed welcome admin panel for channel, template, DM, toggle, and test actions. | `config.py` |
+| `/welcome manage` | Open the feature-packed welcome admin panel for channel, text, welcome-image template/destination controls, DM settings, toggles, and test actions. | `config.py` |
 
 ## Config
 
