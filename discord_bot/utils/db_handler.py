@@ -241,6 +241,10 @@ async def _create_guild_config_table(db: aiosqlite.Connection) -> None:
             welcome_channel_id INTEGER,
             welcome_enabled INTEGER DEFAULT 1,
             welcome_message_template TEXT,
+            welcome_image_enabled INTEGER DEFAULT 0,
+            welcome_image_template TEXT DEFAULT 'pettinghand',
+            welcome_image_destination TEXT DEFAULT 'welcome_channel',
+            welcome_image_channel_id INTEGER,
             dm_welcome_message TEXT,
             dm_welcome_enabled INTEGER DEFAULT 0,
             spam_timeout_enabled INTEGER DEFAULT 0,
@@ -1239,6 +1243,10 @@ async def _init_guild_schema(db: aiosqlite.Connection) -> None:
             ("welcome_channel_id", "INTEGER", None),
             ("welcome_enabled", "INTEGER", 1),
             ("welcome_message_template", "TEXT", None),
+            ("welcome_image_enabled", "INTEGER", 0),
+            ("welcome_image_template", "TEXT", "pettinghand"),
+            ("welcome_image_destination", "TEXT", "welcome_channel"),
+            ("welcome_image_channel_id", "INTEGER", None),
             ("dm_welcome_message", "TEXT", None),
             ("dm_welcome_enabled", "INTEGER", 0),
             ("spam_timeout_enabled", "INTEGER", 0),
@@ -4840,6 +4848,10 @@ async def get_welcome_config(guild_id: int) -> Dict[str, Any]:
         "welcome_channel_id": config.get("welcome_channel_id"),
         "welcome_enabled": True if enabled is None else bool(enabled),
         "welcome_message_template": config.get("welcome_message_template"),
+        "welcome_image_enabled": bool(config.get("welcome_image_enabled") or 0),
+        "welcome_image_template": config.get("welcome_image_template") or "pettinghand",
+        "welcome_image_destination": config.get("welcome_image_destination") or "welcome_channel",
+        "welcome_image_channel_id": config.get("welcome_image_channel_id"),
     }
 
 

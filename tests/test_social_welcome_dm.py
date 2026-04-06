@@ -18,6 +18,7 @@ sys.modules.setdefault(
 )
 
 from discord_bot.cogs.social import Social
+from discord_bot.utils.db_handler import get_welcome_config
 
 
 class _FakeBot:
@@ -47,6 +48,23 @@ class _FakeMember:
 
 
 class SocialWelcomeDmTests(unittest.IsolatedAsyncioTestCase):
+    async def test_get_welcome_config_defaults_include_welcome_image_settings(self):
+        with patch("discord_bot.utils.db_handler.get_guild_config", AsyncMock(return_value={})):
+            config = await get_welcome_config(123)
+
+        self.assertEqual(
+            config,
+            {
+                "welcome_channel_id": None,
+                "welcome_enabled": True,
+                "welcome_message_template": None,
+                "welcome_image_enabled": False,
+                "welcome_image_template": "pettinghand",
+                "welcome_image_destination": "welcome_channel",
+                "welcome_image_channel_id": None,
+            },
+        )
+
     async def test_dm_welcome_sends_plain_text_message(self):
         cog = Social(_FakeBot())
         member = _FakeMember()
