@@ -4870,6 +4870,26 @@ async def set_welcome_message_template(guild_id: int, template: Optional[str]) -
     await update_guild_config(guild_id, {"welcome_message_template": template})
 
 
+async def set_welcome_image_enabled(guild_id: int, enabled: bool) -> None:
+    """Enable or disable welcome images for a guild."""
+    await update_guild_config(guild_id, {"welcome_image_enabled": int(enabled)})
+
+
+async def set_welcome_image_template(guild_id: int, template: Optional[str]) -> None:
+    """Set or clear the welcome image template for a guild."""
+    await update_guild_config(guild_id, {"welcome_image_template": template})
+
+
+async def set_welcome_image_destination(guild_id: int, destination: str) -> None:
+    """Set the welcome image destination for a guild."""
+    await update_guild_config(guild_id, {"welcome_image_destination": destination})
+
+
+async def set_welcome_image_channel_id(guild_id: int, channel_id: Optional[int]) -> None:
+    """Set or clear the welcome image channel ID for a guild."""
+    await update_guild_config(guild_id, {"welcome_image_channel_id": channel_id})
+
+
 async def get_dm_welcome_message(guild_id: int) -> Optional[str]:
     """Get the DM welcome message for a guild."""
     config = await get_guild_config(guild_id)

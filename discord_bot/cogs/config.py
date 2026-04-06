@@ -8,7 +8,6 @@ import io
 import json
 from pathlib import Path
 from typing import Any, Awaitable, Callable, Dict, List, Optional, Sequence, Tuple
-from io import BytesIO
 
 import discord
 from discord import app_commands
@@ -43,6 +42,10 @@ from utils.db_handler import (
     set_welcome_channel_id,
     set_welcome_enabled,
     set_welcome_message_template,
+    set_welcome_image_channel_id,
+    set_welcome_image_destination,
+    set_welcome_image_enabled,
+    set_welcome_image_template,
     set_dm_welcome_message,
     set_dm_welcome_enabled,
     get_dm_welcome_enabled,
@@ -57,7 +60,6 @@ from utils.guild_ai import (
 from utils.api_manager import normalize_openrouter_model, normalize_gemini_model, OPENROUTER_MODELS
 from utils.rate_limiter import RateLimiter
 from utils.logger import get_logger
-from utils.petpet import make_petpet
 from utils.i18n import get_locale_from_interaction, t
 from utils.admin_panel_logic import ConfigAction, diff_toggle_states, reconcile_id_lists, requires_auth
 from utils.admin_panel_views import AuthRequiredView
@@ -1809,7 +1811,7 @@ class Config(commands.Cog):
     async def _toggle_welcome_image(self, interaction: discord.Interaction) -> None:
         config = await get_welcome_config(interaction.guild.id)
         enabled = not bool(config.get("welcome_image_enabled"))
-        await update_guild_config(interaction.guild.id, {"welcome_image_enabled": int(enabled)})
+        await set_welcome_image_enabled(interaction.guild.id, enabled)
         await add_guild_config_audit(
             interaction.guild.id,
             interaction.user.id,
@@ -1830,7 +1832,7 @@ class Config(commands.Cog):
         if len(cleaned) > 64:
             await interaction.response.send_message("Template is too long.", ephemeral=True)
             return
-        await update_guild_config(interaction.guild.id, {"welcome_image_template": cleaned})
+        await set_welcome_image_template(interaction.guild.id, cleaned)
         await add_guild_config_audit(
             interaction.guild.id,
             interaction.user.id,
@@ -1848,7 +1850,7 @@ class Config(commands.Cog):
                 ephemeral=True,
             )
             return
-        await update_guild_config(interaction.guild.id, {"welcome_image_destination": cleaned})
+        await set_welcome_image_destination(interaction.guild.id, cleaned)
         await add_guild_config_audit(
             interaction.guild.id,
             interaction.user.id,
@@ -1859,7 +1861,7 @@ class Config(commands.Cog):
         await interaction.response.send_message("Welcome image destination updated.", ephemeral=True)
 
     async def _set_welcome_image_channel(self, guild_id: int, user_id: int, channel_id: int) -> str:
-        await update_guild_config(guild_id, {"welcome_image_channel_id": channel_id})
+        await set_welcome_image_channel_id(guild_id, channel_id)
         await add_guild_config_audit(
             guild_id,
             user_id,
@@ -1874,57 +1876,15 @@ class Config(commands.Cog):
         config = await get_welcome_config(interaction.guild.id)
         template = (config.get("welcome_image_template") or "pettinghand").strip().lower()
         destination = (config.get("welcome_image_destination") or "welcome_channel").strip().lower()
-        avatar = getattr(interaction.user, "display_avatar", None)
-        if avatar is None:
-            await interaction.response.send_message("Could not read your avatar.", ephemeral=True)
-            return
-        if hasattr(avatar, "replace"):
-            try:
-                avatar = avatar.replace(size=128, static_format="png")
-            except TypeError:
-                try:
-                    avatar = avatar.replace(size=128, format="png")
-                except TypeError:
-                    avatar = avatar.replace(size=128)
-        if not hasattr(avatar, "read"):
-            await interaction.response.send_message("Could not read your avatar.", ephemeral=True)
-            return
-
-        if template != "pettinghand":
-            await interaction.response.send_message(
-                "Welcome image tests are currently available for the pettinghand template only.",
-                ephemeral=True,
-            )
-            return
-
-        avatar_bytes = await avatar.read()
-        file = discord.File(BytesIO(make_petpet(avatar_bytes)), filename="pettinghand.gif")
-        channel = None
-        if destination == "dm":
-            channel = interaction.user
-        elif destination == "specific_channel":
-            channel_id = config.get("welcome_image_channel_id")
-            if not channel_id:
-                await interaction.response.send_message("Set a welcome image channel first.", ephemeral=True)
-                return
-            channel = interaction.guild.get_channel(channel_id)
-        else:
-            channel_id = config.get("welcome_channel_id")
-            if not channel_id:
-                await interaction.response.send_message("Set a welcome channel first.", ephemeral=True)
-                return
-            channel = interaction.guild.get_channel(channel_id)
-
-        if channel is None:
-            await interaction.response.send_message("Target channel not found.", ephemeral=True)
-            return
-
-        await channel.send(
-            "Welcome image preview.",
-            file=file,
-            allowed_mentions=discord.AllowedMentions(users=True, roles=False, everyone=False),
-        )
-        await interaction.response.send_message("Sent a welcome image preview.", ephemeral=True)
+        channel_id = config.get("welcome_image_channel_id") if destination == "specific_channel" else config.get("welcome_channel_id")
+        summary = [
+            "Welcome image test configured.",
+            f"Enabled: {'Yes' if config.get('welcome_image_enabled') else 'No'}",
+            f"Template: {template}",
+            f"Destination: {destination}",
+            f"Channel: {f'<#{channel_id}>' if channel_id else 'None'}",
+        ]
+        await interaction.response.send_message("\n".join(summary), ephemeral=True)
 
     async def _send_welcome_test(self, interaction: discord.Interaction) -> None:
         config = await get_welcome_config(interaction.guild.id)
