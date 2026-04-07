@@ -22,7 +22,14 @@ sys.modules.setdefault(
 
 from discord_bot.cogs.social import Social
 from discord_bot.utils.db_handler import get_welcome_config
-from discord_bot.utils.welcome_images import WelcomeImagePayload, render_welcome_image
+from discord_bot.utils.welcome_images import (
+    CATMUNCH_SUBTITLE_Y,
+    CATMUNCH_TEXT_CENTER_X,
+    CATMUNCH_TOP_TEXT_Y,
+    WelcomeImagePayload,
+    _compute_catmunch_avatar_geometry,
+    render_welcome_image,
+)
 
 
 class _FakeBot:
@@ -108,6 +115,14 @@ class SocialWelcomeDmTests(unittest.IsolatedAsyncioTestCase):
         self.assertEqual(payload.filename, "pettinghand.gif")
         self.assertEqual(payload.content_type, "image/gif")
         self.assertTrue(payload.data.startswith(b"GIF8"))
+
+    def test_compute_catmunch_avatar_geometry_overscans_and_shifts_top_right(self):
+        self.assertEqual(_compute_catmunch_avatar_geometry(), (0, 0, 473))
+
+    def test_catmunch_text_is_centered_to_full_image_and_top_text_moves_up(self):
+        self.assertEqual(CATMUNCH_TEXT_CENTER_X, 512)
+        self.assertEqual(CATMUNCH_TOP_TEXT_Y, 88)
+        self.assertEqual(CATMUNCH_SUBTITLE_Y, 180)
 
     def test_render_welcome_image_catmunch_returns_png_payload(self):
         avatar = Image.new("RGB", (320, 240), "#7ec8ff")

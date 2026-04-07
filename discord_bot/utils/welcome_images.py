@@ -29,10 +29,13 @@ PETPET_FRAME_TABLE = (
 )
 PETPET_FRAME_DURATION_MS = 60
 PETPET_CANVAS_SIZE = (107, 106)
-CATMUNCH_AVATAR_BBOX = (195, 398, 626, 834)
-CATMUNCH_TEXT_CENTER_X = 418
-CATMUNCH_TOP_TEXT_Y = 156
-CATMUNCH_SUBTITLE_Y = 240
+CATMUNCH_AVATAR_BBOX = (159, 401, 632, 874)
+CATMUNCH_AVATAR_SCALE = 1.0
+CATMUNCH_AVATAR_OFFSET_X = 0
+CATMUNCH_AVATAR_OFFSET_Y = 0
+CATMUNCH_TEXT_CENTER_X = 512
+CATMUNCH_TOP_TEXT_Y = 88
+CATMUNCH_SUBTITLE_Y = 180
 CATMUNCH_BOTTOM_TEXT_Y = 872
 CATMUNCH_NAME_FONT_SIZE = 88
 CATMUNCH_TEXT_FONT_SIZE = 64
@@ -103,17 +106,26 @@ def _render_circle_avatar(avatar: Image.Image) -> Image.Image:
     left, top, right, bottom = CATMUNCH_AVATAR_BBOX
     width = right - left
     height = bottom - top
-    size = min(width, height)
+    x, y, size = _compute_catmunch_avatar_geometry()
     resized = avatar.resize((size, size), Image.Resampling.LANCZOS)
     layer = Image.new("RGBA", (width, height), (0, 0, 0, 0))
     mask = Image.new("L", (width, height), 0)
     mask_draw = ImageDraw.Draw(mask)
-    x = (width - size) // 2
-    y = (height - size) // 2
     mask_draw.ellipse((x, y, x + size - 1, y + size - 1), fill=255)
     avatar_layer = Image.new("RGBA", (width, height), (0, 0, 0, 0))
     avatar_layer.alpha_composite(resized, (x, y))
     return Image.composite(avatar_layer, layer, mask)
+
+
+def _compute_catmunch_avatar_geometry() -> tuple[int, int, int]:
+    left, top, right, bottom = CATMUNCH_AVATAR_BBOX
+    width = right - left
+    height = bottom - top
+    opening = min(width, height)
+    size = int(round(opening * CATMUNCH_AVATAR_SCALE))
+    x = ((width - size) // 2) + CATMUNCH_AVATAR_OFFSET_X
+    y = ((height - size) // 2) + CATMUNCH_AVATAR_OFFSET_Y
+    return x, y, size
 
 
 def _find_catmunch_assets() -> tuple[Path, Path]:
