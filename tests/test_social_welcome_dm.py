@@ -49,13 +49,19 @@ class _FakeGuild:
 
 
 class _FakeAvatar:
-    def __init__(self, payload: bytes = b"avatar-bytes"):
+    def __init__(self, payload: bytes = b"avatar-bytes", *, side_effect=None):
         self._payload = payload
+        self._side_effect = side_effect
 
     def replace(self, **_kwargs):
         return self
 
     async def read(self):
+        if self._side_effect:
+            value = self._side_effect.pop(0)
+            if isinstance(value, Exception):
+                raise value
+            return value
         return self._payload
 
 
@@ -214,6 +220,22 @@ class SocialWelcomeDmTests(unittest.IsolatedAsyncioTestCase):
         member.send.assert_awaited_once()
         _, image_kwargs = member.send.await_args
         self.assertEqual(image_kwargs["file"].filename, "catmunch.png")
+
+    async def test_send_welcome_image_retries_avatar_read_after_short_delay(self):
+        cog = Social(_FakeBot())
+        member = _FakeMember(
+            avatar=_FakeAvatar(side_effect=[RuntimeError("cdn not ready"), b"avatar-bytes"]),
+        )
+        payload = WelcomeImagePayload(data=b"gif-bytes", filename="pettinghand.gif", content_type="image/gif")
+
+        with patch("discord_bot.cogs.social.render_welcome_image", return_value=payload), patch(
+            "asyncio.sleep",
+            AsyncMock(),
+        ) as sleep_mock:
+            avatar_bytes = await cog._read_member_avatar_bytes(member)
+
+        self.assertEqual(avatar_bytes, b"avatar-bytes")
+        sleep_mock.assert_awaited_once()
 
     async def test_dm_welcome_sends_plain_text_message(self):
         cog = Social(_FakeBot())

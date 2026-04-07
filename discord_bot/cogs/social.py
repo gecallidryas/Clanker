@@ -7,6 +7,7 @@ Commands:
     !evil [on/off]   - Toggle uncensored mode
 """
 
+import asyncio
 import random
 from io import BytesIO
 from pathlib import Path
@@ -265,7 +266,14 @@ class Social(commands.Cog):
                     avatar = avatar.replace(size=256)
         if not hasattr(avatar, "read"):
             return None
-        return await avatar.read()
+        for attempt in range(3):
+            try:
+                return await avatar.read()
+            except Exception:
+                if attempt == 2:
+                    raise
+                await asyncio.sleep(1.0)
+        return None
 
     def _resolve_welcome_image_target(self, member: discord.Member, welcome_config: dict):
         destination = (welcome_config.get("welcome_image_destination") or "welcome_channel").strip().lower()
