@@ -5,17 +5,10 @@ Handles bot personality mode switching and mention reactions.
 
 Commands:
     !evil [on/off]   - Toggle uncensored mode
-<<<<<<< main
 """
 
 import asyncio
 import random
-=======
-"""
-
-import random
-import asyncio
->>>>>>> local
 from io import BytesIO
 from pathlib import Path
 import discord
@@ -261,7 +254,6 @@ class Social(commands.Cog):
             return f"{text} {sentence}"
         return f"{text}. {sentence}"
 
-<<<<<<< main
     async def _read_member_avatar_bytes(self, member: discord.Member) -> bytes | None:
         avatar = getattr(member, "display_avatar", None)
         if avatar is None:
@@ -324,16 +316,7 @@ class Social(commands.Cog):
             logger.warning("Missing permissions to send welcome image in %s", member.guild.name)
         except Exception as exc:
             logger.warning("Welcome image failed for %s in %s: %s", member, member.guild.name, exc)
-    
-    @commands.command(name="evil", aliases=["uncensored"])
-    @commands.has_permissions(manage_guild=True)
-    async def toggle_evil_mode(self, ctx: commands.Context, state: str = None):
-        """
-        Toggle 'Evil' (Uncensored) mode using OpenRouter models.
-        
-        Usage: !evil [on/off]
-        """
-=======
+
     async def _build_petpet_file(self, member: discord.Member) -> discord.File | None:
         avatar = getattr(member, "display_avatar", None)
         if avatar is None:
@@ -370,16 +353,15 @@ class Social(commands.Cog):
             return None
 
         return discord.File(BytesIO(gif_bytes), filename="petpet.gif")
-    
+
     @commands.command(name="evil", aliases=["uncensored"])
     @commands.has_permissions(manage_guild=True)
     async def toggle_evil_mode(self, ctx: commands.Context, state: str = None):
         """
         Toggle 'Evil' (Uncensored) mode using OpenRouter models.
-        
+
         Usage: !evil [on/off]
         """
->>>>>>> local
         current_mode = await get_server_mode(ctx.guild.id)
         if current_mode == "mode_default":
             await set_evil_mode(ctx.guild.id, False)
@@ -517,15 +499,10 @@ class Social(commands.Cog):
                 await channel.send(welcome_text, **send_kwargs)
             except discord.Forbidden:
                 logger.warning("Missing permissions to send welcome in %s", member.guild.name)
-<<<<<<< main
 
         await self._send_welcome_image(member, welcome_config, member_count)
 
         # DM Welcome (Preset message from server staff)
-=======
-
-        # DM Welcome (Preset message from server staff)
->>>>>>> local
         dm_enabled = await get_dm_welcome_enabled(guild_id)
         dm_text = await get_dm_welcome_message(guild_id)
         if dm_enabled and dm_text:
