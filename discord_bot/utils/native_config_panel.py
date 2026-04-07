@@ -42,7 +42,11 @@ from utils.db_handler import (
     update_guild_config,
 )
 from utils.encryption import get_encryption
-from utils.guild_ai import RECOMMENDED_GEMINI_MODELS, RECOMMENDED_OPENROUTER_MODELS
+from utils.guild_ai import (
+    RECOMMENDED_GEMINI_MODELS,
+    RECOMMENDED_OPENROUTER_MODELS,
+    normalize_openrouter_fallback_setting,
+)
 from utils.i18n import get_locale_from_interaction, t
 from utils.tool_flags import DEFAULT_FLAG_VALUES
 
@@ -107,6 +111,9 @@ MODEL_FIELDS = OrderedDict(
 COOLDOWN_TYPES = ["off", "per_user", "per_channel", "server_wide", "strict_server_wide"]
 THOUGHT_LOG_LEVELS = ["off", "summary", "raw_debug"]
 URL_SAFETY_ACTIONS = ["warn", "delete"]
+GEMINI_MODEL_REFERENCE_TEXT = "Examples: gemini-2.5-flash-lite, gemini-2.5-flash"
+OPENROUTER_MODEL_REFERENCE_TEXT = "Examples: venice, hermes, mistral, deepseek"
+OPENROUTER_FALLBACK_REFERENCE_TEXT = "Examples: venice,hermes,mistral or none"
 
 
 def _mask_secret(value: Optional[str]) -> str:
@@ -733,14 +740,21 @@ class AISettingsHomeView(AdminPanelView):
         config = await get_guild_config(self.guild_id)
         whitelist = _parse_json_id_list(config.get("ai_channel_whitelist"))
         auto_channels = _parse_json_id_list(config.get("ai_auto_channels"))
+        auto_threshold = int(config.get("ai_auto_threshold") or 0)
+        auto_threshold_label = (
+            "0 (always eligible)"
+            if auto_threshold == 0
+            else str(auto_threshold)
+        )
         embed = discord.Embed(title="AI Settings", color=discord.Color.blue())
         embed.add_field(name="Cooldown", value=f"{config.get('ai_reply_cooldown_seconds') or 0}s / {config.get('ai_reply_cooldown_type') or 'per_user'}", inline=False)
         embed.add_field(name="Self reply limit", value=str(config.get("ai_self_reply_limit") or 3), inline=True)
-        embed.add_field(name="Auto threshold", value=str(config.get("ai_auto_threshold") or 0), inline=True)
+        embed.add_field(name="Auto threshold", value=auto_threshold_label, inline=True)
         embed.add_field(name="Whitelist channels", value=str(len(whitelist)), inline=True)
         embed.add_field(name="Auto channels", value=str(len(auto_channels)), inline=True)
         embed.add_field(name="Streaming", value="Enabled" if config.get("ai_streaming_enabled", 1) else "Disabled", inline=True)
         embed.add_field(name="Thought log", value=str(config.get("ai_thought_log_level") or "off"), inline=True)
+        embed.description = "Auto channels are candidate zones. Threshold 0 means always eligible, not always reply."
         return embed
 
     @discord.ui.button(label="Scalars", style=discord.ButtonStyle.primary, row=0)
@@ -982,14 +996,41 @@ class ProviderSecretModal(discord.ui.Modal):
 
 
 class ProviderModelsModal(discord.ui.Modal):
-    def __init__(self, *, guild_id: int) -> None:
+    def __init__(self, *, guild_id: int, config: Optional[Mapping[str, Any]] = None) -> None:
         super().__init__(title="Provider Models")
         self.guild_id = guild_id
-        self.general = discord.ui.TextInput(label="General Gemini model", required=False)
-        self.translate = discord.ui.TextInput(label="Translate Gemini model", required=False)
-        self.summarize = discord.ui.TextInput(label="Summarize Gemini model", required=False)
-        self.uncensored = discord.ui.TextInput(label="OpenRouter model", required=False)
-        self.fallbacks = discord.ui.TextInput(label="OpenRouter fallbacks", required=False, style=discord.TextStyle.paragraph)
+        config = config or {}
+        self.general = discord.ui.TextInput(
+            label="General Gemini model",
+            required=False,
+            default=config.get("gemini_model"),
+            placeholder=GEMINI_MODEL_REFERENCE_TEXT,
+        )
+        self.translate = discord.ui.TextInput(
+            label="Translate Gemini model",
+            required=False,
+            default=config.get("gemini_translate_model"),
+            placeholder=GEMINI_MODEL_REFERENCE_TEXT,
+        )
+        self.summarize = discord.ui.TextInput(
+            label="Summarize Gemini model",
+            required=False,
+            default=config.get("gemini_summarize_model"),
+            placeholder=GEMINI_MODEL_REFERENCE_TEXT,
+        )
+        self.uncensored = discord.ui.TextInput(
+            label="OpenRouter model",
+            required=False,
+            default=config.get("openrouter_model"),
+            placeholder=OPENROUTER_MODEL_REFERENCE_TEXT,
+        )
+        self.fallbacks = discord.ui.TextInput(
+            label="OpenRouter fallbacks",
+            required=False,
+            default=config.get("openrouter_fallback_models"),
+            placeholder=OPENROUTER_FALLBACK_REFERENCE_TEXT,
+            style=discord.TextStyle.paragraph,
+        )
         self.add_item(self.general)
         self.add_item(self.translate)
         self.add_item(self.summarize)
@@ -1007,7 +1048,9 @@ class ProviderModelsModal(discord.ui.Modal):
         if self.uncensored.value.strip():
             updates["openrouter_model"] = normalize_openrouter_model(self.uncensored.value.strip()) or self.uncensored.value.strip()
         if self.fallbacks.value.strip():
-            updates["openrouter_fallback_models"] = self.fallbacks.value.strip()
+            updates["openrouter_fallback_models"] = normalize_openrouter_fallback_setting(
+                self.fallbacks.value
+            )
         if not updates:
             await interaction.response.send_message("No model changes submitted.", ephemeral=True)
             return
@@ -1115,7 +1158,8 @@ class ProvidersHomeView(AdminPanelView):
     async def edit_models(self, interaction: discord.Interaction, button: discord.ui.Button) -> None:
         if not await _ensure_low_risk_permissions(interaction):
             return
-        await interaction.response.send_modal(ProviderModelsModal(guild_id=self.guild_id))
+        config = await get_guild_config(self.guild_id)
+        await interaction.response.send_modal(ProviderModelsModal(guild_id=self.guild_id, config=config))
 
     @discord.ui.button(label="Edit Endpoint", style=discord.ButtonStyle.primary, row=1)
     async def edit_endpoint(self, interaction: discord.Interaction, button: discord.ui.Button) -> None:

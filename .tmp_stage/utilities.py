@@ -108,7 +108,7 @@ HELP_COMMANDS = {
     },
     "config": {
         "visibility": "admin",
-        "prefix": [],
+        "prefix": ["!admin", "!reload"],
         "slash": [
             "/config panel",
             "/config auth",
@@ -120,6 +120,16 @@ HELP_COMMANDS = {
             "/config ai manage",
             "/config url_safety manage",
             "/config custom_endpoint manage",
+            "/admin reset",
+            "/admin view",
+            "/admin setfact",
+            "/admin delfact",
+            "/admin affection",
+            "/admin model",
+            "/admin clearglobal",
+            "/admin clearguild",
+            "/setgenderrole",
+            "/avatar reset",
         ],
     },
     "tools": {
@@ -140,12 +150,12 @@ HELP_COMMANDS = {
     "staff": {
         "visibility": "admin",
         "prefix": [],
-        "slash": ["/staff manage", "/staff add", "/staff remove", "/staff list"],
+        "slash": ["/staff add", "/staff remove", "/staff list"],
     },
     "modlog": {
         "visibility": "admin",
         "prefix": [],
-        "slash": ["/modlog manage", "/modlog set", "/modlog clear", "/modlog view"],
+        "slash": ["/modlog set", "/modlog clear", "/modlog view"],
     },
     "autorole": {
         "visibility": "admin",

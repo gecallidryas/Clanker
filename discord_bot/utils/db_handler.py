@@ -924,6 +924,7 @@ async def _init_guild_schema(db: aiosqlite.Connection) -> None:
             birthday TEXT,
             personal_memory_opt_out INTEGER DEFAULT 0,
             allow_mention_fact_lookup INTEGER DEFAULT 0,
+            passive_reply_visibility_opt_out INTEGER DEFAULT 0,
             personal_memory_export_enabled INTEGER DEFAULT 1,
             privacy_updated_at TIMESTAMP,
             created_at TIMESTAMP DEFAULT CURRENT_TIMESTAMP,
@@ -1375,6 +1376,10 @@ async def _init_guild_schema(db: aiosqlite.Connection) -> None:
         pass
     try:
         await db.execute("ALTER TABLE user_profiles ADD COLUMN allow_mention_fact_lookup INTEGER DEFAULT 0")
+    except Exception:
+        pass
+    try:
+        await db.execute("ALTER TABLE user_profiles ADD COLUMN passive_reply_visibility_opt_out INTEGER DEFAULT 0")
     except Exception:
         pass
     try:
@@ -3445,6 +3450,7 @@ async def get_personal_memory_privacy(guild_id: int, user_id: int) -> Dict[str, 
         async with db.execute(
             """
             SELECT personal_memory_opt_out, allow_mention_fact_lookup,
+                   passive_reply_visibility_opt_out,
                    personal_memory_export_enabled, privacy_updated_at
             FROM user_profiles
             WHERE guild_id = ? AND user_id = ?
@@ -3456,12 +3462,14 @@ async def get_personal_memory_privacy(guild_id: int, user_id: int) -> Dict[str, 
         return {
             "personal_memory_opt_out": False,
             "allow_mention_fact_lookup": False,
+            "passive_reply_visibility_opt_out": False,
             "personal_memory_export_enabled": True,
             "privacy_updated_at": None,
         }
     return {
         "personal_memory_opt_out": bool(row["personal_memory_opt_out"]),
         "allow_mention_fact_lookup": bool(row["allow_mention_fact_lookup"]),
+        "passive_reply_visibility_opt_out": bool(row["passive_reply_visibility_opt_out"]),
         "personal_memory_export_enabled": bool(row["personal_memory_export_enabled"]),
         "privacy_updated_at": row["privacy_updated_at"],
     }
@@ -3476,6 +3484,22 @@ async def set_allow_mention_fact_lookup(guild_id: int, user_id: int, enabled: bo
             VALUES (?, ?, ?, ?)
             ON CONFLICT(guild_id, user_id) DO UPDATE SET
                 allow_mention_fact_lookup = excluded.allow_mention_fact_lookup,
+                privacy_updated_at = excluded.privacy_updated_at
+            """,
+            (guild_id, user_id, int(enabled), _utcnow().isoformat()),
+        )
+        await db.commit()
+
+
+async def set_passive_reply_visibility_opt_out(guild_id: int, user_id: int, enabled: bool) -> None:
+    async with guild_db(guild_id) as db:
+        await db.execute(
+            """
+            INSERT INTO user_profiles
+            (guild_id, user_id, passive_reply_visibility_opt_out, privacy_updated_at)
+            VALUES (?, ?, ?, ?)
+            ON CONFLICT(guild_id, user_id) DO UPDATE SET
+                passive_reply_visibility_opt_out = excluded.passive_reply_visibility_opt_out,
                 privacy_updated_at = excluded.privacy_updated_at
             """,
             (guild_id, user_id, int(enabled), _utcnow().isoformat()),

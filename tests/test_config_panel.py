@@ -70,6 +70,16 @@ class _FakeEncryption:
         return "****" if value else "Not set"
 
 
+class _FakeAttachment:
+    def __init__(self, content: str, filename: str = "guild.env") -> None:
+        self._content = content.encode("utf-8")
+        self.filename = filename
+        self.size = len(self._content)
+
+    async def read(self) -> bytes:
+        return self._content
+
+
 class PanelViewTests(unittest.IsolatedAsyncioTestCase):
     def _make_config_cog(self) -> Config:
         with patch("discord_bot.cogs.config.get_encryption", return_value=_FakeEncryption()):
@@ -218,6 +228,72 @@ class PanelViewTests(unittest.IsolatedAsyncioTestCase):
         payload = interaction.response.messages[-1]
         self.assertIsInstance(payload["view"], AuthRequiredView)
         self.assertIn("Provider", payload["embed"].title)
+
+    async def test_provider_model_modal_prefills_current_values_and_examples(self):
+        cog = self._make_config_cog()
+        interaction = FakeInteraction(user_id=11)
+        config = {
+            "gemini_model": "gemini-2.5-flash-lite",
+            "gemini_translate_model": "gemini-2.5-flash",
+            "gemini_summarize_model": "gemini-2.5-flash-lite",
+            "openrouter_model": "cognitivecomputations/dolphin-mistral-24b-venice-edition:free",
+            "openrouter_fallback_models": "nousresearch/hermes-3-llama-3.1-405b:free,mistralai/mistral-small-3.1-24b-instruct:free",
+        }
+
+        with patch("discord_bot.cogs.config.get_guild_config", AsyncMock(return_value=config)):
+            await cog._handle_provider_action(interaction, "edit_models")
+
+        modal = interaction.response.modal
+        self.assertIsNotNone(modal)
+        self.assertEqual(modal.title, "Provider Models")
+        self.assertEqual(modal._inputs["general"].default, "gemini-2.5-flash-lite")
+        self.assertIn("gemini-2.5-flash", modal._inputs["general"].placeholder)
+        self.assertEqual(modal._inputs["translate"].default, "gemini-2.5-flash")
+        self.assertEqual(
+            modal._inputs["uncensored"].default,
+            "cognitivecomputations/dolphin-mistral-24b-venice-edition:free",
+        )
+        self.assertIn("venice", modal._inputs["uncensored"].placeholder)
+        self.assertEqual(
+            modal._inputs["openrouter_fallback_models"].default,
+            "nousresearch/hermes-3-llama-3.1-405b:free,mistralai/mistral-small-3.1-24b-instruct:free",
+        )
+        self.assertIn("hermes", modal._inputs["openrouter_fallback_models"].placeholder)
+
+    async def test_env_upload_preserves_none_as_explicit_openrouter_fallback_disable(self):
+        cog = self._make_config_cog()
+        interaction = FakeInteraction(user_id=11)
+        attachment = _FakeAttachment(
+            "OPENROUTER_MODEL=deepseek\nOPENROUTER_FALLBACK_MODELS=none\n"
+        )
+
+        with patch.object(cog, "_require_guild", AsyncMock(return_value=True)), patch.object(
+            cog,
+            "_require_auth",
+            AsyncMock(return_value=True),
+        ), patch(
+            "discord_bot.cogs.config.update_guild_config",
+            AsyncMock(),
+        ) as update_mock, patch(
+            "discord_bot.cogs.config.add_guild_config_audit",
+            AsyncMock(),
+        ), patch(
+            "discord_bot.cogs.config.cleanup_guild_audit",
+            AsyncMock(),
+        ):
+            await cog.env_upload.callback(cog, interaction, attachment)
+
+        update_mock.assert_awaited_once_with(
+            interaction.guild.id,
+            {
+                "openrouter_model": "deepseek/deepseek-chat",
+                "openrouter_fallback_models": "none",
+            },
+        )
+        self.assertIn(
+            "OPENROUTER_FALLBACK_MODELS=none",
+            interaction.response.messages[-1]["content"],
+        )
 
     async def test_tools_manage_command_sends_grouped_toggle_panel(self):
         cog = self._make_tools_cog()

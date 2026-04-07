@@ -5,10 +5,17 @@ Handles bot personality mode switching and mention reactions.
 
 Commands:
     !evil [on/off]   - Toggle uncensored mode
+<<<<<<< main
 """
 
 import asyncio
 import random
+=======
+"""
+
+import random
+import asyncio
+>>>>>>> local
 from io import BytesIO
 from pathlib import Path
 import discord
@@ -28,6 +35,7 @@ from utils.db_handler import (
 )
 from utils.guild_ai import generate_guild_gemini_text, GuildConfigError
 from utils.logger import get_logger
+from utils.petpet import make_petpet
 from utils.server_profile import set_custom_profile, set_mode_profile, set_member_nickname
 from utils.welcome_images import render_welcome_image
 from utils.persona_panel_ui import (
@@ -232,6 +240,7 @@ class Social(commands.Cog):
     ) -> str:
         ordinal = self._format_ordinal(member_count)
         replacements = {
+            "@user": member.mention,
             "{member}": member.mention,
             "{member_name}": member.display_name,
             "{member_count}": str(member_count),
@@ -252,6 +261,7 @@ class Social(commands.Cog):
             return f"{text} {sentence}"
         return f"{text}. {sentence}"
 
+<<<<<<< main
     async def _read_member_avatar_bytes(self, member: discord.Member) -> bytes | None:
         avatar = getattr(member, "display_avatar", None)
         if avatar is None:
@@ -323,6 +333,53 @@ class Social(commands.Cog):
         
         Usage: !evil [on/off]
         """
+=======
+    async def _build_petpet_file(self, member: discord.Member) -> discord.File | None:
+        avatar = getattr(member, "display_avatar", None)
+        if avatar is None:
+            return None
+
+        if hasattr(avatar, "replace"):
+            try:
+                avatar = avatar.replace(size=128, static_format="png")
+            except TypeError:
+                try:
+                    avatar = avatar.replace(size=128, format="png")
+                except TypeError:
+                    avatar = avatar.replace(size=128)
+
+        if not hasattr(avatar, "read"):
+            return None
+
+        try:
+            avatar_bytes = None
+            for attempt in range(3):
+                try:
+                    avatar_bytes = await avatar.read()
+                    break
+                except Exception:
+                    if attempt == 2:
+                        raise
+                    await asyncio.sleep(1.0)
+
+            if avatar_bytes is None:
+                return None
+            gif_bytes = make_petpet(avatar_bytes)
+        except Exception as exc:
+            logger.warning("Petpet generation failed for %s in %s: %s", member, member.guild.name, exc)
+            return None
+
+        return discord.File(BytesIO(gif_bytes), filename="petpet.gif")
+    
+    @commands.command(name="evil", aliases=["uncensored"])
+    @commands.has_permissions(manage_guild=True)
+    async def toggle_evil_mode(self, ctx: commands.Context, state: str = None):
+        """
+        Toggle 'Evil' (Uncensored) mode using OpenRouter models.
+        
+        Usage: !evil [on/off]
+        """
+>>>>>>> local
         current_mode = await get_server_mode(ctx.guild.id)
         if current_mode == "mode_default":
             await set_evil_mode(ctx.guild.id, False)
@@ -451,16 +508,24 @@ class Social(commands.Cog):
                 welcome_text = self._ensure_join_count_sentence(welcome_text, member_count)
 
             try:
-                await channel.send(
-                    welcome_text,
-                    allowed_mentions=discord.AllowedMentions(users=True, roles=False, everyone=False),
-                )
+                send_kwargs = {
+                    "allowed_mentions": discord.AllowedMentions(users=True, roles=False, everyone=False),
+                }
+                petpet_file = await self._build_petpet_file(member)
+                if petpet_file is not None:
+                    send_kwargs["file"] = petpet_file
+                await channel.send(welcome_text, **send_kwargs)
             except discord.Forbidden:
                 logger.warning("Missing permissions to send welcome in %s", member.guild.name)
+<<<<<<< main
 
         await self._send_welcome_image(member, welcome_config, member_count)
 
         # DM Welcome (Preset message from server staff)
+=======
+
+        # DM Welcome (Preset message from server staff)
+>>>>>>> local
         dm_enabled = await get_dm_welcome_enabled(guild_id)
         dm_text = await get_dm_welcome_message(guild_id)
         if dm_enabled and dm_text:

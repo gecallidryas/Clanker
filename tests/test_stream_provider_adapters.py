@@ -77,6 +77,7 @@ if "openai" not in sys.modules:
     openai_stub.UnprocessableEntityError = _OpenAIError
     sys.modules["openai"] = openai_stub
 
+from utils import guild_ai
 from utils.guild_ai import get_custom_endpoint_features
 from utils.api_manager import (
     _build_gemini_stream_request,
@@ -102,6 +103,45 @@ def test_custom_endpoint_uses_streaming_and_tools_when_explicitly_marked_openai_
     assert features.supports_streaming is True
     assert features.supports_tools is True
     assert features.text_only is False
+
+
+def test_guild_openrouter_config_uses_recommended_fallbacks_when_none_configured():
+    async def _run():
+        with mock.patch(
+            "utils.guild_ai.get_guild_config",
+            return_value={
+                "openrouter_model": "nousresearch/deephermes-3-mistral-24b-preview",
+                "openrouter_fallback_models": "",
+            },
+        ):
+            model, fallbacks = await guild_ai.get_guild_openrouter_config(123)
+
+        assert model == "nousresearch/deephermes-3-mistral-24b-preview"
+        assert fallbacks == [
+            "cognitivecomputations/dolphin-mistral-24b-venice-edition:free",
+            "nousresearch/hermes-3-llama-3.1-405b:free",
+            "mistralai/mistral-small-3.1-24b-instruct:free",
+            "deepseek/deepseek-chat",
+        ]
+
+    asyncio.run(_run())
+
+
+def test_guild_openrouter_config_respects_explicit_none_fallback_setting():
+    async def _run():
+        with mock.patch(
+            "utils.guild_ai.get_guild_config",
+            return_value={
+                "openrouter_model": "nousresearch/deephermes-3-mistral-24b-preview",
+                "openrouter_fallback_models": "none",
+            },
+        ):
+            model, fallbacks = await guild_ai.get_guild_openrouter_config(123)
+
+        assert model == "nousresearch/deephermes-3-mistral-24b-preview"
+        assert fallbacks == []
+
+    asyncio.run(_run())
 
 
 def test_one_shot_text_stream_adapter_emits_text_then_done():

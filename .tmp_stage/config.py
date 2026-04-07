@@ -6,7 +6,6 @@ from __future__ import annotations
 
 import io
 import json
-from io import BytesIO
 from pathlib import Path
 from typing import Any, Awaitable, Callable, Dict, List, Optional, Sequence, Tuple
 
@@ -43,10 +42,6 @@ from utils.db_handler import (
     set_welcome_channel_id,
     set_welcome_enabled,
     set_welcome_message_template,
-    set_welcome_image_channel_id,
-    set_welcome_image_destination,
-    set_welcome_image_enabled,
-    set_welcome_image_template,
     set_dm_welcome_message,
     set_dm_welcome_enabled,
     get_dm_welcome_enabled,
@@ -57,12 +52,10 @@ from utils.encryption import get_encryption
 from utils.guild_ai import (
     RECOMMENDED_GEMINI_MODELS,
     RECOMMENDED_OPENROUTER_MODELS,
-    normalize_openrouter_fallback_setting,
 )
 from utils.api_manager import normalize_openrouter_model, normalize_gemini_model, OPENROUTER_MODELS
 from utils.rate_limiter import RateLimiter
 from utils.logger import get_logger
-from utils.welcome_images import render_welcome_image
 from utils.i18n import get_locale_from_interaction, t
 from utils.admin_panel_logic import ConfigAction, diff_toggle_states, reconcile_id_lists, requires_auth
 from utils.admin_panel_views import AuthRequiredView
@@ -78,11 +71,6 @@ from utils.config_panel_ui import (
 )
 
 logger = get_logger(__name__)
-WELCOME_IMAGE_TEMPLATES = {"pettinghand", "catmunch"}
-
-GEMINI_MODEL_REFERENCE_TEXT = "Examples: gemini-2.5-flash-lite, gemini-2.5-flash"
-OPENROUTER_MODEL_REFERENCE_TEXT = "Examples: venice, hermes, mistral, deepseek"
-OPENROUTER_FALLBACK_REFERENCE_TEXT = "Examples: venice,hermes,mistral or none"
 
 ENV_TO_DB = {
     "GEMINI_API_KEY": "gemini_api_key",
@@ -802,12 +790,6 @@ class Config(commands.Cog):
     def _build_ai_embed(self, config: dict[str, Any]) -> discord.Embed:
         whitelist_ids = self._parse_id_list_field(config.get("ai_channel_whitelist"))
         auto_ids = self._parse_id_list_field(config.get("ai_auto_channels"))
-        auto_threshold = int(config.get("ai_auto_threshold") or 0)
-        auto_threshold_label = (
-            "0 (always eligible for evaluation)"
-            if auto_threshold == 0
-            else str(auto_threshold)
-        )
         embed = discord.Embed(
             title="AI Settings",
             description="Reply policy, persona queue routing, streaming, and thought/debug logging.",
@@ -827,8 +809,7 @@ class Config(commands.Cog):
             value=(
                 f"Whitelist: {len(whitelist_ids)} channel(s)\n"
                 f"Auto channels: {len(auto_ids)} channel(s)\n"
-                f"Auto threshold: {auto_threshold_label}\n"
-                "Auto channels are candidate zones, not guaranteed replies."
+                f"Auto threshold: {int(config.get('ai_auto_threshold') or 0)}"
             ),
             inline=False,
         )
@@ -1239,8 +1220,7 @@ class Config(commands.Cog):
             await interaction.response.send_modal(self._build_provider_secret_modal())
             return
         if value == "edit_models":
-            config = await get_guild_config(interaction.guild.id)
-            await interaction.response.send_modal(self._build_provider_model_modal(config=config))
+            await interaction.response.send_modal(self._build_provider_model_modal())
             return
         if value == "edit_media":
             await interaction.response.send_modal(self._build_media_provider_modal())
@@ -1294,47 +1274,15 @@ class Config(commands.Cog):
         )
         await interaction.response.send_message("Provider secrets updated.", ephemeral=True)
 
-    def _build_provider_model_modal(self, *, config: Optional[dict[str, Any]] = None) -> CallbackFormModal:
-        config = config or {}
+    def _build_provider_model_modal(self) -> CallbackFormModal:
         return CallbackFormModal(
             title="Provider Models",
             fields=[
-                {
-                    "key": "general",
-                    "label": "General Gemini model",
-                    "required": False,
-                    "default": config.get("gemini_model"),
-                    "placeholder": GEMINI_MODEL_REFERENCE_TEXT,
-                },
-                {
-                    "key": "translate",
-                    "label": "Translate Gemini model",
-                    "required": False,
-                    "default": config.get("gemini_translate_model"),
-                    "placeholder": GEMINI_MODEL_REFERENCE_TEXT,
-                },
-                {
-                    "key": "summarize",
-                    "label": "Summarize Gemini model",
-                    "required": False,
-                    "default": config.get("gemini_summarize_model"),
-                    "placeholder": GEMINI_MODEL_REFERENCE_TEXT,
-                },
-                {
-                    "key": "uncensored",
-                    "label": "OpenRouter model",
-                    "required": False,
-                    "default": config.get("openrouter_model"),
-                    "placeholder": OPENROUTER_MODEL_REFERENCE_TEXT,
-                },
-                {
-                    "key": "openrouter_fallback_models",
-                    "label": "Fallback models (comma-separated)",
-                    "required": False,
-                    "default": config.get("openrouter_fallback_models"),
-                    "placeholder": OPENROUTER_FALLBACK_REFERENCE_TEXT,
-                    "style": discord.TextStyle.paragraph,
-                },
+                {"key": "general", "label": "General Gemini model", "required": False},
+                {"key": "translate", "label": "Translate Gemini model", "required": False},
+                {"key": "summarize", "label": "Summarize Gemini model", "required": False},
+                {"key": "uncensored", "label": "OpenRouter model", "required": False},
+                {"key": "openrouter_fallback_models", "label": "Fallback models (comma-separated)", "required": False},
             ],
             on_submit_callback=lambda interaction, values: self._save_provider_models(interaction, values),
         )
@@ -1350,9 +1298,7 @@ class Config(commands.Cog):
         if values.get("uncensored"):
             updates["openrouter_model"] = normalize_openrouter_model(values["uncensored"].strip()) or values["uncensored"].strip()
         if values.get("openrouter_fallback_models"):
-            updates["openrouter_fallback_models"] = normalize_openrouter_fallback_setting(
-                values["openrouter_fallback_models"]
-            )
+            updates["openrouter_fallback_models"] = values["openrouter_fallback_models"].strip()
         if not updates:
             await interaction.response.send_message("No model changes submitted.", ephemeral=True)
             return
@@ -1527,26 +1473,6 @@ class Config(commands.Cog):
             ),
             inline=False,
         )
-        embed.add_field(
-            name="Image enabled",
-            value="Yes" if config.get("welcome_image_enabled") else "No",
-            inline=True,
-        )
-        embed.add_field(
-            name="Image template",
-            value=self._summarize_welcome_image_template(config.get("welcome_image_template")),
-            inline=True,
-        )
-        embed.add_field(
-            name="Image destination",
-            value=self._summarize_welcome_image_destination(config.get("welcome_image_destination")),
-            inline=True,
-        )
-        embed.add_field(
-            name="Image channel",
-            value=f"<#{config.get('welcome_image_channel_id')}>" if config.get("welcome_image_channel_id") else "None",
-            inline=False,
-        )
         embed.set_footer(text="Standalone welcome commands were folded into `/welcome manage`.")
         view = ActionMenuView(
             invoker_id=interaction.user.id,
@@ -1559,12 +1485,7 @@ class Config(commands.Cog):
                 ActionOption("Edit DM Message", "edit_dm_message", "Set the DM onboarding message"),
                 ActionOption("Clear DM Message", "clear_dm_message", "Remove the DM onboarding message"),
                 ActionOption("Toggle DM Welcome", "toggle_dm", "Enable or disable DM welcome messages"),
-                ActionOption("Toggle Welcome Image", "toggle_image", "Enable or disable the welcome image attachment"),
-                ActionOption("Edit Image Template", "edit_image_template", "Set the welcome image template"),
-                ActionOption("Edit Image Destination", "edit_image_destination", "Set where the welcome image is sent"),
-                ActionOption("Set Image Channel", "set_image_channel", "Choose the welcome image channel"),
                 ActionOption("Send Test Message", "test_message", "Send a welcome preview to the configured channel"),
-                ActionOption("Send Test Image", "test_image", "Send a welcome image preview"),
             ],
             on_action=lambda panel_interaction, value: self._handle_welcome_action(panel_interaction, value),
         )
@@ -1651,70 +1572,8 @@ class Config(commands.Cog):
                 return
             await self._toggle_dm_welcome(interaction)
             return
-        if value == "toggle_image":
-            if not await self._ensure_welcome_auth(interaction):
-                return
-            await self._toggle_welcome_image(interaction)
-            return
-        if value == "edit_image_template":
-            if not await self._ensure_welcome_auth(interaction):
-                return
-            config = await get_welcome_config(interaction.guild.id)
-            modal = CallbackFormModal(
-                title="Welcome Image Template",
-                fields=[
-                    {
-                        "key": "template",
-                        "label": "Image template",
-                        "default": config.get("welcome_image_template"),
-                        "required": False,
-                        "style": discord.TextStyle.short,
-                        "placeholder": "pettinghand or catmunch",
-                        "max_length": 64,
-                    },
-                ],
-                on_submit_callback=lambda modal_interaction, values: self._save_welcome_image_template(modal_interaction, values),
-            )
-            await interaction.response.send_modal(modal)
-            return
-        if value == "edit_image_destination":
-            if not await self._ensure_welcome_auth(interaction):
-                return
-            config = await get_welcome_config(interaction.guild.id)
-            modal = CallbackFormModal(
-                title="Welcome Image Destination",
-                fields=[
-                    {
-                        "key": "destination",
-                        "label": "Destination",
-                        "default": config.get("welcome_image_destination"),
-                        "required": False,
-                        "style": discord.TextStyle.short,
-                        "placeholder": "welcome_channel, specific_channel, or dm",
-                        "max_length": 64,
-                    },
-                ],
-                on_submit_callback=lambda modal_interaction, values: self._save_welcome_image_destination(modal_interaction, values),
-            )
-            await interaction.response.send_modal(modal)
-            return
-        if value == "set_image_channel":
-            if not await self._ensure_welcome_auth(interaction):
-                return
-            view = SingleChannelPickerView(
-                invoker_id=interaction.user.id,
-                placeholder="Select welcome image channel",
-                apply_channel=lambda channel_id: self._set_welcome_image_channel(interaction.guild.id, interaction.user.id, channel_id),
-            )
-            await self._send_panel_response(interaction, content="Choose the welcome image channel.", view=view)
-            return
         if value == "test_message":
             await self._send_welcome_test(interaction)
-            return
-        if value == "test_image":
-            if not await self._ensure_welcome_auth(interaction):
-                return
-            await self._send_welcome_image_test(interaction)
             return
         await interaction.response.send_message("Unknown welcome action.", ephemeral=True)
 
@@ -1743,21 +1602,6 @@ class Config(commands.Cog):
         if len(collapsed) <= 140:
             return collapsed
         return f"{collapsed[:137]}..."
-
-    @staticmethod
-    def _summarize_welcome_image_template(value: Optional[str]) -> str:
-        cleaned = (value or "").strip()
-        return cleaned or "pettinghand"
-
-    @staticmethod
-    def _summarize_welcome_image_destination(value: Optional[str]) -> str:
-        cleaned = (value or "").strip().lower()
-        labels = {
-            "welcome_channel": "Welcome channel",
-            "specific_channel": "Specific channel",
-            "dm": "DM",
-        }
-        return labels.get(cleaned, cleaned or "Welcome channel")
 
     @staticmethod
     def _normalize_welcome_text(value: Optional[str]) -> str:
@@ -1857,134 +1701,6 @@ class Config(commands.Cog):
             f"DM welcome {'enabled' if enabled else 'disabled'}.",
             ephemeral=True,
         )
-
-    async def _toggle_welcome_image(self, interaction: discord.Interaction) -> None:
-        config = await get_welcome_config(interaction.guild.id)
-        enabled = not bool(config.get("welcome_image_enabled"))
-        await set_welcome_image_enabled(interaction.guild.id, enabled)
-        await add_guild_config_audit(
-            interaction.guild.id,
-            interaction.user.id,
-            "welcome_settings_save",
-            summary=f"Welcome image {'enabled' if enabled else 'disabled'}",
-            detail={"welcome_image_enabled": enabled},
-        )
-        await interaction.response.send_message(
-            f"Welcome image {'enabled' if enabled else 'disabled'}.",
-            ephemeral=True,
-        )
-
-    async def _save_welcome_image_template(self, interaction: discord.Interaction, values: dict[str, str]) -> None:
-        cleaned = self._normalize_welcome_text(values.get("template")).lower()
-        if not cleaned:
-            await interaction.response.send_message("Template cannot be empty.", ephemeral=True)
-            return
-        if len(cleaned) > 64:
-            await interaction.response.send_message("Template is too long.", ephemeral=True)
-            return
-        if cleaned not in WELCOME_IMAGE_TEMPLATES:
-            await interaction.response.send_message(
-                "Template must be one of: `pettinghand` or `catmunch`.",
-                ephemeral=True,
-            )
-            return
-        await set_welcome_image_template(interaction.guild.id, cleaned)
-        await add_guild_config_audit(
-            interaction.guild.id,
-            interaction.user.id,
-            "welcome_settings_save",
-            summary="Welcome image template updated",
-            detail={"welcome_image_template": cleaned},
-        )
-        await interaction.response.send_message("Welcome image template updated.", ephemeral=True)
-
-    async def _save_welcome_image_destination(self, interaction: discord.Interaction, values: dict[str, str]) -> None:
-        cleaned = self._normalize_welcome_text(values.get("destination")).lower()
-        if cleaned not in {"welcome_channel", "specific_channel", "dm"}:
-            await interaction.response.send_message(
-                "Destination must be one of: `welcome_channel`, `specific_channel`, or `dm`.",
-                ephemeral=True,
-            )
-            return
-        await set_welcome_image_destination(interaction.guild.id, cleaned)
-        await add_guild_config_audit(
-            interaction.guild.id,
-            interaction.user.id,
-            "welcome_settings_save",
-            summary="Welcome image destination updated",
-            detail={"welcome_image_destination": cleaned},
-        )
-        await interaction.response.send_message("Welcome image destination updated.", ephemeral=True)
-
-    async def _set_welcome_image_channel(self, guild_id: int, user_id: int, channel_id: int) -> str:
-        await set_welcome_image_channel_id(guild_id, channel_id)
-        await add_guild_config_audit(
-            guild_id,
-            user_id,
-            "welcome_settings_save",
-            target_type="channel",
-            target_id=str(channel_id),
-            summary="Welcome image channel updated",
-        )
-        return f"Welcome image channel set to <#{channel_id}>."
-
-    async def _send_welcome_image_test(self, interaction: discord.Interaction) -> None:
-        config = await get_welcome_config(interaction.guild.id)
-        template = (config.get("welcome_image_template") or "pettinghand").strip().lower()
-        destination = (config.get("welcome_image_destination") or "welcome_channel").strip().lower()
-
-        avatar = getattr(interaction.user, "display_avatar", None)
-        if avatar is None:
-            await interaction.response.send_message("Could not read your avatar.", ephemeral=True)
-            return
-        if hasattr(avatar, "replace"):
-            try:
-                avatar = avatar.replace(size=256, static_format="png")
-            except TypeError:
-                try:
-                    avatar = avatar.replace(size=256, format="png")
-                except TypeError:
-                    avatar = avatar.replace(size=256)
-        if not hasattr(avatar, "read"):
-            await interaction.response.send_message("Could not read your avatar.", ephemeral=True)
-            return
-
-        if destination == "dm":
-            target = interaction.user
-        elif destination == "specific_channel":
-            channel_id = config.get("welcome_image_channel_id")
-            if not channel_id:
-                await interaction.response.send_message("Set a welcome image channel first.", ephemeral=True)
-                return
-            target = interaction.guild.get_channel(channel_id)
-        else:
-            channel_id = config.get("welcome_channel_id")
-            if not channel_id:
-                await interaction.response.send_message("Set a welcome channel first.", ephemeral=True)
-                return
-            target = interaction.guild.get_channel(channel_id)
-
-        if target is None or not hasattr(target, "send"):
-            await interaction.response.send_message("Target channel not found.", ephemeral=True)
-            return
-
-        try:
-            avatar_bytes = await avatar.read()
-            payload = render_welcome_image(
-                template=template,
-                avatar_bytes=avatar_bytes,
-                member_name=interaction.user.display_name,
-                join_ordinal=self._format_ordinal(int(getattr(interaction.guild, "member_count", 0) or 0)),
-            )
-            await target.send(
-                file=discord.File(BytesIO(payload.data), filename=payload.filename),
-                allowed_mentions=discord.AllowedMentions(users=True, roles=False, everyone=False),
-            )
-        except Exception as exc:
-            logger.warning("Welcome image preview failed in %s: %s", interaction.guild.name, exc)
-            await interaction.response.send_message("Failed to generate welcome image preview.", ephemeral=True)
-            return
-        await interaction.response.send_message("Sent a welcome image preview.", ephemeral=True)
 
     async def _send_welcome_test(self, interaction: discord.Interaction) -> None:
         config = await get_welcome_config(interaction.guild.id)
@@ -2617,24 +2333,21 @@ class Config(commands.Cog):
             summary.append(f"OPENROUTER_MODEL={updates['openrouter_model'] or 'CLEARED'}")
 
         if "OPENROUTER_FALLBACK_MODELS" in parsed:
-            raw_models = normalize_openrouter_fallback_setting(parsed["OPENROUTER_FALLBACK_MODELS"] or "")
-            if raw_models == "none":
-                updates["openrouter_fallback_models"] = "none"
-            else:
-                models = [m.strip() for m in (raw_models or "").split(",") if m.strip()]
-                normalized_models: List[str] = []
-                unknown_models: List[str] = []
-                for item in models:
-                    normalized = normalize_openrouter_model(item)
-                    if normalized:
-                        normalized_models.append(normalized)
-                    else:
-                        unknown_models.append(item)
-                if unknown_models:
-                    warnings.append(
-                        "Unknown OpenRouter fallback models ignored: " + ", ".join(unknown_models)
-                    )
-                updates["openrouter_fallback_models"] = ",".join(normalized_models) if normalized_models else None
+            raw_models = parsed["OPENROUTER_FALLBACK_MODELS"] or ""
+            models = [m.strip() for m in raw_models.split(",") if m.strip()]
+            normalized_models: List[str] = []
+            unknown_models: List[str] = []
+            for item in models:
+                normalized = normalize_openrouter_model(item)
+                if normalized:
+                    normalized_models.append(normalized)
+                else:
+                    unknown_models.append(item)
+            if unknown_models:
+                warnings.append(
+                    "Unknown OpenRouter fallback models ignored: " + ", ".join(unknown_models)
+                )
+            updates["openrouter_fallback_models"] = ",".join(normalized_models) if normalized_models else None
             summary.append(
                 f"OPENROUTER_FALLBACK_MODELS={updates['openrouter_fallback_models'] or 'CLEARED'}"
             )

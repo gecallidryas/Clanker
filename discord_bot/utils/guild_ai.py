@@ -48,6 +48,7 @@ RECOMMENDED_OPENROUTER_MODELS = [
     "mistralai/mistral-small-3.1-24b-instruct:free",
     "deepseek/deepseek-chat",
 ]
+OPENROUTER_NO_FALLBACK_SENTINELS = {"none", "no", "off", "disable", "disabled"}
 
 _guild_key_index: Dict[tuple[int, str], int] = {}
 _guild_key_lock = asyncio.Lock()
@@ -158,19 +159,44 @@ async def get_guild_openrouter_keys(guild_id: int) -> List[str]:
     return await _get_keys_from_config(guild_id, OPENROUTER_KEY_FIELDS)
 
 
+def _default_openrouter_fallbacks(primary_model_id: str) -> List[str]:
+    fallbacks: List[str] = []
+    for item in RECOMMENDED_OPENROUTER_MODELS:
+        model = normalize_openrouter_model(item)
+        if not model or model == primary_model_id or model in fallbacks:
+            continue
+        fallbacks.append(model)
+    return fallbacks
+
+
+def normalize_openrouter_fallback_setting(value: Optional[str]) -> Optional[str]:
+    if value is None:
+        return None
+    normalized = str(value).strip()
+    if not normalized:
+        return None
+    if normalized.lower() in OPENROUTER_NO_FALLBACK_SENTINELS:
+        return "none"
+    return normalized
+
+
 async def get_guild_openrouter_config(guild_id: int) -> Tuple[str, List[str]]:
     config = await get_guild_config(guild_id)
     raw_model = config.get("openrouter_model") or OPENROUTER_DEFAULT_MODEL
     model_id = normalize_openrouter_model(raw_model) or raw_model
 
-    fallbacks_raw = config.get("openrouter_fallback_models") or ""
+    fallbacks_raw = normalize_openrouter_fallback_setting(config.get("openrouter_fallback_models"))
+    if fallbacks_raw == "none":
+        return model_id, []
     fallbacks: List[str] = []
-    for item in [val.strip() for val in fallbacks_raw.split(",") if val.strip()]:
+    for item in [val.strip() for val in (fallbacks_raw or "").split(",") if val.strip()]:
         model = normalize_openrouter_model(item)
         if model:
             fallbacks.append(model)
         else:
             logger.warning("Ignoring unknown OpenRouter model '%s' for guild %s", item, guild_id)
+    if not fallbacks:
+        fallbacks = _default_openrouter_fallbacks(model_id)
     return model_id, fallbacks
 
 

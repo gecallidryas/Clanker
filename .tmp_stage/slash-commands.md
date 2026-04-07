@@ -2,7 +2,7 @@
 
 This file documents the slash commands currently defined by the bot.
 
-- Total slash commands: `115`
+- Total slash commands: `152`
 - Source of truth: `discord_bot/cogs/*.py`
 - Commands are loaded dynamically from all cogs during startup
 
@@ -72,17 +72,10 @@ Some commands require elevated Discord permissions such as `Manage Guild`, `Admi
 
 | Command | Description | Source |
 | --- | --- | --- |
-| `/personal privacy` | Manage personal memory privacy and passive auto-reply visibility. | `teach.py` |
+| `/personal privacy` | Opt in or out of personal memory. | `teach.py` |
 | `/teach attribute` | Teach a persona attribute. | `teach.py` |
 | `/teach document` | Upload a document for RAG memory. | `teach.py` |
 | `/teach sampledialogue` | Teach a sample dialogue line. | `teach.py` |
-
-Usage note:
-
-- `remember` stores facts.
-- `teach attribute` and `teach sampledialogue` shape reply style.
-- `teach document` uploads retrievable source material for RAG.
-- See [`guide/memory-and-teaching.md`](./guide/memory-and-teaching.md) for examples and current behavior notes.
 
 ## Moderation And Community
 
@@ -106,6 +99,7 @@ Usage note:
 | `/admin clearglobal` | Clear all global slash commands (owner only). | `admin.py` |
 | `/admin clearguild` | Clear all guild-specific slash commands for this server. | `admin.py` |
 | `/admin delfact` | Delete a fact by ID. | `admin.py` |
+| `/admin model` | Change the active AI model. | `admin.py` |
 | `/admin reset` | Reset user data. | `admin.py` |
 | `/admin setfact` | Add a fact for a user. | `admin.py` |
 | `/admin view` | View a user's profile. | `admin.py` |
@@ -125,7 +119,7 @@ Usage note:
 | `/staff list` | List configured bot staff roles. | `config.py` |
 | `/staff manage` | Open the staff section inside the config panel UX. | `config.py` |
 | `/staff remove` | Remove a role from bot staff. | `config.py` |
-| `/welcome manage` | Open the feature-packed welcome admin panel for channel, text, welcome-image template/destination controls, DM settings, toggles, and test actions. | `config.py` |
+| `/welcome manage` | Open the feature-packed welcome admin panel for channel, template, DM, toggle, and test actions. | `config.py` |
 
 ## Config
 

@@ -1155,7 +1155,7 @@ class OpenRouterManager:
         extra_body = {}
         if fallbacks:
             # OpenRouter server-side fallback - more reliable than client-side
-            extra_body["models"] = [model_id, *fallbacks]
+            extra_body["models"] = [model_id, *fallbacks][:3]
 
         payload_messages: List[Dict[str, str]] = []
         if messages:
@@ -1267,7 +1267,6 @@ class OpenRouterManager:
             raise RuntimeError("OpenRouter API key not configured")
 
         candidates = self._get_model_candidates()
-        model_id = self._pick_model(candidates)
         payload_messages: List[Dict[str, str]] = []
         if messages:
             if system_instruction:
@@ -1276,23 +1275,48 @@ class OpenRouterManager:
         else:
             payload_messages = [{"role": "user", "content": prompt}]
 
-        try:
-            async for event in stream_openai_chat_completions(
-                self.client,
-                model=model_id,
-                messages=payload_messages,
-                timeout=self.request_timeout,
-                tools=tools,
-            ):
-                yield event
-            self._model_states[model_id].mark_success()
-        except Exception as exc:
-            classification = self._classify_error(exc)
-            if classification == "user_input":
-                raise UserInputError(str(exc)) from exc
-            retry_after = self._get_retry_after_seconds(exc)
-            self._mark_model_error(model_id, cooldown=classification == "retry", retry_after=retry_after)
-            raise
+        max_attempts = max(self.max_retries, len(candidates))
+        last_error: Optional[Exception] = None
+
+        for attempt in range(max_attempts):
+            model_id = self._pick_model(candidates)
+            emitted_any = False
+            try:
+                async for event in stream_openai_chat_completions(
+                    self.client,
+                    model=model_id,
+                    messages=payload_messages,
+                    timeout=self.request_timeout,
+                    tools=tools,
+                ):
+                    emitted_any = True
+                    yield event
+                self._model_states[model_id].mark_success()
+                return
+            except Exception as exc:
+                last_error = exc
+                classification = self._classify_error(exc)
+                if classification == "user_input":
+                    raise UserInputError(str(exc)) from exc
+                if classification == "fatal":
+                    raise RuntimeError(f"OpenRouter API error: {exc}") from exc
+                if emitted_any:
+                    raise
+                if classification == "model_skip":
+                    self._mark_model_error(model_id, cooldown=False)
+                    logger.warning("OpenRouter stream model failed (%s), trying fallback: %s", model_id, exc)
+                    continue
+
+                retry_after = self._get_retry_after_seconds(exc)
+                self._mark_model_error(model_id, cooldown=True, retry_after=retry_after)
+                delay = self._get_backoff_delay(attempt, retry_after)
+                logger.warning("OpenRouter stream retry in %.2fs after error: %s", delay, exc)
+                await asyncio.sleep(delay)
+
+        error_msg = f"OpenRouter stream failed after {max_attempts} attempts"
+        if last_error:
+            error_msg += f". Last error: {last_error}"
+        raise RuntimeError(error_msg)
 
 
 # Global OpenRouter instance

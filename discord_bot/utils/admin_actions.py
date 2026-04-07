@@ -7,14 +7,26 @@ from typing import Any, Dict, List, Optional
 import discord
 
 from utils.db_handler import (
+    add_guild_config_audit,
     add_automod_rule,
+    add_staff_role,
+    add_starboard_ignored_channel,
     get_starboard_settings,
+    get_staff_roles,
     get_welcome_config,
     remove_automod_rule,
+    remove_staff_role,
+    remove_starboard_ignored_channel,
+    set_autorole_enabled,
+    set_autorole_id,
     set_dm_welcome_message,
     set_dm_welcome_enabled,
     set_mod_log_channel_id,
     set_server_mode,
+    set_spam_config,
+    set_starboard_enabled,
+    set_url_safety_config,
+    set_welcome_enabled,
     set_welcome_channel_id,
     set_welcome_message_template,
     upsert_starboard_settings,
@@ -22,14 +34,117 @@ from utils.db_handler import (
 
 ADMIN_ACTIONS = {
     "STARBOARD_SETUP": "execute_starboard_setup",
+    "STARBOARD_TOGGLE": "intent:starboard.toggle",
+    "STARBOARD_IGNORE": "intent:starboard.ignore_channel",
+    "STARBOARD_UNIGNORE": "intent:starboard.unignore_channel",
     "WELCOME_SETUP": "execute_welcome_setup",
+    "WELCOME_TOGGLE": "intent:welcome.toggle",
+    "WELCOME_DM_CONFIG": "intent:welcome.dm.configure",
+    "WELCOME_DM_TOGGLE": "intent:welcome.dm.toggle",
     "AUTOMOD_ADD": "execute_automod_add",
     "AUTOMOD_REMOVE": "execute_automod_remove",
+    "SPAM_CONFIG": "intent:automod.spam.configure",
+    "URL_SAFETY_CONFIG": "intent:url_safety.configure",
+    "AUTOROLE_SET": "intent:autorole.set",
+    "AUTOROLE_CLEAR": "intent:autorole.clear",
+    "STAFF_ADD": "intent:staff.add",
+    "STAFF_REMOVE": "intent:staff.remove",
+    "STAFF_CLEAR": "intent:staff.clear",
     "CONFIG_MODE": "execute_config_mode",
     "CONFIG_LOG": "execute_config_log",
+    "CONFIG_LOG_CLEAR": "intent:modlog.clear",
 }
 
 CUSTOM_EMOJI_RE = re.compile(r"<a?:\w+:(\d+)>")
+
+
+def _normalize_lookup_name(value: Any) -> str:
+    text = str(value or "").strip().lower()
+    text = text.lstrip("#@&")
+    return re.sub(r"\s+", " ", text)
+
+
+def _iter_guild_channels(guild: discord.Guild) -> list[Any]:
+    channels = []
+    for attr in ("channels", "text_channels", "voice_channels", "categories"):
+        value = getattr(guild, attr, None) or []
+        for channel in value:
+            if channel not in channels:
+                channels.append(channel)
+    return channels
+
+
+def _resolve_guild_channel(
+    guild: discord.Guild,
+    *,
+    channel_id: Any = None,
+    channel_name: Any = None,
+    channel_kind: Any = None,
+) -> Any:
+    try:
+        resolved_id = int(channel_id) if channel_id is not None else None
+    except (TypeError, ValueError):
+        resolved_id = None
+    if resolved_id is not None and hasattr(guild, "get_channel"):
+        channel = guild.get_channel(resolved_id)
+        if channel is not None:
+            return channel
+
+    normalized_name = _normalize_lookup_name(channel_name)
+    if not normalized_name:
+        return None
+
+    normalized_kind = str(channel_kind or "").strip().lower()
+    for channel in _iter_guild_channels(guild):
+        if normalized_kind == "category" and channel not in getattr(guild, "categories", []):
+            continue
+        if normalized_kind == "voice" and channel in getattr(guild, "categories", []):
+            continue
+        if normalized_kind == "text" and channel in getattr(guild, "categories", []):
+            continue
+        if _normalize_lookup_name(getattr(channel, "name", "")) == normalized_name:
+            return channel
+    return None
+
+
+def _resolve_guild_role(
+    guild: discord.Guild,
+    *,
+    role_id: Any = None,
+    role_name: Any = None,
+) -> Any:
+    try:
+        resolved_id = int(role_id) if role_id is not None else None
+    except (TypeError, ValueError):
+        resolved_id = None
+    if resolved_id is not None and hasattr(guild, "get_role"):
+        role = guild.get_role(resolved_id)
+        if role is not None:
+            return role
+
+    normalized_name = _normalize_lookup_name(role_name)
+    if not normalized_name:
+        return None
+    for role in getattr(guild, "roles", []) or []:
+        if _normalize_lookup_name(getattr(role, "name", "")) == normalized_name:
+            return role
+    return None
+
+
+def _resolve_guild_member(
+    guild: discord.Guild,
+    *,
+    member_id: Any,
+) -> Any:
+    try:
+        resolved_id = int(member_id)
+    except (TypeError, ValueError):
+        return None
+    if hasattr(guild, "get_member"):
+        member = guild.get_member(resolved_id)
+        if member is not None:
+            return member
+    return None
 
 
 def _normalize_emoji_list(raw: Any) -> List[str]:
@@ -180,6 +295,15 @@ async def execute_admin_action(
         return {"success": False, "error": "Insufficient permissions."}
 
     handler_name = ADMIN_ACTIONS[action]
+    if handler_name.startswith("intent:"):
+        return await execute_admin_intent(
+            handler_name.split(":", 1)[1],
+            params or {},
+            guild,
+            executor,
+            bot=bot,
+            current_channel_id=current_channel_id,
+        )
     handler = globals().get(handler_name)
     if not handler:
         return {"success": False, "error": "Action handler missing."}
@@ -189,6 +313,271 @@ async def execute_admin_action(
     if handler_name in {"execute_starboard_setup", "execute_config_log"}:
         return await handler(params or {}, guild, executor, current_channel_id=current_channel_id)
     return await handler(params or {}, guild, executor)
+
+
+async def execute_admin_intent(
+    intent: str,
+    params: Dict[str, Any],
+    guild: discord.Guild,
+    executor: discord.Member,
+    bot: Optional[discord.Client] = None,
+    current_channel_id: Optional[int] = None,
+) -> Dict[str, Any]:
+    if not intent:
+        return {"success": False, "error": "Missing intent."}
+    if not (executor.guild_permissions.administrator or executor.guild_permissions.manage_guild):
+        return {"success": False, "error": "Insufficient permissions."}
+
+    params = params or {}
+    normalized_intent = intent.strip().lower()
+
+    if normalized_intent == "channel.create_text":
+        channel_name = str(params.get("channel_name") or "").strip()
+        if not channel_name:
+            return {"success": False, "error": "Missing channel_name."}
+        await guild.create_text_channel(channel_name)
+        return {"success": True, "message": f"Created text channel '{channel_name}'."}
+
+    if normalized_intent == "channel.create_voice":
+        channel_name = str(params.get("channel_name") or "").strip()
+        if not channel_name:
+            return {"success": False, "error": "Missing channel_name."}
+        await guild.create_voice_channel(channel_name)
+        return {"success": True, "message": f"Created voice channel '{channel_name}'."}
+
+    if normalized_intent == "channel.create_category":
+        channel_name = str(params.get("channel_name") or "").strip()
+        if not channel_name:
+            return {"success": False, "error": "Missing channel_name."}
+        await guild.create_category(channel_name)
+        return {"success": True, "message": f"Created category '{channel_name}'."}
+
+    if normalized_intent == "channel.delete":
+        channel = _resolve_guild_channel(
+            guild,
+            channel_id=params.get("channel_id"),
+            channel_name=params.get("channel_name"),
+            channel_kind=params.get("channel_kind"),
+        )
+        if not params.get("channel_id") and not params.get("channel_name"):
+            return {"success": False, "error": "Missing channel target."}
+        if channel is None:
+            return {"success": False, "error": "I couldn't find that channel."}
+        await channel.delete()
+        return {
+            "success": True,
+            "message": f"Deleted channel '{getattr(channel, 'name', 'unknown')}'.",
+        }
+
+    if normalized_intent == "role.create":
+        role_name = str(params.get("role_name") or "").strip()
+        if not role_name:
+            return {"success": False, "error": "Missing role_name."}
+        await guild.create_role(name=role_name)
+        return {"success": True, "message": f"Created role '{role_name}'."}
+
+    if normalized_intent == "role.delete":
+        if not params.get("role_id") and not params.get("role_name"):
+            return {"success": False, "error": "Missing role target."}
+        role = _resolve_guild_role(
+            guild,
+            role_id=params.get("role_id"),
+            role_name=params.get("role_name"),
+        )
+        if role is None:
+            return {"success": False, "error": "I couldn't find that role."}
+        await role.delete()
+        return {"success": True, "message": f"Deleted role '{getattr(role, 'name', 'unknown')}'."}
+
+    if normalized_intent == "role.assign":
+        if not params.get("target_id"):
+            return {"success": False, "error": "Missing target_id."}
+        if not params.get("role_id") and not params.get("role_name"):
+            return {"success": False, "error": "Missing role target."}
+        role = _resolve_guild_role(
+            guild,
+            role_id=params.get("role_id"),
+            role_name=params.get("role_name"),
+        )
+        if role is None:
+            return {"success": False, "error": "I couldn't find that role."}
+        member = _resolve_guild_member(guild, member_id=params.get("target_id"))
+        if member is None:
+            return {"success": False, "error": "I couldn't find that member."}
+        await member.add_roles(role)
+        return {
+            "success": True,
+            "message": f"Gave '{getattr(role, 'name', 'unknown')}' to <@{int(params['target_id'])}>.",
+        }
+
+    if normalized_intent == "role.remove":
+        if not params.get("target_id"):
+            return {"success": False, "error": "Missing target_id."}
+        if not params.get("role_id") and not params.get("role_name"):
+            return {"success": False, "error": "Missing role target."}
+        role = _resolve_guild_role(
+            guild,
+            role_id=params.get("role_id"),
+            role_name=params.get("role_name"),
+        )
+        if role is None:
+            return {"success": False, "error": "I couldn't find that role."}
+        member = _resolve_guild_member(guild, member_id=params.get("target_id"))
+        if member is None:
+            return {"success": False, "error": "I couldn't find that member."}
+        await member.remove_roles(role)
+        return {
+            "success": True,
+            "message": f"Removed '{getattr(role, 'name', 'unknown')}' from <@{int(params['target_id'])}>.",
+        }
+
+    if normalized_intent == "starboard.configure":
+        return await execute_starboard_setup(
+            params,
+            guild,
+            executor,
+            current_channel_id=current_channel_id,
+        )
+
+    if normalized_intent == "starboard.toggle":
+        enabled = bool(params.get("enabled"))
+        await set_starboard_enabled(guild.id, enabled)
+        return {
+            "success": True,
+            "message": f"Starboard {'enabled' if enabled else 'disabled'}.",
+        }
+
+    if normalized_intent == "starboard.ignore_channel":
+        channel_id = params.get("channel_id")
+        if not channel_id:
+            return {"success": False, "error": "Missing channel_id."}
+        await add_starboard_ignored_channel(guild.id, int(channel_id))
+        return {"success": True, "message": f"Starboard will ignore <#{int(channel_id)}>."}
+
+    if normalized_intent == "starboard.unignore_channel":
+        channel_id = params.get("channel_id")
+        if not channel_id:
+            return {"success": False, "error": "Missing channel_id."}
+        removed = await remove_starboard_ignored_channel(guild.id, int(channel_id))
+        if removed:
+            return {"success": True, "message": f"Starboard will watch <#{int(channel_id)}> again."}
+        return {"success": False, "error": "That channel was not ignored."}
+
+    if normalized_intent == "welcome.configure":
+        return await execute_welcome_setup(params, guild, executor)
+
+    if normalized_intent == "welcome.toggle":
+        enabled = bool(params.get("welcome_enabled"))
+        await set_welcome_enabled(guild.id, enabled)
+        return {
+            "success": True,
+            "message": f"Welcome messages {'enabled' if enabled else 'disabled'}.",
+        }
+
+    if normalized_intent == "welcome.dm.toggle":
+        enabled = bool(params.get("dm_enabled"))
+        await set_dm_welcome_enabled(guild.id, enabled)
+        return {
+            "success": True,
+            "message": f"DM welcomes {'enabled' if enabled else 'disabled'}.",
+        }
+
+    if normalized_intent == "welcome.dm.configure":
+        dm_message = (params.get("dm_message") or "").strip()
+        if not dm_message:
+            return {"success": False, "error": "Missing dm_message."}
+        await set_dm_welcome_message(guild.id, dm_message)
+        return {"success": True, "message": "DM welcome message updated."}
+
+    if normalized_intent == "welcome.message.clear":
+        await set_welcome_message_template(guild.id, None)
+        return {"success": True, "message": "Welcome message template cleared."}
+
+    if normalized_intent == "welcome.dm.message.clear":
+        await set_dm_welcome_message(guild.id, None)
+        return {"success": True, "message": "DM welcome message cleared."}
+
+    if normalized_intent == "automod.keyword.add":
+        return await execute_automod_add(params, guild, executor)
+
+    if normalized_intent == "automod.keyword.remove":
+        return await execute_automod_remove(params, guild, executor)
+
+    if normalized_intent == "automod.spam.configure":
+        updates = {}
+        for key in ("spam_max_messages", "spam_window_seconds", "spam_timeout_minutes"):
+            if params.get(key) is not None:
+                updates[key] = int(params[key])
+        if params.get("spam_timeout_enabled") is not None:
+            updates["spam_timeout_enabled"] = int(bool(params["spam_timeout_enabled"]))
+        await set_spam_config(guild.id, updates)
+        return {"success": True, "message": "Spam automod updated."}
+
+    if normalized_intent == "url_safety.configure":
+        updates = {}
+        for key in ("url_allowlist", "url_blocklist", "url_safety_action"):
+            if params.get(key) is not None:
+                updates[key] = params[key]
+        if params.get("url_safety_enabled") is not None:
+            updates["url_safety_enabled"] = int(bool(params["url_safety_enabled"]))
+        await set_url_safety_config(guild.id, updates)
+        return {"success": True, "message": "URL safety updated."}
+
+    if normalized_intent == "modlog.set":
+        return await execute_config_log(
+            params,
+            guild,
+            executor,
+            current_channel_id=current_channel_id,
+        )
+
+    if normalized_intent == "modlog.clear":
+        await set_mod_log_channel_id(guild.id, None)
+        return {"success": True, "message": "Mod log disabled."}
+
+    if normalized_intent == "autorole.set":
+        role_id = params.get("role_id")
+        if not role_id:
+            return {"success": False, "error": "Missing role_id."}
+        await set_autorole_id(guild.id, int(role_id))
+        await set_autorole_enabled(guild.id, True)
+        return {"success": True, "message": f"Autorole set to <@&{int(role_id)}>."}
+
+    if normalized_intent == "autorole.clear":
+        await set_autorole_id(guild.id, None)
+        await set_autorole_enabled(guild.id, False)
+        return {"success": True, "message": "Autorole disabled."}
+
+    if normalized_intent == "staff.add":
+        role_id = params.get("role_id")
+        permission_level = params.get("permission_level")
+        if not role_id or permission_level is None:
+            return {"success": False, "error": "Missing role_id or permission_level."}
+        await add_staff_role(guild.id, int(role_id), int(permission_level))
+        return {
+            "success": True,
+            "message": f"Added <@&{int(role_id)}> as bot staff level {int(permission_level)}.",
+        }
+
+    if normalized_intent == "staff.remove":
+        role_id = params.get("role_id")
+        if not role_id:
+            return {"success": False, "error": "Missing role_id."}
+        removed = await remove_staff_role(guild.id, int(role_id))
+        if removed:
+            return {"success": True, "message": f"Removed <@&{int(role_id)}> from bot staff."}
+        return {"success": False, "error": "That role was not configured as bot staff."}
+
+    if normalized_intent == "staff.clear":
+        entries = await get_staff_roles(guild.id)
+        for role_id, _level in entries:
+            await remove_staff_role(guild.id, int(role_id))
+        return {"success": True, "message": "Cleared all configured staff roles."}
+
+    if normalized_intent == "config.mode":
+        return await execute_config_mode(params, guild, executor, bot=bot)
+
+    return {"success": False, "error": f"Unknown admin intent '{intent}'."}
 
 
 async def execute_starboard_setup(

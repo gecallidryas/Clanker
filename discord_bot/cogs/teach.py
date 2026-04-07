@@ -14,6 +14,7 @@ from utils.db_handler import (
     get_sample_dialogues,
     replace_persona_attributes,
     replace_sample_dialogues,
+    set_passive_reply_visibility_opt_out,
     set_personal_memory_opt_out,
     get_guild_config,
 )
@@ -246,9 +247,17 @@ class Teach(commands.Cog):
             view=None,
         )
 
-    @personal_group.command(name="privacy", description="Opt in or out of personal memory.")
-    @app_commands.describe(state="on/off (on = opt out)")
-    async def personal_privacy(self, interaction: discord.Interaction, state: Optional[str] = None):
+    @personal_group.command(name="privacy", description="Manage personal memory and passive auto-reply privacy.")
+    @app_commands.describe(
+        state="on/off (on = opt out)",
+        area="memory or replies",
+    )
+    async def personal_privacy(
+        self,
+        interaction: discord.Interaction,
+        state: Optional[str] = None,
+        area: Optional[str] = "memory",
+    ):
         if not interaction.guild:
             await interaction.response.send_message(
                 t("common.server_only", get_locale_from_interaction(interaction)),
@@ -257,18 +266,39 @@ class Teach(commands.Cog):
             return
         if not state:
             await interaction.response.send_message(
-                "Use `on` to opt out of personal memory, `off` to opt back in.",
+                "Use `on` or `off`. Set `area` to `memory` or `replies`.",
                 ephemeral=True,
             )
             return
         state_value = state.lower().strip()
+        area_value = (area or "memory").lower().strip()
         if state_value in {"on", "enable", "true", "yes"}:
-            await set_personal_memory_opt_out(interaction.guild.id, interaction.user.id, True)
             locale = get_locale_from_interaction(interaction)
+            if area_value == "replies":
+                await set_passive_reply_visibility_opt_out(interaction.guild.id, interaction.user.id, True)
+                await interaction.response.send_message(
+                    "Passive auto-replies are now hidden for you unless you directly trigger the bot.",
+                    ephemeral=True,
+                )
+                return
+            if area_value != "memory":
+                await interaction.response.send_message("Use `memory` or `replies` for `area`.", ephemeral=True)
+                return
+            await set_personal_memory_opt_out(interaction.guild.id, interaction.user.id, True)
             await interaction.response.send_message(t("personal.privacy.on", locale), ephemeral=True)
         elif state_value in {"off", "disable", "false", "no"}:
-            await set_personal_memory_opt_out(interaction.guild.id, interaction.user.id, False)
             locale = get_locale_from_interaction(interaction)
+            if area_value == "replies":
+                await set_passive_reply_visibility_opt_out(interaction.guild.id, interaction.user.id, False)
+                await interaction.response.send_message(
+                    "Passive auto-replies are allowed for you again in eligible channels.",
+                    ephemeral=True,
+                )
+                return
+            if area_value != "memory":
+                await interaction.response.send_message("Use `memory` or `replies` for `area`.", ephemeral=True)
+                return
+            await set_personal_memory_opt_out(interaction.guild.id, interaction.user.id, False)
             await interaction.response.send_message(t("personal.privacy.off", locale), ephemeral=True)
         else:
             await interaction.response.send_message("Use `on` or `off`.", ephemeral=True)

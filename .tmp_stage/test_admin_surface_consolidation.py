@@ -3,14 +3,13 @@ import sys
 import unittest
 from pathlib import Path
 
-ROOT = Path(__file__).resolve().parents[2]
-sys.path.insert(0, str(ROOT / "discord_bot"))
+sys.path.insert(0, "/mnt/e/femboibot/discord_bot")
 
 from cogs.config import Config
 
 
 def _load_help_commands() -> dict:
-    source = (ROOT / "discord_bot" / "cogs" / "utilities.py").read_text(encoding="utf-8")
+    source = Path("/mnt/e/femboibot/discord_bot/cogs/utilities.py").read_text(encoding="utf-8")
     tree = ast.parse(source)
     for node in tree.body:
         if isinstance(node, ast.Assign):
@@ -77,46 +76,6 @@ def _load_action_option_values(path_str: str, function_name: str) -> list[str]:
 
 
 class AdminSurfaceConsolidationTests(unittest.TestCase):
-    def test_admin_group_no_longer_exposes_model_command(self) -> None:
-        command_names = _load_group_command_names(
-            "/mnt/e/femboibot/discord_bot/cogs/admin.py",
-            "admin_app_group",
-        )
-        self.assertNotIn("model", command_names)
-
-    def test_help_inventory_compact_config_and_tools_sections(self) -> None:
-        self.assertEqual(HELP_COMMANDS["config"]["prefix"], [])
-        self.assertEqual(
-            HELP_COMMANDS["config"]["slash"],
-            [
-                "/config panel",
-                "/config auth",
-                "/config password",
-                "/config env",
-                "/config keys manage",
-                "/config model manage",
-                "/config toggle manage",
-                "/config ai manage",
-                "/config url_safety manage",
-                "/config custom_endpoint manage",
-            ],
-        )
-        self.assertEqual(HELP_COMMANDS["tools"]["prefix"], [])
-        self.assertEqual(
-            HELP_COMMANDS["tools"]["slash"],
-            [
-                "/tools manage",
-                "/tools info status",
-                "/tools info inspect",
-                "/tools context refresh",
-                "/tools context clear-guild-recency",
-                "/tools policy",
-                "/tools debug",
-                "/tools quarantine",
-                "/tools mcp",
-            ],
-        )
-
     def test_config_root_exposes_panel_and_setup_commands_without_legacy_ui(self) -> None:
         command_names = [command.name for command in Config.config.commands]
         for required in ["auth", "panel", "password", "keys", "model", "env", "toggle", "ai", "url_safety", "custom_endpoint"]:
@@ -169,7 +128,7 @@ class AdminSurfaceConsolidationTests(unittest.TestCase):
 
     def test_welcome_manage_panel_exposes_integrated_actions(self) -> None:
         action_values = _load_action_option_values(
-            str(ROOT / "discord_bot" / "cogs" / "config.py"),
+            "/mnt/e/femboibot/discord_bot/cogs/config.py",
             "_send_welcome_panel",
         )
         self.assertEqual(
@@ -183,12 +142,7 @@ class AdminSurfaceConsolidationTests(unittest.TestCase):
                 "edit_dm_message",
                 "clear_dm_message",
                 "toggle_dm",
-                "toggle_image",
-                "edit_image_template",
-                "edit_image_destination",
-                "set_image_channel",
                 "test_message",
-                "test_image",
             ],
         )
 

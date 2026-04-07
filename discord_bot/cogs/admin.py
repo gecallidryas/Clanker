@@ -629,15 +629,6 @@ class Admin(commands.Cog):
         )
         logger.info("Admin %s set affection for %s to %s (%s)", interaction.user, member, points, resolved_mode)
 
-    @admin_app_group.command(name="model", description="Change the active AI model.")
-    @app_commands.checks.has_permissions(manage_guild=True)
-    @app_commands.describe(name="Model key (optional)")
-    async def set_model_slash(self, interaction: discord.Interaction, name: str = None):
-        await interaction.response.send_message(
-            "Model settings are now guild-specific. Use `/config model manage` or `/config env upload`.",
-            ephemeral=True,
-        )
-
     @admin_app_group.command(name="clearglobal", description="Clear all global slash commands (owner only).")
     @app_commands.check(_is_owner_check)
     async def clear_global_commands_slash(self, interaction: discord.Interaction):
