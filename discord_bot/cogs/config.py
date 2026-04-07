@@ -1921,17 +1921,22 @@ class Config(commands.Cog):
             await interaction.response.send_message("Target channel not found.", ephemeral=True)
             return
 
-        avatar_bytes = await avatar.read()
-        payload = render_welcome_image(
-            template=template,
-            avatar_bytes=avatar_bytes,
-            member_name=interaction.user.display_name,
-            join_ordinal=self._format_ordinal(int(getattr(interaction.guild, "member_count", 0) or 0)),
-        )
-        await target.send(
-            file=discord.File(BytesIO(payload.data), filename=payload.filename),
-            allowed_mentions=discord.AllowedMentions(users=True, roles=False, everyone=False),
-        )
+        try:
+            avatar_bytes = await avatar.read()
+            payload = render_welcome_image(
+                template=template,
+                avatar_bytes=avatar_bytes,
+                member_name=interaction.user.display_name,
+                join_ordinal=self._format_ordinal(int(getattr(interaction.guild, "member_count", 0) or 0)),
+            )
+            await target.send(
+                file=discord.File(BytesIO(payload.data), filename=payload.filename),
+                allowed_mentions=discord.AllowedMentions(users=True, roles=False, everyone=False),
+            )
+        except Exception as exc:
+            logger.warning("Welcome image preview failed in %s: %s", interaction.guild.name, exc)
+            await interaction.response.send_message("Failed to generate welcome image preview.", ephemeral=True)
+            return
         await interaction.response.send_message("Sent a welcome image preview.", ephemeral=True)
 
     async def _send_welcome_test(self, interaction: discord.Interaction) -> None:

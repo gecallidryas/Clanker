@@ -115,6 +115,34 @@ class WelcomeImageConfigTests(unittest.IsolatedAsyncioTestCase):
         self.assertEqual(send_kwargs["file"].filename, "catmunch.png")
         interaction.response.send_message.assert_awaited_once_with("Sent a welcome image preview.", ephemeral=True)
 
+    async def test_send_welcome_image_test_handles_render_errors(self):
+        image_channel = _FakeChannel()
+        interaction = _FakeInteraction(guild=_FakeGuild(channels={777: image_channel}))
+
+        with patch("discord_bot.cogs.config.get_encryption", return_value=SimpleNamespace()), patch(
+            "discord_bot.cogs.config.get_welcome_config",
+            AsyncMock(
+                return_value={
+                    "welcome_image_enabled": True,
+                    "welcome_image_template": "catmunch",
+                    "welcome_image_destination": "specific_channel",
+                    "welcome_image_channel_id": 777,
+                    "welcome_channel_id": None,
+                }
+            ),
+        ), patch(
+            "discord_bot.cogs.config.render_welcome_image",
+            side_effect=FileNotFoundError("missing asset"),
+        ):
+            cog = Config(_FakeBot())
+            await cog._send_welcome_image_test(interaction)
+
+        image_channel.send.assert_not_awaited()
+        interaction.response.send_message.assert_awaited_once_with(
+            "Failed to generate welcome image preview.",
+            ephemeral=True,
+        )
+
 
 if __name__ == "__main__":
     unittest.main()

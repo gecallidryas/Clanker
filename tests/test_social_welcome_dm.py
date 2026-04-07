@@ -93,6 +93,22 @@ class SocialWelcomeDmTests(unittest.IsolatedAsyncioTestCase):
             },
         )
 
+    def test_render_welcome_image_pettinghand_returns_gif_payload(self):
+        avatar = Image.new("RGB", (320, 240), "#7ec8ff")
+        avatar_buffer = BytesIO()
+        avatar.save(avatar_buffer, format="PNG")
+
+        payload = render_welcome_image(
+            template="pettinghand",
+            avatar_bytes=avatar_buffer.getvalue(),
+            member_name="snackuser",
+            join_ordinal="42nd",
+        )
+
+        self.assertEqual(payload.filename, "pettinghand.gif")
+        self.assertEqual(payload.content_type, "image/gif")
+        self.assertTrue(payload.data.startswith(b"GIF8"))
+
     def test_render_welcome_image_catmunch_returns_png_payload(self):
         avatar = Image.new("RGB", (320, 240), "#7ec8ff")
         avatar_buffer = BytesIO()
