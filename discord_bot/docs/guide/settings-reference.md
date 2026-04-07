@@ -46,6 +46,17 @@ Settings exposed through `/config ai manage`:
 - thought log channel
 - mod-log fallback reuse for thought logging
 
+Auto-reply behavior notes:
+
+- direct mentions, reply-to-bot chains, and persona trigger words still act as deterministic triggers
+- auto-response channels are candidate zones for conservative no-mention replies, not unconditional response channels
+- auto-channel threshold `0` means always eligible for evaluation, not always reply
+- users can separately opt out of passive no-mention auto-replies through `/personal privacy` without opting out of personal memory
+- streamed reply concurrency is per `(channel, user)`, not one active stream for the whole channel
+- same-user explicit trigger fragments are coalesced for a short fixed debounce window before prompt execution
+- if the same user adds more text before any visible streamed output appears, the bot restarts that in-flight turn with the merged content
+- if visible output has already started, extra same-user fragments collapse into one buffered follow-up turn after the current same-user turn finishes, including any queued persona replies
+
 ## Providers, Keys, Models, And Custom Endpoint
 
 Owned primarily by:
@@ -68,6 +79,34 @@ Settings exposed through `/config keys manage`, `/config model manage`, and `/co
 - custom model name
 - custom model capabilities
 - custom endpoint enabled flag
+
+### Database Summarization Caveat
+
+Stored-memory reconciliation is separate from the public `/tldr` conversation summarizer.
+
+Owned primarily by:
+
+- `discord_bot/cogs/memories.py`
+- `discord_bot/cogs/teach.py`
+- `discord_bot/utils/database_summarizer.py`
+- `discord_bot/utils/api_manager.py`
+
+Behavior:
+
+- `/remember personal` and `/remember server` may reconcile existing stored facts with a new fact before saving.
+- `/teach attribute` may reconcile persona attributes before replacing the stored set.
+- `/teach sampledialogue` may reconcile stored sample lines before replacing the stored set.
+
+Current runtime dependency:
+
+- `DatabaseSummarizer` uses `get_gemini_summarize_manager()` from `discord_bot/utils/api_manager.py`.
+- That manager is backed by the process environment variable `GEMINI_SUMMARIZE_KEY`.
+- It also requires the `google-genai` package to be installed in the running bot environment.
+
+Important limitation:
+
+- This reconciler does not currently read guild-uploaded summarize keys from guild config.
+- If `GEMINI_SUMMARIZE_KEY` is missing or `google-genai` is unavailable, the reconciler disables itself and the bot falls back to storing the new fact or teaching entry directly without AI reconciliation.
 
 ## URL Safety
 

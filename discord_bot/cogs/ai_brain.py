@@ -26,6 +26,7 @@ import json
 import os
 import re
 import tempfile
+import time
 
 import discord
 import pytz
@@ -52,6 +53,7 @@ from utils.db_handler import (
     delete_short_term_facts_for_channel,
     get_channel_recency_summary,
     get_guild_recency_summary,
+    get_personal_memory_privacy,
     get_personal_memories,
     get_mention_lookup_personal_memories,
 )
@@ -73,7 +75,8 @@ from utils.guild_ai import (
     get_guild_gemini_model,
     GuildConfigError,
 )
-from utils.admin_actions import execute_admin_action
+from utils.admin_actions import ADMIN_ACTIONS, execute_admin_action, execute_admin_intent
+from utils.admin_nl import AdminNLContext, PendingAdminRequest, interpret_admin_request, resume_admin_request
 from modes import get_mode_profile, get_all_modes
 from utils.rate_limiter import StreamSendBudget, ai_limiter, get_rate_limit_message
 from utils.logger import get_logger, log_stream_event, log_stream_result
@@ -111,6 +114,19 @@ from utils.message_cooldown import (
     normalize_cooldown_type,
     set_reply_cooldown,
 )
+from utils.ai_reply_policy import (
+    AutoChannelSignal,
+    NoMentionJudgeVerdict,
+    NoMentionScore,
+    SelfReplyChainState,
+    build_reply_trigger_signals,
+    build_no_mention_judge_prompt,
+    evaluate_auto_channel_signal,
+    is_bot_owned_webhook,
+    parse_no_mention_judge_response,
+    score_no_mention_candidate,
+    self_reply_limit_reached,
+)
 from utils.streaming.discord_sender import DiscordReplySession
 from utils.streaming.buffer import SemanticBuffer
 from utils.streaming.orchestrator import StreamOrchestrator
@@ -119,6 +135,7 @@ from utils.streaming.thought_logger import ThoughtLogger
 from utils.streaming.types import DiscordSendPolicy, StreamEvent, ThoughtLogSettings
 from utils.streaming.typing_manager import TypingKeepalive
 from utils.persona_queue import PersonaInvocationJob, PersonaQueueManager
+from utils.turn_coalescer import TurnCoordinator, TurnKey
 from utils.webhook_identity import ChannelWebhookIdentityManager, build_persona_webhook_context
 
 # Context window: stores last 20 messages within 30 minutes
@@ -161,6 +178,12 @@ ADMIN_ACTION_PATTERN = re.compile(r"```admin_action\s*(\{.*?\})\s*```", re.DOTAL
 ADMIN_CONFIRM_TOKENS = {"confirm", "yes", "y", "ok", "okay"}
 ADMIN_CANCEL_TOKENS = {"cancel", "stop", "never mind", "nevermind"}
 ADMIN_PENDING_TTL_SECONDS = 180
+ADMIN_NL_REPHRASE_RESPONSE = (
+    "I couldn't map that admin request safely. Please rephrase it as one supported server action."
+)
+SUPPORTED_ADMIN_ACTION_REJECTION = (
+    "Supported admin actions must be requested directly in chat. Please rephrase the request."
+)
 CUSTOM_EMOJI_CANDIDATE_PATTERN = re.compile(r"<a?:[^>]+>|(?<!<a)(?<!<):[A-Za-z0-9_]+:?|[A-Za-z0-9_]+:\d{5,}")
 PROCESSING_ACK_MARKERS = (
     "i am processing",
@@ -217,26 +240,9 @@ If the user does NOT have permission, refuse politely and do NOT output JSON.
 
 ADMIN_ACTION_INSTRUCTIONS = """
 [ADMIN CONFIG ACTIONS]
-Only if [Admin config access: yes], you can configure server settings with admin_action JSON.
-Supported actions:
-- STARBOARD_SETUP: channel_id, emoji_triggers (list) or emoji_mode "any", threshold
-- WELCOME_SETUP: channel_id, message, dm_message, dm_enabled
-- AUTOMOD_ADD: keyword, action (delete/timeout/kick/ban), duration (minutes)
-- AUTOMOD_REMOVE: keyword
-- CONFIG_MODE: mode (femboy/tsundere/oneesan)
-- CONFIG_LOG: channel_id
-
-If the user asks to configure starboard, respond with:
-
-```admin_action
-{"action": "STARBOARD_SETUP", "params": {"channel_id": 123, "emoji_triggers": ["⭐", "🌟"], "emoji_mode": "list", "threshold": 5}}
-```
-
-Rules:
-- If channel, emojis (list or any), or threshold is missing, ask a short confirmation question and do NOT output admin_action.
-- "more than X" -> threshold = X + 1.
-- "at least X" or "X or more" -> threshold = X.
-- "any emoji" -> emoji_mode = "any" and omit emoji_triggers.
+The typed admin NLP router is authoritative for supported server mutations.
+Do NOT emit admin_action JSON for supported actions such as starboard, welcome, automod, URL safety, modlog, autorole, staff, mode changes, or other supported admin mutations.
+If the user asks for one of those supported admin changes, answer conversationally and ask for missing details instead of outputting admin_action.
 """.strip()
 
 TOOL_CALL_INSTRUCTIONS = """
@@ -370,316 +376,7 @@ def _apply_bot_controlled_custom_emojis(
     )
 
 
-def _should_assign_created_role(message: discord.Message) -> bool:
-    content = (message.content or "").lower()
-    if not content:
-        return False
-    triggers = [
-        "give it to me",
-        "give me",
-        "for me",
-        "to me",
-        "assign me",
-        "add me",
-        "make me",
-    ]
-    return any(trigger in content for trigger in triggers)
-
-
-def _extract_role_name_from_text(content: str) -> Optional[str]:
-    if not content:
-        return None
-    quoted = re.findall(r"[\"“”'‘’]([^\"“”'‘’]+)[\"“”'‘’]", content)
-    for token in quoted:
-        name = token.strip()
-        if name:
-            return name
-
-    patterns = [
-        r"(?:make|give|assign|add)\s+me\s+(?:the\s+)?(.+?)\s+role\b",
-        r"create\s+(?:a\s+)?role\s+(?:named|called)?\s*(.+?)(?:\s+for\s+me|\s+and\s+give|\s*$)",
-        r"create\s+(.+?)\s+role\b",
-    ]
-    for pattern in patterns:
-        match = re.search(pattern, content, flags=re.IGNORECASE)
-        if match:
-            name = match.group(1).strip()
-            if name:
-                return name
     return None
-
-
-def _extract_role_request(content: str) -> Optional[Dict[str, str]]:
-    if not content:
-        return None
-    lowered = content.lower()
-    if "role" not in lowered:
-        return None
-
-    quoted = re.findall(r"[\"â€œâ€'â€˜â€™]([^\"â€œâ€'â€˜â€™]+)[\"â€œâ€'â€˜â€™]", content)
-    quoted_name = quoted[0].strip() if quoted else ""
-
-    delete_patterns = [
-        r"(?:delete|remove)\s+(?:the\s+)?(.+?)\s+role(?:\s+from\s+server|\s+entirely|\s*$)",
-        r"(?:delete|remove)\s+role\s+(?:named|called)?\s*(.+?)\s*$",
-    ]
-    for pattern in delete_patterns:
-        match = re.search(pattern, content, flags=re.IGNORECASE)
-        if match:
-            role_name = match.group(1).strip() if match.group(1) else quoted_name
-            role_name = role_name or quoted_name
-            if role_name:
-                role_name = role_name.strip("\"'`“”‘’ ")
-                return {"sub_action": "delete", "target_name": role_name}
-
-    role_name = quoted_name or _extract_role_name_from_text(content)
-    if role_name:
-        return {"sub_action": "create", "target_name": role_name}
-    return None
-
-
-def _extract_target_member_id(message: discord.Message) -> Optional[int]:
-    if not message.mentions:
-        return None
-    for member in message.mentions:
-        if member.bot:
-            continue
-        return member.id
-    return None
-
-
-def _clean_channel_name(name: str) -> str:
-    name = (name or "").strip()
-    if not name:
-        return ""
-    name = re.sub(r"(?:please|pls|thanks|thank you)$", "", name, flags=re.IGNORECASE).strip()
-    name = name.strip("\"'“”‘’")
-    return name.strip()
-
-
-def _extract_quoted_items(content: str) -> list[str]:
-    quotes = re.findall(r"[\"â€œâ€'â€˜â€™]([^\"â€œâ€'â€˜â€™]+)[\"â€œâ€'â€˜â€™]", content or "")
-    return [_clean_channel_name(item) for item in quotes if _clean_channel_name(item)]
-
-
-def _extract_channel_request(content: str) -> Optional[dict]:
-    return _extract_channel_request_v2(content)
-
-
-def _extract_channel_request_v2(content: str) -> Optional[dict]:
-    return _extract_channel_request_v3(content)
-
-
-def _extract_channel_request_v3(content: str) -> Optional[dict]:
-    return _extract_channel_request_resolved(content)
-
-
-def _extract_channel_request_resolved(content: str) -> Optional[dict]:
-    return _extract_channel_request_new(content)
-
-
-def _extract_channel_request_new(content: str) -> Optional[dict]:
-    if not content:
-        return None
-    content_lower = content.lower()
-    has_category = "category" in content_lower
-    has_voice = bool(re.search(r"\bvoice channel\b|\bvc\b", content_lower))
-    has_text = "text channel" in content_lower
-    has_channel = "channel" in content_lower or has_voice or has_text
-    if not has_category and not has_channel:
-        return None
-
-    quoted_items = _extract_quoted_items(content)
-
-    create_match = re.search(r"\b(create|make|add|setup|set up)\b", content_lower)
-    delete_match = re.search(r"\b(delete|remove)\b", content_lower)
-    is_delete = bool(delete_match and (not create_match or delete_match.start() <= create_match.start()))
-
-    if has_category:
-        channel_kind = "category"
-    elif has_voice:
-        channel_kind = "voice"
-    else:
-        channel_kind = "text"
-
-    if channel_kind == "category":
-        sub_action = "delete_category" if is_delete else "create_category"
-    elif channel_kind == "voice":
-        sub_action = "delete_voice_channel" if is_delete else "create_voice_channel"
-    else:
-        sub_action = "delete_text_channel" if is_delete else "create_text_channel"
-
-    channel_name: Optional[str] = None
-    parent_name: Optional[str] = None
-
-    if quoted_items:
-        if not is_delete and sub_action in {"create_text_channel", "create_voice_channel"} and len(quoted_items) >= 2:
-            channel_name = quoted_items[0]
-            parent_name = quoted_items[1]
-        else:
-            channel_name = quoted_items[0]
-
-    if not channel_name:
-        name_patterns = []
-        if is_delete:
-            if channel_kind == "category":
-                name_patterns.append(
-                    r"(?:delete|remove)\s+(?:the\s+)?(?:category\s+)?(?:named|called)?\s*([^\n,]+)"
-                )
-            elif channel_kind == "voice":
-                name_patterns.append(
-                    r"(?:delete|remove)\s+(?:the\s+)?(?:voice\s+channel|vc)\s+(?:named|called)?\s*([^\n,]+)"
-                )
-            else:
-                name_patterns.append(
-                    r"(?:delete|remove)\s+(?:the\s+)?(?:text\s+)?channel\s+(?:named|called)?\s*([^\n,]+)"
-                )
-        else:
-            if channel_kind == "category":
-                name_patterns.append(
-                    r"(?:create|make|add)\s+(?:a\s+)?category\s+(?:named|called)?\s*([^\n,]+)"
-                )
-            elif channel_kind == "voice":
-                name_patterns.append(
-                    r"(?:create|make|add)\s+(?:a\s+)?(?:voice\s+channel|vc)\s+(?:named|called)?\s*([^\n,]+)"
-                )
-            else:
-                name_patterns.append(
-                    r"(?:create|make|add)\s+(?:a\s+)?(?:text\s+)?channel\s+(?:named|called)?\s*([^\n,]+)"
-                )
-
-        for pattern in name_patterns:
-            match = re.search(pattern, content, flags=re.IGNORECASE)
-            if not match:
-                continue
-            candidate = _clean_channel_name(match.group(1))
-            candidate = re.split(r"\s+(?:under|in)\s+", candidate, maxsplit=1, flags=re.IGNORECASE)[0].strip()
-            if candidate:
-                channel_name = candidate
-                break
-
-    if not is_delete and sub_action in {"create_text_channel", "create_voice_channel"} and not parent_name:
-        parent_match = re.search(
-            r"(?:under|inside|in)\s+(?:the\s+)?(?:category\s+)?([#\w\-\s]+)$",
-            content,
-            flags=re.IGNORECASE,
-        )
-        if parent_match:
-            parent_name = _clean_channel_name(parent_match.group(1))
-
-    if not channel_name:
-        return None
-
-    return {
-        "sub_action": sub_action,
-        "channel_name": channel_name,
-        "parent_name": parent_name or None,
-    }
-    content_lower = content.lower()
-    has_category = "category" in content_lower
-    has_channel = "channel" in content_lower
-    if not has_category and not has_channel:
-        return None
-
-    quotes = re.findall(r"[\"“”'‘’]([^\"“”'‘’]+)[\"“”'‘’]", content)
-    quote_names = [_clean_channel_name(item) for item in quotes if _clean_channel_name(item)]
-
-    if has_category and has_channel and len(quote_names) >= 2:
-        return {
-            "sub_action": "create_text_channel",
-            "channel_name": quote_names[1],
-            "parent_name": quote_names[0],
-        }
-    if has_category and len(quote_names) >= 1:
-        return {
-            "sub_action": "create_category",
-            "channel_name": quote_names[0],
-            "parent_name": None,
-        }
-    if has_channel and len(quote_names) >= 2 and ("under" in content_lower or "in " in content_lower):
-        return {
-            "sub_action": "create_text_channel",
-            "channel_name": quote_names[0],
-            "parent_name": quote_names[1],
-        }
-    if has_channel and len(quote_names) >= 1:
-        return {
-            "sub_action": "create_text_channel",
-            "channel_name": quote_names[0],
-            "parent_name": None,
-        }
-
-    category_match = re.search(
-        r"(?:create|make|add)\s+(?:a\s+)?category\s+(?:named|called)?\s*([\\w\\- ]+)",
-        content,
-        flags=re.IGNORECASE,
-    )
-    if category_match:
-        name = _clean_channel_name(category_match.group(1))
-        if name:
-            return {"sub_action": "create_category", "channel_name": name, "parent_name": None}
-
-    channel_match = re.search(
-        r"(?:create|make|add)\s+(?:a\s+)?channel\s+(?:named|called)?\s*([\\w\\- ]+)",
-        content,
-        flags=re.IGNORECASE,
-    )
-    if channel_match:
-        name = _clean_channel_name(channel_match.group(1))
-        if name:
-            parent_match = re.search(
-                r"(?:under|in)\s+(?:the\s+)?([\\w\\- ]+?)\\s*(?:category)?(?:\\b|$)",
-                content,
-                flags=re.IGNORECASE,
-            )
-            parent_name = _clean_channel_name(parent_match.group(1)) if parent_match else None
-            return {
-                "sub_action": "create_text_channel",
-                "channel_name": name,
-                "parent_name": parent_name or None,
-            }
-
-    return None
-
-
-def _extract_starboard_request(content: str) -> Optional[Dict[str, Any]]:
-    text = (content or "").strip()
-    if not text:
-        return None
-    lowered = text.lower()
-    if "starboard" not in lowered:
-        return None
-    if not re.search(r"\b(set|setup|configure|enable|send|create)\b", lowered):
-        return None
-
-    params: Dict[str, Any] = {}
-    channel_match = re.search(r"<#(\d+)>", text)
-    if channel_match:
-        params["channel_id"] = int(channel_match.group(1))
-    elif "this channel" in lowered or "here" in lowered:
-        params["channel"] = "this channel"
-
-    if "any emoji" in lowered or re.search(r"\bany\b.*\bemoji\b", lowered):
-        params["emoji_mode"] = "any"
-    else:
-        custom_emoji_tokens = re.findall(r"<a?:\w+:\d+>", text)
-        if custom_emoji_tokens:
-            params["emoji_triggers"] = custom_emoji_tokens
-
-    threshold: Optional[int] = None
-    more_than_match = re.search(r"more than\s+(\d+)", lowered)
-    if more_than_match:
-        threshold = int(more_than_match.group(1)) + 1
-    else:
-        at_least_match = re.search(r"(?:at least|or more)\s+(\d+)", lowered)
-        if at_least_match:
-            threshold = int(at_least_match.group(1))
-        else:
-            bare_match = re.search(r"\b(\d+)\s*(?:stars?|reactions?)\b", lowered)
-            if bare_match:
-                threshold = int(bare_match.group(1))
-    if threshold is not None:
-        params["threshold"] = threshold
 
     return params
 
@@ -690,8 +387,16 @@ def _is_admin_intent_content(content: str) -> bool:
         return False
     admin_keywords = (
         "starboard",
+        "welcome message",
+        "welcome messages",
+        "dm welcome",
+        "url safety",
+        "autorole",
+        "bot staff",
+        "staff role",
         "modlog",
         "moderation log",
+        "mod log",
         "create channel",
         "delete channel",
         "create category",
@@ -699,7 +404,10 @@ def _is_admin_intent_content(content: str) -> bool:
         "create role",
         "delete role",
         "remove role",
-        "staff role",
+        "timeout ",
+        "kick ",
+        "unban",
+        "ban ",
     )
     return any(keyword in text for keyword in admin_keywords)
 
@@ -719,6 +427,17 @@ def _build_admin_confirmation_prompt(result: Dict[str, Any]) -> str:
     )
 
 
+def _build_admin_nl_confirmation_prompt(result) -> str:
+    target = (
+        result.params.get("channel_name")
+        or result.params.get("category_name")
+        or result.params.get("target_name")
+        or result.params.get("channel_id")
+        or "that target"
+    )
+    return f"Please confirm this delete action for {target} by replying \"confirm\"."
+
+
 async def _get_agentic_permission_level(member: Optional[discord.Member]) -> int:
     """Return the highest agentic permission level for a member (0-2)."""
     if not member or not member.guild:
@@ -734,7 +453,6 @@ async def _get_agentic_permission_level(member: Optional[discord.Member]) -> int
         if role_id in user_role_ids:
             level = max(level, int(permission_level))
     return level
-
 
 def _agentic_action_requires_level(action: str) -> int:
     """Map agentic sub_action to required permission level."""
@@ -811,6 +529,7 @@ async def handle_agentic_actions(
     message: discord.Message,
     ai_response_text: str,
     brain: Optional["AIBrain"] = None,
+    permission_override_level: Optional[int] = None,
 ) -> Optional[discord.Message]:
     """Parse and execute agentic JSON actions. Returns sent reply if handled."""
     payload = _find_agentic_json_block(ai_response_text)
@@ -849,7 +568,11 @@ async def handle_agentic_actions(
         return await message.reply("Sorry, I can only do that in a server.", mention_author=False)
 
     required_level = _agentic_action_requires_level(sub_action)
-    permission_level = await _get_agentic_permission_level(message.author)
+    permission_level = (
+        permission_override_level
+        if permission_override_level is not None
+        else await _get_agentic_permission_level(message.author)
+    )
 
     if permission_level < required_level:
         return await message.reply("Nice try, but you don't have permission to do that.", mention_author=False)
@@ -1108,6 +831,8 @@ async def handle_admin_actions(
 
     action = data.get("action")
     params = data.get("params") or {}
+    if isinstance(action, str) and action.upper().strip() in ADMIN_ACTIONS:
+        return await message.reply(SUPPORTED_ADMIN_ACTION_REJECTION, mention_author=False)
     if (
         isinstance(params, dict)
         and action == "STARBOARD_SETUP"
@@ -1170,6 +895,10 @@ class ConversationContext:
         content: str,
         reply_to_username: Optional[str] = None,
         media: Optional[list[dict[str, Any]]] = None,
+        *,
+        is_bot_owned: bool = False,
+        owner_kind: Optional[str] = None,
+        persona_mode: Optional[str] = None,
     ) -> None:
         """Add a message to the context."""
         self.messages.append({
@@ -1180,28 +909,43 @@ class ConversationContext:
             "content": content,
             "reply_to_username": reply_to_username,
             "media": media or [],
+            "is_bot_owned": is_bot_owned,
+            "owner_kind": owner_kind,
+            "persona_mode": persona_mode,
         })
-    
-    def get_context(self, min_message_id: Optional[int] = None) -> str:
-        """
-        Get formatted context string for AI prompt.
-        Only includes messages from the last 30 minutes.
-        """
-        cutoff = datetime.now() - timedelta(minutes=self.expiry_minutes)
-        
-        valid_messages = []
-        for msg in self.messages:
-            if msg["timestamp"] <= cutoff:
-                continue
-            if min_message_id is not None and int(msg.get("message_id", 0)) <= min_message_id:
-                continue
-            valid_messages.append(msg)
-        
-        if not valid_messages:
+
+    def _build_context_entry(
+        self,
+        *,
+        message_id: int,
+        user_id: int,
+        username: str,
+        content: str,
+        reply_to_username: Optional[str] = None,
+        media: Optional[list[dict[str, Any]]] = None,
+        is_bot_owned: bool = False,
+        owner_kind: Optional[str] = None,
+        persona_mode: Optional[str] = None,
+    ) -> dict[str, Any]:
+        return {
+            "message_id": message_id,
+            "timestamp": datetime.now(),
+            "user_id": user_id,
+            "username": username,
+            "content": content,
+            "reply_to_username": reply_to_username,
+            "media": media or [],
+            "is_bot_owned": is_bot_owned,
+            "owner_kind": owner_kind,
+            "persona_mode": persona_mode,
+        }
+
+    def _format_context_messages(self, messages: list[dict[str, Any]]) -> str:
+        if not messages:
             return "No recent conversation context."
-        
+
         context_lines = []
-        for msg in valid_messages:
+        for msg in messages:
             reply_to = msg.get("reply_to_username")
             media = msg.get("media") or []
             media_note = ""
@@ -1212,8 +956,65 @@ class ConversationContext:
                 context_lines.append(f"{msg['username']} (replying to {reply_to}): {msg['content']}{media_note}")
             else:
                 context_lines.append(f"{msg['username']}: {msg['content']}{media_note}")
-        
+
         return "\n".join(context_lines)
+
+    def get_recent_messages(
+        self,
+        limit: int,
+        min_message_id: Optional[int] = None,
+    ) -> list[dict[str, Any]]:
+        """
+        Return the newest structured messages for downstream reply policy checks.
+        """
+        if limit <= 0:
+            return []
+
+        cutoff = datetime.now() - timedelta(minutes=self.expiry_minutes)
+        valid_messages: list[dict[str, Any]] = []
+        for msg in self.messages:
+            if msg["timestamp"] <= cutoff:
+                continue
+            if min_message_id is not None and int(msg.get("message_id", 0)) <= min_message_id:
+                continue
+            valid_messages.append(dict(msg))
+
+        if not valid_messages:
+            return []
+
+        return valid_messages[-limit:]
+    
+    def get_context(self, min_message_id: Optional[int] = None) -> str:
+        """
+        Get formatted context string for AI prompt.
+        Only includes messages from the last 30 minutes.
+        """
+        valid_messages = self.get_recent_messages(limit=len(self.messages), min_message_id=min_message_id)
+        return self._format_context_messages(valid_messages)
+
+    def get_context_with_appended_message(
+        self,
+        *,
+        message_id: int,
+        user_id: int,
+        username: str,
+        content: str,
+        reply_to_username: Optional[str] = None,
+        media: Optional[list[dict[str, Any]]] = None,
+        min_message_id: Optional[int] = None,
+    ) -> str:
+        valid_messages = self.get_recent_messages(limit=len(self.messages), min_message_id=min_message_id)
+        valid_messages.append(
+            self._build_context_entry(
+                message_id=message_id,
+                user_id=user_id,
+                username=username,
+                content=content,
+                reply_to_username=reply_to_username,
+                media=media,
+            )
+        )
+        return self._format_context_messages(valid_messages)
 
 
 class AIBrain(commands.Cog):
@@ -1248,10 +1049,16 @@ class AIBrain(commands.Cog):
         # Active conversations: (channel_id, user_id) -> {"remaining": int, "last_active": datetime}
         self.active_convos: Dict[tuple[int, int], dict] = {}
         self.reply_cooldowns: Dict[tuple[str, int], datetime] = {}
-        self.auto_channel_counters: Dict[tuple[int, int], int] = {}
+        self.auto_channel_counters: Dict[tuple[int, int], dict[str, int]] = {}
+        self.bot_owned_messages: Dict[int, dict[str, Any]] = {}
         self.context_reset_markers: Dict[int, int] = {}
         self.stream_sessions = ChannelStreamRegistry()
         self.persona_queue = PersonaQueueManager()
+        self.turn_coordinator = TurnCoordinator()
+        self.pending_turn_tasks: Dict[TurnKey, asyncio.Task] = {}
+        self.active_turn_tasks: Dict[TurnKey, asyncio.Task] = {}
+        self.follow_up_turn_tasks: Dict[TurnKey, asyncio.Task] = {}
+        self.turn_runtime: Dict[TurnKey, dict[str, Any]] = {}
         self.webhook_identities = ChannelWebhookIdentityManager()
     
     def get_context(self, channel_id: int) -> ConversationContext:
@@ -1259,6 +1066,366 @@ class AIBrain(commands.Cog):
         if channel_id not in self.contexts:
             self.contexts[channel_id] = ConversationContext()
         return self.contexts[channel_id]
+
+    async def cog_unload(self) -> None:
+        debounce_window = self.turn_coordinator.debounce_window
+        for task_map in (
+            self.pending_turn_tasks,
+            self.active_turn_tasks,
+            self.follow_up_turn_tasks,
+        ):
+            for task in list(task_map.values()):
+                if not task.done():
+                    task.cancel()
+            task_map.clear()
+        self.persona_queue.cancel_all()
+        self.turn_runtime.clear()
+        self.turn_coordinator = TurnCoordinator(debounce_window=debounce_window)
+
+    def _turn_key_for_message(self, message: discord.Message) -> TurnKey:
+        return TurnKey(channel_id=message.channel.id, user_id=message.author.id)
+
+    def _turn_now(self) -> float:
+        return time.monotonic()
+
+    def _cancel_turn_task(self, tasks: Dict[TurnKey, asyncio.Task], key: TurnKey) -> None:
+        task = tasks.get(key)
+        if task and not task.done():
+            task.cancel()
+
+    def _create_turn_task(
+        self,
+        tasks: Dict[TurnKey, asyncio.Task],
+        key: TurnKey,
+        coro: Any,
+        *,
+        label: str,
+    ) -> asyncio.Task:
+        task = asyncio.create_task(coro)
+
+        def _log_background_failure(completed: asyncio.Task) -> None:
+            try:
+                exc = completed.exception()
+            except asyncio.CancelledError:
+                return
+            if exc is not None:
+                logger.error(
+                    "Background turn task %s failed for %s",
+                    label,
+                    key,
+                    exc_info=(type(exc), exc, exc.__traceback__),
+                )
+
+        task.add_done_callback(_log_background_failure)
+        tasks[key] = task
+        return task
+
+    def _schedule_persona_queue_drain(self, channel_id: int) -> Optional[asyncio.Task]:
+        task = self.persona_queue.schedule_drain(
+            channel_id,
+            self._run_queued_persona_job,
+        )
+        if task is None:
+            return None
+
+        def _log_queue_failure(completed: asyncio.Task) -> None:
+            try:
+                exc = completed.exception()
+            except asyncio.CancelledError:
+                return
+            if exc is not None:
+                logger.error(
+                    "Background persona queue task failed for channel %s",
+                    channel_id,
+                    exc_info=(type(exc), exc, exc.__traceback__),
+                )
+
+        task.add_done_callback(_log_queue_failure)
+        return task
+
+    async def _queue_same_user_turn(
+        self,
+        *,
+        message: discord.Message,
+        context: Any,
+        guild_config: dict[str, Any],
+        persona_jobs: list[PersonaInvocationJob],
+        content_for_prompt: str,
+        refresh_conversation: bool,
+        remaining_messages: int,
+        apply_reply_cooldown_update: bool,
+        reply_cooldown_seconds: int,
+        reply_cooldown_type: str,
+        track_stats: bool,
+        media_refs: Optional[list[dict[str, Any]]],
+        reply_to_username: Optional[str],
+    ) -> None:
+        key = self._turn_key_for_message(message)
+        self.turn_runtime[key] = {
+            "context": context,
+            "guild_config": dict(guild_config),
+            "persona_jobs": list(persona_jobs),
+            "refresh_conversation": refresh_conversation,
+            "remaining_messages": remaining_messages,
+            "apply_reply_cooldown_update": apply_reply_cooldown_update,
+            "reply_cooldown_seconds": reply_cooldown_seconds,
+            "reply_cooldown_type": reply_cooldown_type,
+            "track_stats": track_stats,
+            "reply_to_username": reply_to_username,
+        }
+
+        active_task = self.active_turn_tasks.get(key)
+        existing_follow_up = self.turn_coordinator.get_buffered_follow_up(key)
+        if existing_follow_up is not None and (active_task is None or active_task.done()):
+            self._cancel_turn_task(self.follow_up_turn_tasks, key)
+            self.turn_coordinator.clear_buffered_follow_up(key)
+            pending = self.turn_coordinator.upsert_pending(
+                key,
+                fragment_text=existing_follow_up.merged_text,
+                source_message=existing_follow_up.source_message,
+                attachments=existing_follow_up.attachments,
+                now=self._turn_now(),
+            )
+            pending = self.turn_coordinator.upsert_pending(
+                key,
+                fragment_text=content_for_prompt,
+                source_message=message,
+                attachments=media_refs or [],
+                now=self._turn_now(),
+            )
+            self._cancel_turn_task(self.pending_turn_tasks, key)
+            self._create_turn_task(
+                self.pending_turn_tasks,
+                key,
+                self._flush_pending_turn_after_delay(key, pending.version),
+                label="pending flush",
+            )
+            return
+
+        if active_task and not active_task.done():
+            if self.turn_coordinator.has_visible_output(key):
+                follow_up = self.turn_coordinator.buffer_follow_up(
+                    key,
+                    fragment_text=content_for_prompt,
+                    source_message=message,
+                    attachments=media_refs or [],
+                    now=self._turn_now(),
+                )
+                if follow_up is not None:
+                    self._cancel_turn_task(self.follow_up_turn_tasks, key)
+                    self._create_turn_task(
+                        self.follow_up_turn_tasks,
+                        key,
+                        self._flush_follow_up_turn_after_delay(key, follow_up.version),
+                        label="follow-up flush",
+                    )
+                return
+
+            restarted = self.turn_coordinator.request_restart_before_visible(
+                key,
+                fragment_text=content_for_prompt,
+                source_message=message,
+                attachments=media_refs or [],
+                now=self._turn_now(),
+            )
+            if restarted is not None:
+                active_task.cancel()
+                self._cancel_turn_task(self.pending_turn_tasks, key)
+                self._create_turn_task(
+                    self.pending_turn_tasks,
+                    key,
+                    self._restart_active_turn_after_cancel(key, restarted.version, active_task),
+                    label="pre-visible restart",
+                )
+                return
+
+        pending = self.turn_coordinator.upsert_pending(
+            key,
+            fragment_text=content_for_prompt,
+            source_message=message,
+            attachments=media_refs or [],
+            now=self._turn_now(),
+        )
+        self._cancel_turn_task(self.pending_turn_tasks, key)
+        self._create_turn_task(
+            self.pending_turn_tasks,
+            key,
+            self._flush_pending_turn_after_delay(key, pending.version),
+            label="pending flush",
+        )
+
+    async def _flush_pending_turn_after_delay(self, key: TurnKey, version: int) -> None:
+        try:
+            pending = self.turn_coordinator.get_pending(key)
+            if pending is None or pending.version != version:
+                return
+            delay = max(0.0, pending.deadline - self._turn_now())
+            if delay > 0:
+                await asyncio.sleep(delay)
+            pending = self.turn_coordinator.take_pending(key, version=version, now=self._turn_now())
+            if pending is None:
+                return
+            self.turn_coordinator.mark_active(pending, now=self._turn_now())
+            self._create_turn_task(
+                self.active_turn_tasks,
+                key,
+                self._run_active_turn(pending.key, pending.version),
+                label="active turn",
+            )
+        except asyncio.CancelledError:
+            raise
+        finally:
+            current = self.pending_turn_tasks.get(key)
+            if current is asyncio.current_task():
+                self.pending_turn_tasks.pop(key, None)
+
+    async def _restart_active_turn_after_cancel(
+        self,
+        key: TurnKey,
+        version: int,
+        prior_task: asyncio.Task,
+    ) -> None:
+        try:
+            try:
+                await prior_task
+            except asyncio.CancelledError:
+                pass
+            except Exception:
+                logger.debug("Restarted turn cleanup saw prior task error", exc_info=True)
+
+            active = self.turn_coordinator.get_active(key)
+            if active is None or active.version != version:
+                return
+            self._create_turn_task(
+                self.active_turn_tasks,
+                key,
+                self._run_active_turn(key, version),
+                label="active turn restart",
+            )
+        finally:
+            current = self.pending_turn_tasks.get(key)
+            if current is asyncio.current_task():
+                self.pending_turn_tasks.pop(key, None)
+
+    async def _flush_follow_up_turn_after_delay(self, key: TurnKey, version: int) -> None:
+        try:
+            follow_up = self.turn_coordinator.get_buffered_follow_up(key)
+            if follow_up is None or follow_up.version != version:
+                return
+            delay = max(0.0, follow_up.deadline - self._turn_now())
+            if delay > 0:
+                await asyncio.sleep(delay)
+
+            active_task = self.active_turn_tasks.get(key)
+            if active_task and not active_task.done():
+                try:
+                    await active_task
+                except asyncio.CancelledError:
+                    pass
+                except Exception:
+                    logger.debug("Buffered follow-up waited on errored active task", exc_info=True)
+
+            follow_up = self.turn_coordinator.take_buffered_follow_up(
+                key,
+                version=version,
+                now=self._turn_now(),
+            )
+            if follow_up is None:
+                return
+
+            pending = self.turn_coordinator.upsert_pending(
+                key,
+                fragment_text=follow_up.merged_text,
+                source_message=follow_up.source_message,
+                attachments=follow_up.attachments,
+                now=self._turn_now(),
+            )
+            self._cancel_turn_task(self.pending_turn_tasks, key)
+            self._create_turn_task(
+                self.pending_turn_tasks,
+                key,
+                self._flush_pending_turn_after_delay(key, pending.version),
+                label="buffered follow-up flush",
+            )
+        finally:
+            current = self.follow_up_turn_tasks.get(key)
+            if current is asyncio.current_task():
+                self.follow_up_turn_tasks.pop(key, None)
+
+    async def _run_active_turn(self, key: TurnKey, version: int) -> None:
+        runtime = self.turn_runtime.get(key)
+        active = self.turn_coordinator.get_active(key)
+        if runtime is None or active is None or active.version != version:
+            return
+
+        message = active.source_message
+        context = runtime["context"]
+        guild_config = dict(runtime["guild_config"])
+        persona_jobs = list(runtime["persona_jobs"])
+        normalized_turn_text = normalize_custom_emojis_for_llm(active.merged_text)
+        context_snapshot = context.get_context_with_appended_message(
+            message_id=message.id,
+            user_id=message.author.id,
+            username=message.author.display_name,
+            content=normalized_turn_text,
+            reply_to_username=runtime["reply_to_username"],
+            media=list(active.attachments) or None,
+            min_message_id=self.context_reset_markers.get(message.channel.id),
+        )
+
+        try:
+            sent = await self._execute_persona_invocation(
+                message=message,
+                context=context,
+                guild_config=guild_config,
+                mode=persona_jobs[0].mode_key,
+                content_for_prompt=active.merged_text,
+                context_snapshot=context_snapshot,
+                refresh_conversation=runtime["refresh_conversation"],
+                remaining_messages=runtime["remaining_messages"],
+                apply_reply_cooldown_update=runtime["apply_reply_cooldown_update"],
+                reply_cooldown_seconds=runtime["reply_cooldown_seconds"],
+                reply_cooldown_type=runtime["reply_cooldown_type"],
+                track_stats=runtime["track_stats"],
+                turn_key=key,
+                turn_version=version,
+            )
+            context.add_message(
+                message.id,
+                message.author.id,
+                message.author.display_name,
+                normalized_turn_text,
+                reply_to_username=runtime["reply_to_username"],
+                media=list(active.attachments) or None,
+            )
+            if sent is None:
+                return
+
+            queued_futures: list[asyncio.Future[None]] = []
+            for queued_job in persona_jobs[1:]:
+                completion_future = asyncio.get_running_loop().create_future()
+                queued_job.source_message = message
+                queued_job.guild_config = dict(guild_config)
+                queued_job.content_for_prompt = active.merged_text
+                queued_job.context_snapshot = context_snapshot
+                queued_job.media_refs = list(active.attachments)
+                queued_job.completion_future = completion_future
+                queued_futures.append(completion_future)
+                await self.persona_queue.enqueue(message.channel.id, queued_job)
+
+            if persona_jobs[1:]:
+                self._schedule_persona_queue_drain(message.channel.id)
+                for completion_future in queued_futures:
+                    await completion_future
+        finally:
+            current = self.active_turn_tasks.get(key)
+            if current is asyncio.current_task():
+                self.active_turn_tasks.pop(key, None)
+            current_active = self.turn_coordinator.get_active(key)
+            if current_active is None or current_active.version == version:
+                self.turn_coordinator.clear_active(key)
+                if self.turn_coordinator.get_buffered_follow_up(key) is None:
+                    self.turn_runtime.pop(key, None)
 
     async def clear_channel_memory_boundary(
         self,
@@ -1320,6 +1487,58 @@ class AIBrain(commands.Cog):
                 continue
         return list(dict.fromkeys(ids))
 
+    def _auto_channel_counter_key(self, channel_id: int, user_id: int) -> tuple[int, int]:
+        """Keep passive auto-reply counters scoped per user within a channel."""
+        return (int(channel_id), int(user_id))
+
+    def _get_auto_channel_signal(
+        self,
+        *,
+        channel_id: int,
+        user_id: int,
+        guild_config: dict[str, Any],
+        reset: bool = False,
+    ) -> AutoChannelSignal:
+        auto_channel_ids = self._parse_id_list(guild_config.get("ai_auto_channels"))
+        auto_threshold = max(0, int(guild_config.get("ai_auto_threshold") or 0))
+        key = self._auto_channel_counter_key(channel_id, user_id)
+
+        if channel_id not in auto_channel_ids:
+            self.auto_channel_counters.pop(key, None)
+            return AutoChannelSignal()
+
+        if reset:
+            self.auto_channel_counters.pop(key, None)
+            return AutoChannelSignal()
+
+        if auto_threshold <= 0:
+            return evaluate_auto_channel_signal(
+                channel_id=channel_id,
+                auto_channel_ids=auto_channel_ids,
+                auto_threshold=auto_threshold,
+                counter_value=0,
+                next_target=0,
+            )
+
+        state = self.auto_channel_counters.get(key) or {
+            "count": 0,
+            "target": auto_threshold,
+        }
+        count = max(0, int(state.get("count", 0))) + 1
+        next_target = max(1, int(state.get("target", 0)) or auto_threshold)
+        signal = evaluate_auto_channel_signal(
+            channel_id=channel_id,
+            auto_channel_ids=auto_channel_ids,
+            auto_threshold=auto_threshold,
+            counter_value=count,
+            next_target=next_target,
+        )
+        if signal.counter_hit:
+            self.auto_channel_counters[key] = {"count": 0, "target": auto_threshold}
+        else:
+            self.auto_channel_counters[key] = {"count": count, "target": next_target}
+        return signal
+
     async def _bot_reply_chain_depth(self, message: discord.Message, max_depth: int = 25) -> int:
         """
         Count bot-authored ancestors across a reply chain.
@@ -1379,6 +1598,8 @@ class AIBrain(commands.Cog):
         message: discord.Message,
         guild_config: dict[str, Any],
         mode: str,
+        turn_key: Optional[TurnKey] = None,
+        turn_version: Optional[int] = None,
     ) -> DiscordReplySession:
         send_policy = DiscordSendPolicy(
             chunk_limit=1900,
@@ -1403,11 +1624,20 @@ class AIBrain(commands.Cog):
                 )
             except Exception as exc:
                 logger.warning("Failed to prepare persona webhook identity for %s: %s", mode, exc)
+
+        on_visible_output = None
+        if turn_key is not None and turn_version is not None:
+            def _mark_turn_visible() -> None:
+                self.turn_coordinator.mark_visible(turn_key, version=turn_version)
+
+            on_visible_output = _mark_turn_visible
+
         return DiscordReplySession(
             source_message=message,
             send_policy=send_policy,
             budget=budget,
             webhook_context=webhook_context,
+            on_visible_output=on_visible_output,
         )
 
     def _clean_stream_chunk(self, text: str, guild_config: dict[str, Any]) -> str:
@@ -1637,15 +1867,23 @@ class AIBrain(commands.Cog):
         system_instruction: str,
         chat_messages: list[dict[str, str]],
         tool_schemas: Optional[list[dict[str, Any]]] = None,
+        turn_key: Optional[TurnKey] = None,
+        turn_version: Optional[int] = None,
     ) -> tuple[Optional[discord.Message], str, Optional[int], int]:
-        sender = await self._build_stream_sender(message, guild_config, mode)
+        sender = await self._build_stream_sender(
+            message,
+            guild_config,
+            mode,
+            turn_key=turn_key,
+            turn_version=turn_version,
+        )
         pending_sticker_id: Optional[int] = None
         raw_response = ""
         tool_loops = 0
         max_tool_loops = 4
         current_messages = list(chat_messages)
 
-        async with self.stream_sessions.claim(message.channel.id):
+        async with self.stream_sessions.claim(message.channel.id, message.author.id):
             async with TypingKeepalive(message.channel):
                 while tool_loops < max_tool_loops:
                     orchestrator = StreamOrchestrator(
@@ -1797,6 +2035,20 @@ class AIBrain(commands.Cog):
         if len(self.chain_order) > self.chain_limit:
             old_id = self.chain_order.popleft()
             self.chain_memory.pop(old_id, None)
+            self.bot_owned_messages.pop(old_id, None)
+
+    def _track_outbound_bot_message(
+        self,
+        *,
+        message_id: int,
+        owner_kind: str,
+        persona_mode: Optional[str] = None,
+    ) -> None:
+        """Track messages the bot owns so reply detection can treat webhook replies as bot-owned."""
+        self.bot_owned_messages[int(message_id)] = {
+            "owner_kind": owner_kind,
+            "persona_mode": persona_mode,
+        }
 
     def _resolve_reply_to(self, message: discord.Message) -> tuple[Optional[int], Optional[str]]:
         """Resolve reply attribution for context formatting."""
@@ -1829,11 +2081,15 @@ class AIBrain(commands.Cog):
 
         resolved = message.reference.resolved
         if isinstance(resolved, discord.Message):
+            if resolved.id in self.bot_owned_messages:
+                return True
             return bool(getattr(getattr(resolved, "author", None), "id", None) == self.bot.user.id)
 
         message_id = message.reference.message_id
         if not message_id:
             return False
+        if int(message_id) in self.bot_owned_messages:
+            return True
         return self.chain_memory.get(message_id) == self.bot.user.id
 
 
@@ -1894,6 +2150,21 @@ class AIBrain(commands.Cog):
             "action": action,
             "params": params,
             "result": result,
+            "created_at": datetime.now(),
+        }
+
+    def _store_pending_admin_intent(
+        self,
+        channel_id: int,
+        user_id: int,
+        result,
+    ) -> None:
+        self.pending_admin_actions[self._pending_admin_key(channel_id, user_id)] = {
+            "intent": result.intent,
+            "params": dict(result.params),
+            "missing": list(result.missing),
+            "requires_confirmation": bool(result.requires_confirmation),
+            "confirmation_scope": result.confirmation_scope,
             "created_at": datetime.now(),
         }
 
@@ -1964,7 +2235,7 @@ class AIBrain(commands.Cog):
         return await message.reply("I couldn't execute that action.", mention_author=False)
 
     async def _handle_pending_admin_confirmation(self, message: discord.Message) -> Optional[discord.Message]:
-        if not message.guild or not isinstance(message.author, discord.Member):
+        if not message.guild or not getattr(message.author, "guild_permissions", None):
             return None
         content = (message.content or "").strip().lower()
         if not content:
@@ -1972,6 +2243,41 @@ class AIBrain(commands.Cog):
         pending = self._get_pending_admin_action(message.channel.id, message.author.id)
         if not pending:
             return None
+
+        if pending.get("intent"):
+            if content in ADMIN_CANCEL_TOKENS:
+                self._pop_pending_admin_action(message.channel.id, message.author.id)
+                return await message.reply("Cancelled.", mention_author=False)
+
+            pending_request = PendingAdminRequest(
+                intent=str(pending.get("intent") or ""),
+                params=dict(pending.get("params") or {}),
+                missing=list(pending.get("missing") or []),
+                requires_confirmation=bool(pending.get("requires_confirmation")),
+                confirmation_scope=pending.get("confirmation_scope"),
+            )
+            resumed = pending_request
+            if pending_request.missing:
+                resumed = resume_admin_request(
+                    pending_request,
+                    message.content or "",
+                    self._build_admin_nl_context(message),
+                )
+            if resumed.missing:
+                self._store_pending_admin_intent(message.channel.id, message.author.id, resumed)
+                return await message.reply(resumed.follow_up_question or "I still need more details.", mention_author=False)
+            if resumed.requires_confirmation and not resumed.params.get("_confirmed"):
+                if content in ADMIN_CONFIRM_TOKENS:
+                    resumed.params["_confirmed"] = True
+                else:
+                    self._store_pending_admin_intent(message.channel.id, message.author.id, resumed)
+                    return await message.reply(
+                        _build_admin_nl_confirmation_prompt(resumed),
+                        mention_author=False,
+                    )
+
+            self._pop_pending_admin_action(message.channel.id, message.author.id)
+            return await self._execute_admin_nl_intent(message, resumed.intent, resumed.params)
 
         if content in ADMIN_CANCEL_TOKENS:
             self._pop_pending_admin_action(message.channel.id, message.author.id)
@@ -2016,6 +2322,97 @@ class AIBrain(commands.Cog):
             return await message.reply(follow_up.get("error", "Admin action failed."), mention_author=False)
         return await message.reply(follow_up.get("message", "Done."), mention_author=False)
 
+    def _build_admin_nl_context(self, message: discord.Message) -> AdminNLContext:
+        guild = message.guild
+        channel_mentions: dict[str, int] = {}
+        role_mentions: dict[str, int] = {}
+        member_mentions: dict[str, int] = {}
+        reply_member_id: int | None = None
+        if guild:
+            for channel in (
+                list(getattr(guild, "text_channels", []) or [])
+                + list(getattr(guild, "voice_channels", []) or [])
+                + list(getattr(guild, "categories", []) or [])
+            ):
+                name = getattr(channel, "name", None)
+                channel_id = getattr(channel, "id", None)
+                if name and channel_id:
+                    channel_mentions[str(name)] = int(channel_id)
+            for role in list(getattr(guild, "roles", []) or []):
+                name = getattr(role, "name", None)
+                role_id = getattr(role, "id", None)
+                if name and role_id:
+                    role_mentions[str(name)] = int(role_id)
+        for member in list(getattr(message, "mentions", []) or []):
+            if getattr(member, "bot", False):
+                continue
+            display_name = getattr(member, "display_name", None) or getattr(member, "name", None)
+            member_id = getattr(member, "id", None)
+            if display_name and member_id:
+                member_mentions[str(display_name)] = int(member_id)
+        replied_message = getattr(getattr(message, "reference", None), "resolved", None)
+        replied_author = getattr(replied_message, "author", None)
+        if replied_author and not getattr(replied_author, "bot", False):
+            replied_member_id = getattr(replied_author, "id", None)
+            if replied_member_id:
+                reply_member_id = int(replied_member_id)
+        return AdminNLContext(
+            current_channel_id=getattr(getattr(message, "channel", None), "id", None),
+            channel_mentions=channel_mentions,
+            role_mentions=role_mentions,
+            member_mentions=member_mentions,
+            reply_member_id=reply_member_id,
+        )
+
+    async def _execute_admin_nl_intent(
+        self,
+        message: discord.Message,
+        intent: str,
+        params: Dict[str, Any],
+    ) -> Optional[discord.Message]:
+        result = await execute_admin_intent(
+            intent,
+            params,
+            message.guild,
+            message.author,
+            bot=self.bot,
+            current_channel_id=message.channel.id,
+        )
+        if not result.get("success"):
+            return await message.reply(result.get("error", "Admin action failed."), mention_author=False)
+        return await message.reply(result.get("message", "Done."), mention_author=False)
+
+    async def _maybe_handle_admin_nl_request(self, message: discord.Message) -> bool:
+        if not message.guild or not getattr(message.author, "guild_permissions", None):
+            return False
+        if not (
+            message.author.guild_permissions.administrator
+            or message.author.guild_permissions.manage_guild
+            or await _get_agentic_permission_level(message.author) >= 2
+        ):
+            return False
+
+        result = interpret_admin_request(
+            message.content or "",
+            self._build_admin_nl_context(message),
+        )
+        if result is None:
+            if not _is_admin_intent_content(message.content or ""):
+                return False
+            await message.reply(ADMIN_NL_REPHRASE_RESPONSE, mention_author=False)
+            return True
+        if result.missing:
+            self._store_pending_admin_intent(message.channel.id, message.author.id, result)
+            await message.reply(result.follow_up_question or "I need a bit more information.", mention_author=False)
+            return True
+        if result.requires_confirmation and not result.params.get("_confirmed"):
+            self._store_pending_admin_intent(message.channel.id, message.author.id, result)
+            await message.reply(_build_admin_nl_confirmation_prompt(result), mention_author=False)
+            return True
+
+        await self._execute_admin_nl_intent(message, result.intent, result.params)
+        return True
+
     async def _get_reply_context(self, message: discord.Message) -> str:
         """Get the content of the message being replied to for context."""
         if not message.reference or not message.reference.message_id:
@@ -2038,163 +2435,6 @@ class AIBrain(commands.Cog):
             pass
         
         return ""
-
-    async def _maybe_handle_channel_request(self, message: discord.Message) -> bool:
-        if not message.guild or not isinstance(message.author, discord.Member):
-            return False
-        content = message.content or ""
-        content_lower = content.lower()
-        if "channel" not in content_lower and "category" not in content_lower:
-            logger.debug("Channel fallback: skip (no channel/category keyword).")
-            return False
-
-        permission_level = await _get_agentic_permission_level(message.author)
-        if permission_level < 2:
-            logger.debug(
-                "Channel fallback: skip (permission level %s < 2).",
-                permission_level,
-            )
-            return False
-
-        request = _extract_channel_request(content)
-        if not request:
-            logger.debug(
-                "Channel fallback: skip (could not parse request). content=%r",
-                content,
-            )
-            return False
-
-        sub_action = request.get("sub_action")
-        channel_name = request.get("channel_name")
-        parent_name = request.get("parent_name")
-        if not channel_name or not sub_action:
-            logger.debug(
-                "Channel fallback: skip (missing parsed fields). request=%s",
-                request,
-            )
-            return False
-
-        if sub_action == "create_category":
-            reply = f"Done! Created category '{channel_name}'."
-        elif sub_action == "create_voice_channel":
-            reply = f"Done! Created voice channel '{channel_name}'."
-        elif sub_action == "create_text_channel":
-            reply = f"Done! Created text channel '{channel_name}'."
-        elif sub_action == "delete_category":
-            reply = f"Done! Deleted category '{channel_name}'."
-        elif sub_action == "delete_voice_channel":
-            reply = f"Done! Deleted voice channel '{channel_name}'."
-        elif sub_action == "delete_text_channel":
-            reply = f"Done! Deleted text channel '{channel_name}'."
-        else:
-            reply = f"Done! Updated '{channel_name}'."
-        payload = {
-            "action": "manage_channel",
-            "sub_action": sub_action,
-            "channel_name": channel_name,
-            "parent_name": parent_name,
-            "reason": "User request",
-            "reply": reply,
-        }
-        logger.debug("Channel fallback: executing agentic payload %s", payload)
-        response_text = "```json\n" + json.dumps(payload, ensure_ascii=False) + "\n```"
-        handled = await handle_agentic_actions(message, response_text, brain=self)
-        logger.debug("Channel fallback: handled=%s", handled is not None)
-        return handled is not None
-
-    async def _maybe_handle_role_request(self, message: discord.Message) -> bool:
-        if not message.guild or not isinstance(message.author, discord.Member):
-            return False
-        content = message.content or ""
-        if "role" not in content.lower():
-            logger.debug("Role fallback: skip (no 'role' keyword).")
-            return False
-
-        permission_level = await _get_agentic_permission_level(message.author)
-        if permission_level < 2:
-            logger.debug(
-                "Role fallback: skip (permission level %s < 2).",
-                permission_level,
-            )
-            return False
-
-        role_request = _extract_role_request(content)
-        if not role_request:
-            logger.debug(
-                "Role fallback: skip (could not parse role request). content=%r",
-                content,
-            )
-            return False
-        role_name = role_request.get("target_name")
-        sub_action = role_request.get("sub_action") or "create"
-        if not role_name:
-            return False
-        logger.debug(
-            "Role fallback: parsed role request '%s' for user %s.",
-            role_name,
-            message.author.id,
-        )
-
-        target_id = _extract_target_member_id(message)
-        if target_id is None and _should_assign_created_role(message):
-            target_id = message.author.id
-        logger.debug("Role fallback: target_id=%s", target_id)
-
-        payload = {
-            "action": "manage_role",
-            "sub_action": sub_action,
-            "target_name": role_name,
-            "target_id": str(target_id) if target_id is not None else None,
-            "reason": "User request",
-            "reply": (
-                f"Done! Deleted the role '{role_name}'."
-                if sub_action == "delete"
-                else f"Done! Created or assigned the role '{role_name}'."
-            ),
-        }
-        logger.debug("Role fallback: executing agentic payload %s", payload)
-        response_text = "```json\n" + json.dumps(payload, ensure_ascii=False) + "\n```"
-        handled = await handle_agentic_actions(message, response_text, brain=self)
-        logger.debug("Role fallback: handled=%s", handled is not None)
-        return handled is not None
-
-    async def _maybe_handle_starboard_setup_request(self, message: discord.Message) -> bool:
-        if not message.guild or not isinstance(message.author, discord.Member):
-            return False
-        permission_level = await _get_agentic_permission_level(message.author)
-        if permission_level < 2:
-            return False
-
-        params = _extract_starboard_request(message.content or "")
-        if not params:
-            return False
-
-        result = await execute_admin_action(
-            "STARBOARD_SETUP",
-            params,
-            message.guild,
-            message.author,
-            bot=self.bot,
-            current_channel_id=message.channel.id,
-        )
-        if result.get("needs_confirmation"):
-            self._store_pending_admin_action(
-                message.channel.id,
-                message.author.id,
-                "STARBOARD_SETUP",
-                params,
-                result,
-            )
-            prompt = _build_admin_confirmation_prompt(result)
-            await message.reply(prompt, mention_author=False)
-            return True
-
-        if not result.get("success"):
-            await message.reply(result.get("error", "Starboard setup failed."), mention_author=False)
-            return True
-
-        await message.reply(result.get("message", "Starboard configured."), mention_author=False)
-        return True
 
     async def _get_recent_history(self, message: discord.Message, limit: int = 5) -> str:
         """Fetch recent messages before this one for additional context."""
@@ -2848,6 +3088,8 @@ class AIBrain(commands.Cog):
         reply_cooldown_seconds: int,
         reply_cooldown_type: str,
         track_stats: bool,
+        turn_key: Optional[TurnKey] = None,
+        turn_version: Optional[int] = None,
     ) -> Optional[discord.Message]:
         if mode == "mode_default":
             affection_data = {
@@ -2904,6 +3146,8 @@ class AIBrain(commands.Cog):
                     system_instruction=system_instruction,
                     chat_messages=chat_messages,
                     tool_schemas=stream_tool_schemas,
+                    turn_key=turn_key,
+                    turn_version=turn_version,
                 )
             except ChannelStreamBusyError:
                 if track_stats:
@@ -2986,6 +3230,9 @@ class AIBrain(commands.Cog):
             )
             sent = await self._send_in_chunks(message, prepared_response)
 
+        if sent is not None and turn_key is not None and turn_version is not None:
+            self.turn_coordinator.mark_visible(turn_key, version=turn_version)
+
         if pending_sticker_id and message.guild:
             await self._send_sticker_with_recovery(
                 message=message,
@@ -3014,20 +3261,36 @@ class AIBrain(commands.Cog):
 
         if interim_sent and interim_sent.id != sent.id:
             self._track_message_id(interim_sent.id, interim_sent.author.id)
+            self._track_outbound_bot_message(
+                message_id=interim_sent.id,
+                owner_kind="persona_webhook" if getattr(interim_sent, "webhook_id", None) else "bot",
+                persona_mode=mode if getattr(interim_sent, "webhook_id", None) else None,
+            )
             context.add_message(
                 interim_sent.id,
                 interim_sent.author.id,
                 interim_sent.author.display_name,
                 normalize_custom_emojis_for_llm(interim_sent.content),
                 reply_to_username=message.author.display_name,
+                is_bot_owned=True,
+                owner_kind="persona_webhook" if getattr(interim_sent, "webhook_id", None) else "bot",
+                persona_mode=mode if getattr(interim_sent, "webhook_id", None) else None,
             )
         self._track_message_id(sent.id, sent.author.id)
+        self._track_outbound_bot_message(
+            message_id=sent.id,
+            owner_kind="persona_webhook" if getattr(sent, "webhook_id", None) else "bot",
+            persona_mode=mode if getattr(sent, "webhook_id", None) else None,
+        )
         context.add_message(
             sent.id,
             sent.author.id,
             sent.author.display_name,
             normalize_custom_emojis_for_llm(sent.content),
             reply_to_username=message.author.display_name,
+            is_bot_owned=True,
+            owner_kind="persona_webhook" if getattr(sent, "webhook_id", None) else "bot",
+            persona_mode=mode if getattr(sent, "webhook_id", None) else None,
         )
 
         if track_stats:
@@ -3485,6 +3748,31 @@ You can explain these commands to the user if asked:
             logger.error("AI Error: %s", e, exc_info=True)
             return "Ah, something went wrong... Let me try again later! >.<"
 
+    async def _judge_no_mention_candidate(
+        self,
+        *,
+        message: discord.Message,
+        window: list[dict[str, Any]],
+        heuristic_score: NoMentionScore,
+    ) -> NoMentionJudgeVerdict:
+        if not heuristic_score.needs_llm_tiebreak:
+            return NoMentionJudgeVerdict(
+                reply=False,
+                confidence=0.0,
+                reason="heuristic_not_ambiguous",
+            )
+
+        prompt = build_no_mention_judge_prompt(
+            window,
+            channel_name=getattr(message.channel, "name", "unknown"),
+        )
+        raw_response = await self.generate_response(
+            prompt,
+            guild_id=getattr(message.guild, "id", None),
+            allow_evil=False,
+        )
+        return parse_no_mention_judge_response(raw_response)
+
     async def _continue_after_processing_ack(
         self,
         *,
@@ -3596,6 +3884,7 @@ You can explain these commands to the user if asked:
         replied_to_bot = self._is_reply_to_bot(message)
         primary_mode = await get_server_mode(message.guild.id)
         guild_config = await get_guild_config(message.guild.id)
+        user_privacy = await get_personal_memory_privacy(message.guild.id, message.author.id)
         normalized_message_content = normalize_custom_emojis_for_llm(message.content or "")
         triggered_mode_keys = await self._get_triggered_modes_in_order(message.guild.id, message.content)
         active_mode_keys = await self._resolve_active_persona_modes(message.guild.id, primary_mode)
@@ -3617,26 +3906,107 @@ You can explain these commands to the user if asked:
         )
         self_reply_limit = max(1, int(guild_config.get("ai_self_reply_limit") or 3))
 
-        auto_key = (message.channel.id, message.author.id)
+        is_foreign_webhook = bool(
+            getattr(message, "webhook_id", None)
+            and not is_bot_owned_webhook(
+                message_id=message.id,
+                passport_store=self.bot_owned_messages,
+            )
+        )
         if mentioned or has_selected_trigger or replied_to_bot:
-            self.auto_channel_counters.pop(auto_key, None)
+            auto_channel_signal = self._get_auto_channel_signal(
+                channel_id=message.channel.id,
+                user_id=message.author.id,
+                guild_config=guild_config,
+                reset=True,
+            )
+        elif is_foreign_webhook:
+            auto_channel_signal = AutoChannelSignal()
+        else:
+            auto_channel_signal = self._get_auto_channel_signal(
+                channel_id=message.channel.id,
+                user_id=message.author.id,
+                guild_config=guild_config,
+            )
+        signals = build_reply_trigger_signals(
+            mentioned=mentioned,
+            replied_to_bot=replied_to_bot,
+            has_selected_trigger=has_selected_trigger,
+            auto_channel_signal=auto_channel_signal,
+            is_foreign_webhook=is_foreign_webhook,
+        )
 
         # Determine if we should respond
-        should_respond = mentioned or has_selected_trigger or replied_to_bot
+        should_respond = signals.explicit_trigger
+        if (
+            not should_respond
+            and signals.passive_candidate
+            and not signals.is_foreign_webhook
+            and not bool(user_privacy.get("passive_reply_visibility_opt_out"))
+        ):
+            passive_window = context.get_recent_messages(limit=5)
+            passive_window.append(
+                {
+                    "message_id": message.id,
+                    "user_id": message.author.id,
+                    "username": message.author.display_name,
+                    "content": normalized_message_content,
+                    "reply_to_username": None,
+                    "timestamp": datetime.now(),
+                    "media": media_refs,
+                    "is_bot_owned": False,
+                    "owner_kind": None,
+                    "persona_mode": None,
+                }
+            )
+            heuristic_score = score_no_mention_candidate(passive_window)
+            if not heuristic_score.reject_immediately:
+                passive_allowed = True
+                if whitelist_channel_ids and message.channel.id not in whitelist_channel_ids:
+                    passive_allowed = False
+                if passive_allowed:
+                    reply_chain_depth = await self._bot_reply_chain_depth(message)
+                    if self_reply_limit_reached(
+                        SelfReplyChainState(depth=reply_chain_depth, last_was_self=reply_chain_depth > 0),
+                        self_reply_limit,
+                    ):
+                        passive_allowed = False
+                if passive_allowed and reply_cooldown_seconds > 0:
+                    on_cooldown, _remaining = check_reply_cooldown(
+                        self.reply_cooldowns,
+                        cooldown_type=reply_cooldown_type,
+                        cooldown_seconds=reply_cooldown_seconds,
+                        guild_id=message.guild.id,
+                        channel_id=message.channel.id,
+                        user_id=message.author.id,
+                        member=message.author if isinstance(message.author, discord.Member) else None,
+                    )
+                    if on_cooldown:
+                        passive_allowed = False
+                if passive_allowed and heuristic_score.needs_llm_tiebreak:
+                    verdict = await self._judge_no_mention_candidate(
+                        message=message,
+                        window=passive_window,
+                        heuristic_score=heuristic_score,
+                    )
+                    should_respond = verdict.reply
         if (
             should_respond
             and whitelist_channel_ids
             and message.channel.id not in whitelist_channel_ids
-            and not mentioned
-            and not replied_to_bot
-            and not has_selected_trigger
+            and not signals.mentioned
+            and not signals.replied_to_bot
+            and not signals.has_selected_trigger
         ):
             should_respond = False
-        if should_respond and not mentioned and not has_selected_trigger and not replied_to_bot:
+        if should_respond and not signals.mentioned and not signals.has_selected_trigger and not signals.replied_to_bot:
             reply_chain_depth = await self._bot_reply_chain_depth(message)
-            if reply_chain_depth >= self_reply_limit:
+            if self_reply_limit_reached(
+                SelfReplyChainState(depth=reply_chain_depth, last_was_self=reply_chain_depth > 0),
+                self_reply_limit,
+            ):
                 should_respond = False
-        if should_respond and reply_cooldown_seconds > 0 and not mentioned and not replied_to_bot and not has_selected_trigger:
+        if should_respond and reply_cooldown_seconds > 0 and not signals.mentioned and not signals.replied_to_bot and not signals.has_selected_trigger:
             on_cooldown, _remaining = check_reply_cooldown(
                 self.reply_cooldowns,
                 cooldown_type=reply_cooldown_type,
@@ -3663,34 +4033,8 @@ You can explain these commands to the user if asked:
             )
             return
 
-        # Fast-path starboard setup requests for admins.
-        if await self._maybe_handle_starboard_setup_request(message):
-            _, reply_to_username = self._resolve_reply_to(message)
-            context.add_message(
-                message.id,
-                message.author.id,
-                message.author.display_name,
-                normalized_message_content,
-                reply_to_username=reply_to_username,
-                media=media_refs,
-            )
-            return
-
-        # Fast-path channel/category requests for agentic admins (bypass model refusals)
-        if await self._maybe_handle_channel_request(message):
-            _, reply_to_username = self._resolve_reply_to(message)
-            context.add_message(
-                message.id,
-                message.author.id,
-                message.author.display_name,
-                normalized_message_content,
-                reply_to_username=reply_to_username,
-                media=media_refs,
-            )
-            return
-
-        # Fast-path role requests for agentic admins (bypass model refusals)
-        if await self._maybe_handle_role_request(message):
+        # Unified natural-language admin/config requests.
+        if await self._maybe_handle_admin_nl_request(message):
             _, reply_to_username = self._resolve_reply_to(message)
             context.add_message(
                 message.id,
@@ -3751,23 +4095,42 @@ You can explain these commands to the user if asked:
             else:
                 content_for_prompt = image_context
 
-        # Always add message to context
         _, reply_to_username = self._resolve_reply_to(message)
-        context.add_message(
-            message.id,
-            message.author.id,
-            message.author.display_name,
-            normalize_custom_emojis_for_llm(content_for_prompt),
-            reply_to_username=reply_to_username,
-            media=media_refs,
-        )
+        queue_explicit_turn = signals.explicit_trigger
+        if not queue_explicit_turn:
+            context.add_message(
+                message.id,
+                message.author.id,
+                message.author.display_name,
+                normalize_custom_emojis_for_llm(content_for_prompt),
+                reply_to_username=reply_to_username,
+                media=media_refs,
+            )
 
         # Let other cogs handle mention-only messages without images
         if self._is_mention_only(message) and not image_descriptions and not video_descriptions:
+            if queue_explicit_turn:
+                context.add_message(
+                    message.id,
+                    message.author.id,
+                    message.author.display_name,
+                    normalize_custom_emojis_for_llm(content_for_prompt),
+                    reply_to_username=reply_to_username,
+                    media=media_refs,
+                )
             return
 
         # Rate limit AI responses per user
         if not await ai_limiter.acquire(message.author.id):
+            if queue_explicit_turn:
+                context.add_message(
+                    message.id,
+                    message.author.id,
+                    message.author.display_name,
+                    normalize_custom_emojis_for_llm(content_for_prompt),
+                    reply_to_username=reply_to_username,
+                    media=media_refs,
+                )
             retry_after = ai_limiter.get_retry_after(message.author.id)
             await message.reply(
                 get_rate_limit_message(mode, retry_after),
@@ -3779,6 +4142,24 @@ You can explain these commands to the user if asked:
         reply_context = await self._get_reply_context(message)
         if reply_context:
             content_for_prompt = f"{reply_context}\n{content_for_prompt}"
+
+        if queue_explicit_turn:
+            await self._queue_same_user_turn(
+                message=message,
+                context=context,
+                guild_config=dict(guild_config),
+                persona_jobs=persona_jobs,
+                content_for_prompt=content_for_prompt,
+                refresh_conversation=mentioned or has_selected_trigger,
+                remaining_messages=self_reply_limit,
+                apply_reply_cooldown_update=True,
+                reply_cooldown_seconds=reply_cooldown_seconds,
+                reply_cooldown_type=reply_cooldown_type,
+                track_stats=True,
+                media_refs=media_refs,
+                reply_to_username=reply_to_username,
+            )
+            return
 
         context_snapshot = context.get_context(
             min_message_id=self.context_reset_markers.get(message.channel.id)
@@ -3810,10 +4191,7 @@ You can explain these commands to the user if asked:
             await self.persona_queue.enqueue(message.channel.id, queued_job)
 
         if persona_jobs[1:]:
-            self.persona_queue.schedule_drain(
-                message.channel.id,
-                self._run_queued_persona_job,
-            )
+            self._schedule_persona_queue_drain(message.channel.id)
 
 
 async def setup(bot: commands.Bot):
