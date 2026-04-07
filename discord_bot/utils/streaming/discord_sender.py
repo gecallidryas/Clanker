@@ -2,7 +2,7 @@ from __future__ import annotations
 
 import asyncio
 import time
-from typing import Any, Optional
+from typing import Any, Awaitable, Callable, Optional
 
 from utils.rate_limiter import StreamSendBudget
 
@@ -18,17 +18,20 @@ class DiscordReplySession:
         send_policy: Optional[DiscordSendPolicy] = None,
         budget: Optional[StreamSendBudget] = None,
         webhook_context: Optional[Any] = None,
+        on_visible_output: Optional[Callable[[], Awaitable[None] | None]] = None,
     ) -> None:
         self.source_message = source_message
         self.send_policy = send_policy or DiscordSendPolicy()
         self.budget = budget or StreamSendBudget()
         self.webhook_context = webhook_context
+        self.on_visible_output = on_visible_output
         self.first_message = None
         self.last_message = None
         self.visible_text_parts: list[str] = []
         self._last_send_at: Optional[float] = None
         self._truncation_notice_sent = False
         self._webhook_failed = False
+        self._visible_output_notified = False
 
     @property
     def has_visible_output(self) -> bool:
@@ -53,6 +56,7 @@ class DiscordReplySession:
             message = await self._send_chunk(chunk)
             self.last_message = message
             self.visible_text_parts.append(chunk)
+            await self._notify_visible_output()
             self.budget.record_send(len(chunk))
             self._last_send_at = time.monotonic()
 
@@ -81,6 +85,15 @@ class DiscordReplySession:
             return
         self.last_message = await self._send_chunk(self.send_policy.truncation_notice)
         self.visible_text_parts.append(self.send_policy.truncation_notice)
+        await self._notify_visible_output()
+
+    async def _notify_visible_output(self) -> None:
+        if self._visible_output_notified or self.on_visible_output is None:
+            return
+        self._visible_output_notified = True
+        result = self.on_visible_output()
+        if asyncio.iscoroutine(result):
+            await result
 
     async def _send_chunk(self, chunk: str):
         if self.webhook_context is not None and not self._webhook_failed:
