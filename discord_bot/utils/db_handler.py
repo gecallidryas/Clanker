@@ -77,6 +77,8 @@ EXPRESSION_SCOPE_APPLICATION = "application"
 EXPRESSION_KIND_EMOJI = "emoji"
 EXPRESSION_KIND_STICKER = "sticker"
 EXPRESSION_PRUNE_RETENTION_DAYS = 7
+GUILD_AVATAR_UPDATE_WINDOW_MINUTES = 5
+GUILD_AVATAR_MAX_UPDATES_PER_WINDOW = 5
 
 
 PERSONAL_MEMORY_CONFIRMED_STATUSES = ("confirmed", "admin_override")
@@ -4269,7 +4271,7 @@ async def set_guild_avatar_path(guild_id: int, path: Optional[str]) -> None:
 async def can_update_guild_avatar(guild_id: int) -> tuple[bool, str]:
     """Return (can_update, reason). reason is 'hourly' when blocked (5-minute window)."""
     now = _utcnow()
-    window = timedelta(minutes=5)
+    window = timedelta(minutes=GUILD_AVATAR_UPDATE_WINDOW_MINUTES)
 
     async with guild_db(guild_id) as db:
         db.row_factory = aiosqlite.Row
@@ -4292,7 +4294,7 @@ async def can_update_guild_avatar(guild_id: int) -> tuple[bool, str]:
                     (hourly_count, hourly_reset.isoformat(), guild_id),
                 )
                 await db.commit()
-            if hourly_count >= 2:
+            if hourly_count >= GUILD_AVATAR_MAX_UPDATES_PER_WINDOW:
                 return False, "hourly"
             return True, "ok"
 
@@ -4308,7 +4310,7 @@ async def can_update_guild_avatar(guild_id: int) -> tuple[bool, str]:
 async def record_guild_avatar_update(guild_id: int) -> None:
     """Record a successful avatar update and increment the hourly count."""
     now = _utcnow()
-    window = timedelta(minutes=5)
+    window = timedelta(minutes=GUILD_AVATAR_UPDATE_WINDOW_MINUTES)
 
     async with guild_db(guild_id) as db:
         db.row_factory = aiosqlite.Row

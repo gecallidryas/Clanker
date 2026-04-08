@@ -6,6 +6,7 @@ from typing import Optional
 
 import discord
 
+from utils.discord_http import describe_http_error
 from utils.db_handler import DATA_DIR
 from utils.logger import get_logger
 
@@ -73,8 +74,8 @@ async def set_member_profile(
             return False, "unsupported"
         except discord.Forbidden:
             return False, "forbidden"
-        except discord.HTTPException:
-            return False, "http"
+        except discord.HTTPException as exc:
+            return False, describe_http_error(exc)
         return True, "ok"
 
     user = _get_client_user(bot)
@@ -96,8 +97,8 @@ async def set_member_profile(
         return False, "unsupported"
     except discord.Forbidden:
         return False, "forbidden"
-    except discord.HTTPException:
-        return False, "http"
+    except discord.HTTPException as exc:
+        return False, describe_http_error(exc)
     return True, "ok"
 
 
@@ -114,8 +115,8 @@ async def set_member_nickname(
         await member.edit(nick=nickname)
     except discord.Forbidden:
         return False, "forbidden"
-    except discord.HTTPException:
-        return False, "http"
+    except discord.HTTPException as exc:
+        return False, describe_http_error(exc)
     return True, "ok"
 
 

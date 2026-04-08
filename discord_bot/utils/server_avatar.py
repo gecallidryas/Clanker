@@ -6,6 +6,7 @@ from typing import Optional
 
 import discord
 
+from utils.discord_http import describe_http_error
 from utils.db_handler import (
     DATA_DIR,
     get_guild_avatar_path,
@@ -107,8 +108,8 @@ async def set_server_avatar(
         return False, "unsupported"
     except discord.Forbidden:
         return False, "forbidden"
-    except discord.HTTPException:
-        return False, "http"
+    except discord.HTTPException as exc:
+        return False, describe_http_error(exc)
 
     await record_guild_avatar_update(guild_id)
     return True, "ok"
@@ -143,8 +144,8 @@ async def clear_server_avatar(
         return False, "unsupported"
     except discord.Forbidden:
         return False, "forbidden"
-    except discord.HTTPException:
-        return False, "http"
+    except discord.HTTPException as exc:
+        return False, describe_http_error(exc)
 
     await record_guild_avatar_update(guild_id)
     return True, "ok"

@@ -26,6 +26,8 @@ from utils.db_handler import (
     get_admin_personal_memory_index,
     set_guild_avatar_path,
     AFFECTION_TRACKED_MODES,
+    GUILD_AVATAR_MAX_UPDATES_PER_WINDOW,
+    GUILD_AVATAR_UPDATE_WINDOW_MINUTES,
 )
 from modes import resolve_mode_key
 from utils.logger import get_logger
@@ -77,12 +79,16 @@ class Admin(commands.Cog):
     @staticmethod
     def _avatar_error(reason: str) -> str:
         if reason == "hourly":
-            return "Avatar updates are limited to 2 per 5 minutes. Try again later."
+            return (
+                "Avatar updates are limited to "
+                f"{GUILD_AVATAR_MAX_UPDATES_PER_WINDOW} per {GUILD_AVATAR_UPDATE_WINDOW_MINUTES} minutes. "
+                "Try again later."
+            )
         if reason == "size":
             return "Avatar files must be 500 KB or smaller."
         if reason == "forbidden":
             return "Missing permissions to update the server avatar."
-        if reason == "http":
+        if reason.startswith("http"):
             return "Discord rejected the avatar update. Try again later."
         if reason == "write":
             return "Failed to save the custom avatar."
