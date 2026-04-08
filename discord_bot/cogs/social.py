@@ -274,7 +274,7 @@ class Social(commands.Cog):
         if destination == "specific_channel":
             channel_id = welcome_config.get("welcome_image_channel_id")
         else:
-            channel_id = welcome_config.get("welcome_channel_id")
+            channel_id = welcome_config.get("welcome_channel_id") or welcome_config.get("welcome_image_channel_id")
         if not channel_id:
             return None
         channel = member.guild.get_channel(channel_id)

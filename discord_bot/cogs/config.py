@@ -2015,6 +2015,7 @@ class Config(commands.Cog):
 
     async def _set_welcome_image_channel(self, guild_id: int, user_id: int, channel_id: int) -> str:
         await set_welcome_image_channel_id(guild_id, channel_id)
+        await set_welcome_image_destination(guild_id, "specific_channel")
         await add_guild_config_audit(
             guild_id,
             user_id,
@@ -2022,8 +2023,12 @@ class Config(commands.Cog):
             target_type="channel",
             target_id=str(channel_id),
             summary="Welcome image channel updated",
+            detail={
+                "welcome_image_channel_id": channel_id,
+                "welcome_image_destination": "specific_channel",
+            },
         )
-        return f"Welcome image channel set to <#{channel_id}>."
+        return f"Welcome image channel set to <#{channel_id}> and destination switched to the specific channel."
 
     async def _send_welcome_image_test(self, interaction: discord.Interaction) -> None:
         config = await get_welcome_config(interaction.guild.id)
@@ -2055,9 +2060,12 @@ class Config(commands.Cog):
                 return
             target = interaction.guild.get_channel(channel_id)
         else:
-            channel_id = config.get("welcome_channel_id")
+            channel_id = config.get("welcome_channel_id") or config.get("welcome_image_channel_id")
             if not channel_id:
-                await interaction.response.send_message("Set a welcome channel first.", ephemeral=True)
+                await interaction.response.send_message(
+                    "Set a welcome channel or welcome image channel first.",
+                    ephemeral=True,
+                )
                 return
             target = interaction.guild.get_channel(channel_id)
 

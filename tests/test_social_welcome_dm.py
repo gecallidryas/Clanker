@@ -218,6 +218,42 @@ class SocialWelcomeDmTests(unittest.IsolatedAsyncioTestCase):
         _, image_kwargs = image_channel.send.await_args
         self.assertEqual(image_kwargs["file"].filename, "catmunch.png")
 
+    async def test_on_member_join_routes_welcome_image_to_image_channel_when_welcome_channel_is_missing(self):
+        cog = Social(_FakeBot())
+        image_channel = _FakeChannel()
+        member = _FakeMember(guild=_FakeGuild(channels={777: image_channel}))
+        payload = WelcomeImagePayload(data=b"png-bytes", filename="catmunch.png", content_type="image/png")
+
+        with patch("discord_bot.cogs.social.get_server_mode", AsyncMock(return_value="mode_default")), patch(
+            "discord_bot.cogs.social.get_autorole_config",
+            AsyncMock(return_value={"autorole_enabled": 0, "autorole_id": None}),
+        ), patch(
+            "discord_bot.cogs.social.get_welcome_config",
+            AsyncMock(
+                return_value={
+                    "welcome_enabled": 0,
+                    "welcome_channel_id": None,
+                    "welcome_message_template": None,
+                    "welcome_image_enabled": True,
+                    "welcome_image_template": "catmunch",
+                    "welcome_image_destination": "welcome_channel",
+                    "welcome_image_channel_id": 777,
+                }
+            ),
+        ), patch(
+            "discord_bot.cogs.social.get_dm_welcome_enabled",
+            AsyncMock(return_value=False),
+        ), patch(
+            "discord_bot.cogs.social.render_welcome_image",
+            return_value=payload,
+        ) as render_image:
+            await cog.on_member_join(member)
+
+        render_image.assert_called_once()
+        image_channel.send.assert_awaited_once()
+        _, image_kwargs = image_channel.send.await_args
+        self.assertEqual(image_kwargs["file"].filename, "catmunch.png")
+
     async def test_on_member_join_routes_welcome_image_to_dm_even_when_dm_text_is_disabled(self):
         cog = Social(_FakeBot())
         member = _FakeMember()

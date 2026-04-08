@@ -173,6 +173,25 @@ class WelcomeImageConfigTests(unittest.IsolatedAsyncioTestCase):
         self.assertEqual(send_kwargs["file"].filename, "catmunch.png")
         interaction.response.send_message.assert_awaited_once_with("Sent a welcome image preview.", ephemeral=True)
 
+    async def test_set_welcome_image_channel_switches_destination_to_specific_channel(self):
+        with patch("discord_bot.cogs.config.get_encryption", return_value=SimpleNamespace()), patch(
+            "discord_bot.cogs.config.set_welcome_image_channel_id",
+            AsyncMock(),
+        ) as set_channel, patch(
+            "discord_bot.cogs.config.set_welcome_image_destination",
+            AsyncMock(),
+        ) as set_destination, patch(
+            "discord_bot.cogs.config.add_guild_config_audit",
+            AsyncMock(),
+        ) as add_audit:
+            cog = Config(_FakeBot())
+            message = await cog._set_welcome_image_channel(123, 111, 777)
+
+        set_channel.assert_awaited_once_with(123, 777)
+        set_destination.assert_awaited_once_with(123, "specific_channel")
+        add_audit.assert_awaited_once()
+        self.assertIn("specific channel", message.lower())
+
     async def test_send_welcome_image_test_handles_render_errors(self):
         image_channel = _FakeChannel()
         interaction = _FakeInteraction(guild=_FakeGuild(channels={777: image_channel}))
@@ -200,6 +219,35 @@ class WelcomeImageConfigTests(unittest.IsolatedAsyncioTestCase):
             "Failed to generate welcome image preview.",
             ephemeral=True,
         )
+
+    async def test_send_welcome_image_test_falls_back_to_image_channel_when_welcome_channel_is_missing(self):
+        image_channel = _FakeChannel()
+        interaction = _FakeInteraction(guild=_FakeGuild(channels={777: image_channel}))
+        payload = WelcomeImagePayload(data=b"gif-bytes", filename="pettinghand.gif", content_type="image/gif")
+
+        with patch("discord_bot.cogs.config.get_encryption", return_value=SimpleNamespace()), patch(
+            "discord_bot.cogs.config.get_welcome_config",
+            AsyncMock(
+                return_value={
+                    "welcome_image_enabled": True,
+                    "welcome_image_template": "pettinghand",
+                    "welcome_image_destination": "welcome_channel",
+                    "welcome_image_channel_id": 777,
+                    "welcome_channel_id": None,
+                }
+            ),
+        ), patch(
+            "discord_bot.cogs.config.render_welcome_image",
+            return_value=payload,
+        ) as render_image:
+            cog = Config(_FakeBot())
+            await cog._send_welcome_image_test(interaction)
+
+        render_image.assert_called_once()
+        image_channel.send.assert_awaited_once()
+        _, send_kwargs = image_channel.send.await_args
+        self.assertEqual(send_kwargs["file"].filename, "pettinghand.gif")
+        interaction.response.send_message.assert_awaited_once_with("Sent a welcome image preview.", ephemeral=True)
 
 
 if __name__ == "__main__":
