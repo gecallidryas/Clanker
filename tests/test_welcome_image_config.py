@@ -64,11 +64,68 @@ class _FakeInteraction:
     def __init__(self, guild=None, user=None):
         self.guild = guild or _FakeGuild()
         self.user = user or _FakeUser()
-        self.response = SimpleNamespace(send_message=AsyncMock(), is_done=lambda: False)
+        self.response = SimpleNamespace(
+            send_message=AsyncMock(),
+            send_modal=AsyncMock(),
+            is_done=lambda: False,
+        )
         self.followup = SimpleNamespace(send=AsyncMock())
 
 
 class WelcomeImageConfigTests(unittest.IsolatedAsyncioTestCase):
+    async def test_handle_welcome_action_image_template_uses_dropdown_picker(self):
+        interaction = _FakeInteraction()
+
+        with patch("discord_bot.cogs.config.get_encryption", return_value=SimpleNamespace()), patch.object(
+            Config,
+            "_ensure_welcome_auth",
+            AsyncMock(return_value=True),
+        ), patch(
+            "discord_bot.cogs.config.get_welcome_config",
+            AsyncMock(return_value={"welcome_image_template": "catmunch"}),
+        ), patch.object(
+            Config,
+            "_send_panel_response",
+            AsyncMock(),
+        ) as send_panel:
+            cog = Config(_FakeBot())
+            await cog._handle_welcome_action(interaction, "edit_image_template")
+
+        interaction.response.send_modal.assert_not_awaited()
+        send_panel.assert_awaited_once()
+        _, kwargs = send_panel.await_args
+        self.assertEqual(kwargs["content"], "Choose the welcome image template.")
+        select = kwargs["view"].children[0]
+        self.assertEqual([option.value for option in select.options], ["pettinghand", "catmunch"])
+
+    async def test_handle_welcome_action_image_destination_uses_dropdown_picker(self):
+        interaction = _FakeInteraction()
+
+        with patch("discord_bot.cogs.config.get_encryption", return_value=SimpleNamespace()), patch.object(
+            Config,
+            "_ensure_welcome_auth",
+            AsyncMock(return_value=True),
+        ), patch(
+            "discord_bot.cogs.config.get_welcome_config",
+            AsyncMock(return_value={"welcome_image_destination": "specific_channel"}),
+        ), patch.object(
+            Config,
+            "_send_panel_response",
+            AsyncMock(),
+        ) as send_panel:
+            cog = Config(_FakeBot())
+            await cog._handle_welcome_action(interaction, "edit_image_destination")
+
+        interaction.response.send_modal.assert_not_awaited()
+        send_panel.assert_awaited_once()
+        _, kwargs = send_panel.await_args
+        self.assertEqual(kwargs["content"], "Choose where the welcome image is sent.")
+        select = kwargs["view"].children[0]
+        self.assertEqual(
+            [option.value for option in select.options],
+            ["welcome_channel", "specific_channel", "dm"],
+        )
+
     async def test_save_welcome_image_template_rejects_unknown_template(self):
         interaction = _FakeInteraction()
 
@@ -110,6 +167,7 @@ class WelcomeImageConfigTests(unittest.IsolatedAsyncioTestCase):
             await cog._send_welcome_image_test(interaction)
 
         render_image.assert_called_once()
+        self.assertEqual(render_image.call_args.kwargs["template"], "catmunch")
         image_channel.send.assert_awaited_once()
         _, send_kwargs = image_channel.send.await_args
         self.assertEqual(send_kwargs["file"].filename, "catmunch.png")

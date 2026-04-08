@@ -233,6 +233,7 @@ class PanelViewTests(unittest.IsolatedAsyncioTestCase):
         cog = self._make_config_cog()
         interaction = FakeInteraction(user_id=11)
         config = {
+            "normal_text_provider": "openrouter",
             "gemini_model": "gemini-2.5-flash-lite",
             "gemini_translate_model": "gemini-2.5-flash",
             "gemini_summarize_model": "gemini-2.5-flash-lite",
@@ -259,6 +260,30 @@ class PanelViewTests(unittest.IsolatedAsyncioTestCase):
             "nousresearch/hermes-3-llama-3.1-405b:free,mistralai/mistral-small-3.1-24b-instruct:free",
         )
         self.assertIn("hermes", modal._inputs["openrouter_fallback_models"].placeholder)
+
+    async def test_provider_panel_text_provider_action_uses_dropdown(self):
+        cog = self._make_config_cog()
+        interaction = FakeInteraction(user_id=11)
+
+        with patch(
+            "discord_bot.cogs.config.get_guild_config",
+            AsyncMock(return_value={"normal_text_provider": "openrouter"}),
+        ), patch.object(
+            Config,
+            "_send_panel_response",
+            AsyncMock(),
+        ) as send_panel:
+            await cog._handle_provider_action(interaction, "edit_text_provider")
+
+        self.assertIsNone(interaction.response.modal)
+        send_panel.assert_awaited_once()
+        _, kwargs = send_panel.await_args
+        self.assertEqual(kwargs["content"], "Choose the normal text provider.")
+        select = kwargs["view"].children[0]
+        self.assertEqual(
+            [option.value for option in select.options],
+            ["gemini", "openrouter", "custom_endpoint"],
+        )
 
     async def test_env_upload_preserves_none_as_explicit_openrouter_fallback_disable(self):
         cog = self._make_config_cog()

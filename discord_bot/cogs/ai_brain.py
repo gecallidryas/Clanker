@@ -39,6 +39,7 @@ from utils.db_handler import (
     get_affection_by_mode,
     get_evil_mode,
     get_strict_alias,
+    get_aliases,
     get_gender_roles,
     get_user,
     get_last_wellbeing_date,
@@ -440,14 +441,16 @@ def _build_admin_nl_confirmation_prompt(result) -> str:
 
 async def _get_agentic_permission_level(member: Optional[discord.Member]) -> int:
     """Return the highest agentic permission level for a member (0-2)."""
-    if not member or not member.guild:
+    guild = getattr(member, "guild", None)
+    if not member or not guild:
         return 0
-    if member.guild.owner_id == member.id:
+    if guild.owner_id == member.id:
         return 2
-    if member.guild_permissions.administrator:
+    member_permissions = getattr(member, "guild_permissions", None)
+    if getattr(member_permissions, "administrator", False):
         return 2
-    staff_roles = await get_staff_roles(member.guild.id)
-    user_role_ids = {role.id for role in member.roles}
+    staff_roles = await get_staff_roles(guild.id)
+    user_role_ids = {role.id for role in getattr(member, "roles", [])}
     level = 0
     for role_id, permission_level in staff_roles:
         if role_id in user_role_ids:
@@ -1774,6 +1777,26 @@ class AIBrain(commands.Cog):
         payload = reasoning_text if settings.level == "raw_debug" and reasoning_text else raw_text[:1500]
         await thought_logger.log_summary(" | ".join(summary_lines), payload)
 
+    async def _get_normal_text_provider(self, guild_id: Optional[int]) -> str:
+        if not guild_id:
+            return "gemini"
+        config = await get_guild_config(guild_id)
+        provider = (config.get("normal_text_provider") or "gemini").strip().lower()
+        if provider not in {"gemini", "openrouter", "custom_endpoint"}:
+            return "gemini"
+        return provider
+
+    async def _get_text_provider_order(self, guild_id: Optional[int], *, evil_mode: bool) -> list[str]:
+        if evil_mode:
+            return ["openrouter", "custom_endpoint", "gemini"]
+        selected = await self._get_normal_text_provider(guild_id)
+        fallback_order = {
+            "gemini": ["gemini", "custom_endpoint", "openrouter"],
+            "openrouter": ["openrouter", "custom_endpoint", "gemini"],
+            "custom_endpoint": ["custom_endpoint", "gemini", "openrouter"],
+        }
+        return fallback_order.get(selected, ["gemini", "custom_endpoint", "openrouter"])
+
     async def generate_response_stream(
         self,
         prompt: str,
@@ -1791,9 +1814,32 @@ class AIBrain(commands.Cog):
             return
         evil_mode = allow_evil and await get_evil_mode(guild_id) if guild_id else False
         try:
-            if evil_mode:
+            providers = await self._get_text_provider_order(guild_id, evil_mode=evil_mode)
+            for provider in providers:
                 try:
-                    async for event in stream_guild_openrouter_text(
+                    if provider == "openrouter":
+                        async for event in stream_guild_openrouter_text(
+                            guild_id,
+                            prompt,
+                            messages=messages,
+                            system_instruction=system_instruction,
+                            tools=tools,
+                        ):
+                            yield event
+                        return
+                    if provider == "custom_endpoint":
+                        async for event in stream_guild_custom_text(
+                            guild_id,
+                            prompt,
+                            messages=messages,
+                            system_instruction=system_instruction,
+                            tools=tools,
+                        ):
+                            yield event
+                        return
+                    if tools:
+                        raise RuntimeError("Native streaming tool events are unavailable for the selected provider.")
+                    async for event in stream_guild_gemini_text(
                         guild_id,
                         prompt,
                         messages=messages,
@@ -1802,46 +1848,20 @@ class AIBrain(commands.Cog):
                     ):
                         yield event
                     return
-                except GuildConfigError as exc:
-                    async for event in stream_events_from_text(
-                        "Evil mode is enabled, but OpenRouter isn't configured for this server. "
-                        "Ask an admin to upload keys with /config env upload."
-                    ):
-                        yield event
-                    return
+                except GuildConfigError:
+                    if evil_mode and provider == "openrouter":
+                        async for event in stream_events_from_text(
+                            "Evil mode is enabled, but OpenRouter isn't configured for this server. "
+                            "Ask an admin to upload keys with /config env upload."
+                        ):
+                            yield event
+                        return
+                    continue
                 except UserInputError:
                     raise
                 except Exception as exc:
-                    logger.warning("OpenRouter stream failed, falling back to Gemini/custom: %s", exc)
-
-            try:
-                async for event in stream_guild_custom_text(
-                    guild_id,
-                    prompt,
-                    messages=messages,
-                    system_instruction=system_instruction,
-                    tools=tools,
-                ):
-                    yield event
-                return
-            except GuildConfigError:
-                pass
-            except UserInputError:
-                raise
-            except Exception as exc:
-                logger.warning("Custom endpoint stream failed, falling back to Gemini: %s", exc)
-
-            if tools:
-                raise RuntimeError("Native streaming tool events are unavailable for the selected provider.")
-
-            async for event in stream_guild_gemini_text(
-                guild_id,
-                prompt,
-                messages=messages,
-                system_instruction=system_instruction,
-                tools=tools,
-            ):
-                yield event
+                    logger.warning("%s stream failed, falling back: %s", provider, exc)
+            raise GuildConfigError("No configured text providers are available for this server.")
         except UserInputError:
             async for event in stream_events_from_text("Sorry, I can't help with that request."):
                 yield event
@@ -3354,6 +3374,10 @@ class AIBrain(commands.Cog):
         guild_config = await get_guild_config(guild_id)
 
         personal_facts = await get_personal_memories(guild_id, user_id, limit=5)
+        current_user_aliases = [
+            alias for alias in await get_aliases(guild_id, user_id)
+            if alias and not alias.lower().startswith("strict:")
+        ]
         channel_summary = (
             await get_channel_recency_summary(guild_id, channel_id)
             if channel_id is not None
@@ -3363,6 +3387,7 @@ class AIBrain(commands.Cog):
 
         mentioned_ids = set(re.findall(r"<@!?(\d+)>", message))
         mentioned_user_lines: list[str] = []
+        mentioned_alias_lines: list[str] = []
         mentioned_fact_lines: list[str] = []
         for mentioned_id in mentioned_ids:
             uid = int(mentioned_id)
@@ -3371,6 +3396,12 @@ class AIBrain(commands.Cog):
             user_obj = self.bot.get_user(uid)
             name = user_obj.display_name if user_obj else f"User {uid}"
             mentioned_user_lines.append(f"{name} ({uid})")
+            aliases = [
+                alias for alias in await get_aliases(guild_id, uid)
+                if alias and not alias.lower().startswith("strict:")
+            ]
+            if aliases:
+                mentioned_alias_lines.append(f"{name} aliases: {', '.join(aliases[:10])}")
             other_facts = await get_mention_lookup_personal_memories(guild_id, uid, limit=3)
             for fact in other_facts:
                 mentioned_fact_lines.append(f"{name}: {fact}")
@@ -3492,16 +3523,18 @@ You can explain these commands to the user if asked:
 - !about / !ping: Bot status and bot info
 """.strip()
 
+        prompt_guild = getattr(member, "guild", None) or self.bot.get_guild(guild_id)
+
         expression_summary_lines: list[str] = []
         emoji_lines: list[str] = []
         sticker_lines: list[str] = []
-        if member and guild_id:
+        if prompt_guild and guild_id:
             (
                 expression_summary_lines,
                 emoji_lines,
                 sticker_lines,
             ) = await self._build_expression_prompt_context(
-                guild=member.guild,
+                guild=prompt_guild,
                 message_text=message,
                 mode=mode,
                 affection_points=affection_points,
@@ -3540,10 +3573,11 @@ You can explain these commands to the user if asked:
         if agentic_access != "none":
             user_id_note = f"[User ID: {user_id}. Use this as target_id when the user says 'me'.]"
 
-        admin_access = "yes" if member and (
-            member.guild.owner_id == member.id
-            or member.guild_permissions.administrator
-            or member.guild_permissions.manage_guild
+        member_permissions = getattr(member, "guild_permissions", None)
+        admin_access = "yes" if member and prompt_guild and (
+            getattr(prompt_guild, "owner_id", None) == member.id
+            or bool(getattr(member_permissions, "administrator", False))
+            or bool(getattr(member_permissions, "manage_guild", False))
         ) else "no"
         admin_note = f"[Admin config access: {admin_access}]"
         admin_instructions = ADMIN_ACTION_INSTRUCTIONS if admin_access == "yes" else ""
@@ -3562,6 +3596,10 @@ You can explain these commands to the user if asked:
             user_id_note,
             admin_note,
         ]
+        if mode == "mode_oneesan":
+            system_lines.append(
+                "[Oneesan brevity: Avoid rambling. Prefer warm, concise replies and only expand when the user asks for detail.]"
+            )
         section_system = section_from_lines(
             "SYSTEM / HUMANIZER RULES",
             system_lines,
@@ -3589,7 +3627,7 @@ You can explain these commands to the user if asked:
             "GUILD CONTEXT",
             [
                 f"Guild ID: {guild_id}",
-                f"Guild: {member.guild.name}" if member and member.guild else "",
+                f"Guild: {prompt_guild.name}" if prompt_guild else "",
             ],
         )
         if section_server:
@@ -3613,7 +3651,9 @@ You can explain these commands to the user if asked:
 
         users_in_convo_lines = [
             f"Current user: {member.display_name} ({user_id})" if member else f"Current user id: {user_id}",
+            f"Current user aliases: {', '.join(current_user_aliases[:10])}" if current_user_aliases else "",
             *[f"Mentioned: {entry}" for entry in mentioned_user_lines],
+            *mentioned_alias_lines,
         ]
         section_users = section_from_lines("USERS IN CONVERSATION", users_in_convo_lines)
         if section_users:
@@ -3690,9 +3730,26 @@ You can explain these commands to the user if asked:
             evil_mode = allow_evil and await get_evil_mode(guild_id)
             
         try:
-            if evil_mode:
+            providers = await self._get_text_provider_order(guild_id, evil_mode=evil_mode)
+            for provider in providers:
                 try:
-                    response_text, _ = await generate_guild_openrouter_text(
+                    if provider == "openrouter":
+                        response_text, _ = await generate_guild_openrouter_text(
+                            guild_id,
+                            prompt,
+                            messages=messages,
+                            system_instruction=system_instruction,
+                        )
+                        return response_text
+                    if provider == "custom_endpoint":
+                        response_text, _ = await generate_guild_custom_text(
+                            guild_id,
+                            prompt,
+                            messages=messages,
+                            system_instruction=system_instruction,
+                        )
+                        return response_text
+                    response_text, _ = await generate_guild_gemini_text(
                         guild_id,
                         prompt,
                         messages=messages,
@@ -3700,39 +3757,17 @@ You can explain these commands to the user if asked:
                     )
                     return response_text
                 except GuildConfigError as exc:
-                    return (
-                        "Evil mode is enabled, but OpenRouter isn't configured for this server. "
-                        "Ask an admin to upload keys with /config env upload."
-                    )
+                    if evil_mode and provider == "openrouter":
+                        return (
+                            "Evil mode is enabled, but OpenRouter isn't configured for this server. "
+                            "Ask an admin to upload keys with /config env upload."
+                        )
+                    continue
                 except UserInputError:
                     raise
                 except Exception as e:
-                    logger.warning("OpenRouter failed, falling back to Gemini: %s", e)
-            
-            # Custom endpoint (optional) before Gemini
-            try:
-                response_text, _ = await generate_guild_custom_text(
-                    guild_id,
-                    prompt,
-                    messages=messages,
-                    system_instruction=system_instruction,
-                )
-                return response_text
-            except GuildConfigError:
-                pass
-            except UserInputError:
-                raise
-            except Exception as exc:
-                logger.warning("Custom endpoint failed, falling back to Gemini: %s", exc)
-
-            # Default to Gemini (censored)
-            response_text, _ = await generate_guild_gemini_text(
-                guild_id,
-                prompt,
-                messages=messages,
-                system_instruction=system_instruction,
-            )
-            return response_text
+                    logger.warning("%s failed, falling back: %s", provider, e)
+            raise GuildConfigError("No configured text providers are available for this server.")
             
         except UserInputError:
             return "Sorry, I can't help with that request."

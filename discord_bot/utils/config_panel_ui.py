@@ -32,6 +32,14 @@ class ActionOption:
     description: str
 
 
+@dataclass(frozen=True)
+class SingleSelectOption:
+    label: str
+    value: str
+    description: str = ""
+    default: bool = False
+
+
 class _ActionSelect(discord.ui.Select):
     def __init__(self, parent: "ActionMenuView", options: Sequence[ActionOption]) -> None:
         self.parent_view = parent
@@ -435,3 +443,42 @@ class SingleRolePickerView(AdminPanelView):
         super().__init__(invoker_id=invoker_id, timeout=timeout)
         self.apply = apply_role
         self.add_item(_SingleRoleSelect(self, placeholder))
+
+
+class _SingleValueSelect(discord.ui.Select):
+    def __init__(self, parent: "SingleValuePickerView", placeholder: str) -> None:
+        self.parent_view = parent
+        super().__init__(
+            placeholder=placeholder,
+            min_values=1,
+            max_values=1,
+            options=[
+                discord.SelectOption(
+                    label=option.label[:100],
+                    value=option.value,
+                    description=option.description[:100] or None,
+                    default=option.default,
+                )
+                for option in parent.options
+            ],
+        )
+
+    async def callback(self, interaction: discord.Interaction) -> None:
+        message = await self.parent_view.apply(self.values[0])
+        await interaction.response.send_message(message, ephemeral=True)
+
+
+class SingleValuePickerView(AdminPanelView):
+    def __init__(
+        self,
+        *,
+        invoker_id: int,
+        placeholder: str,
+        options: Sequence[SingleSelectOption],
+        apply_value: Callable[[str], Awaitable[str]],
+        timeout: float = 300.0,
+    ) -> None:
+        super().__init__(invoker_id=invoker_id, timeout=timeout)
+        self.options = list(options)
+        self.apply = apply_value
+        self.add_item(_SingleValueSelect(self, placeholder))

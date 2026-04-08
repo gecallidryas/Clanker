@@ -75,10 +75,13 @@ from utils.config_panel_ui import (
     PaginatedListEditorView,
     SingleChannelPickerView,
     SingleRolePickerView,
+    SingleSelectOption,
+    SingleValuePickerView,
 )
 
 logger = get_logger(__name__)
 WELCOME_IMAGE_TEMPLATES = {"pettinghand", "catmunch"}
+NORMAL_TEXT_PROVIDER_OPTIONS = ("gemini", "openrouter", "custom_endpoint")
 
 GEMINI_MODEL_REFERENCE_TEXT = "Examples: gemini-2.5-flash-lite, gemini-2.5-flash"
 OPENROUTER_MODEL_REFERENCE_TEXT = "Examples: venice, hermes, mistral, deepseek"
@@ -101,6 +104,7 @@ ENV_TO_DB = {
     "GEMINI_SUMMARIZE_KEY_4": "gemini_summarize_key_4",
     "GEMINI_SUMMARIZE_KEY_5": "gemini_summarize_key_5",
     "GEMINI_KEY_TYPE": "gemini_key_type",
+    "NORMAL_TEXT_PROVIDER": "normal_text_provider",
     "GEMINI_PROFILE_KEY": "gemini_profile_key",
     "OPENROUTER_API_KEY": "openrouter_api_key",
     "OPENROUTER_API_KEY_2": "openrouter_api_key_2",
@@ -1177,6 +1181,8 @@ class Config(commands.Cog):
         embed.add_field(name="Gemini key", value=self._format_key(config.get("gemini_api_key")), inline=False)
         embed.add_field(name="OpenRouter key", value=self._format_key(config.get("openrouter_api_key")), inline=False)
         embed.add_field(name="Brave key", value=self._format_key(config.get("brave_api_key")), inline=False)
+        provider_label = self._summarize_normal_text_provider(config.get("normal_text_provider"))
+        embed.add_field(name="Normal text provider", value=provider_label, inline=False)
         embed.add_field(
             name="Models",
             value=(
@@ -1224,6 +1230,7 @@ class Config(commands.Cog):
             invoker_id=interaction.user.id,
             options=[
                 ActionOption("Edit Secrets", "edit_secrets", "Gemini, OpenRouter, Brave, Replicate, and Tenor"),
+                ActionOption("Edit Normal Text Provider", "edit_text_provider", "Choose Gemini, OpenRouter, or custom endpoint for normal replies"),
                 ActionOption("Edit Models", "edit_models", "General, translate, summarize, and uncensored models"),
                 ActionOption("Edit Media Provider", "edit_media", "Image provider and model"),
                 ActionOption("Edit Custom Endpoint", "edit_custom_endpoint", "URL, model, capabilities, enabled, API key"),
@@ -1237,6 +1244,40 @@ class Config(commands.Cog):
             if not await self._ensure_action_auth(interaction, action=ConfigAction.SET_SECRET):
                 return
             await interaction.response.send_modal(self._build_provider_secret_modal())
+            return
+        if value == "edit_text_provider":
+            config = await get_guild_config(interaction.guild.id)
+            current_provider = (config.get("normal_text_provider") or "gemini").strip().lower()
+            view = SingleValuePickerView(
+                invoker_id=interaction.user.id,
+                placeholder="Select normal text provider",
+                options=[
+                    SingleSelectOption(
+                        label="Gemini",
+                        value="gemini",
+                        description="Use Gemini for normal text replies.",
+                        default=current_provider == "gemini",
+                    ),
+                    SingleSelectOption(
+                        label="OpenRouter",
+                        value="openrouter",
+                        description="Use OpenRouter for normal text replies.",
+                        default=current_provider == "openrouter",
+                    ),
+                    SingleSelectOption(
+                        label="Custom Endpoint",
+                        value="custom_endpoint",
+                        description="Use the configured custom endpoint first for normal text replies.",
+                        default=current_provider == "custom_endpoint",
+                    ),
+                ],
+                apply_value=lambda selected: self._set_normal_text_provider_value(
+                    interaction.guild.id,
+                    interaction.user.id,
+                    selected,
+                ),
+            )
+            await self._send_panel_response(interaction, content="Choose the normal text provider.", view=view)
             return
         if value == "edit_models":
             config = await get_guild_config(interaction.guild.id)
@@ -1365,6 +1406,30 @@ class Config(commands.Cog):
             detail={"updates": updates},
         )
         await interaction.response.send_message("Provider models updated.", ephemeral=True)
+
+    @staticmethod
+    def _summarize_normal_text_provider(value: Optional[str]) -> str:
+        cleaned = (value or "").strip().lower()
+        labels = {
+            "gemini": "Gemini",
+            "openrouter": "OpenRouter",
+            "custom_endpoint": "Custom endpoint",
+        }
+        return labels.get(cleaned, "Gemini")
+
+    async def _set_normal_text_provider_value(self, guild_id: int, user_id: int, provider: str) -> str:
+        cleaned = (provider or "").strip().lower()
+        if cleaned not in NORMAL_TEXT_PROVIDER_OPTIONS:
+            cleaned = "gemini"
+        await update_guild_config(guild_id, {"normal_text_provider": cleaned})
+        await add_guild_config_audit(
+            guild_id,
+            user_id,
+            "model_change",
+            summary="Normal text provider updated",
+            detail={"normal_text_provider": cleaned},
+        )
+        return "Normal text provider updated."
 
     def _build_media_provider_modal(self) -> CallbackFormModal:
         return CallbackFormModal(
@@ -1660,43 +1725,67 @@ class Config(commands.Cog):
             if not await self._ensure_welcome_auth(interaction):
                 return
             config = await get_welcome_config(interaction.guild.id)
-            modal = CallbackFormModal(
-                title="Welcome Image Template",
-                fields=[
-                    {
-                        "key": "template",
-                        "label": "Image template",
-                        "default": config.get("welcome_image_template"),
-                        "required": False,
-                        "style": discord.TextStyle.short,
-                        "placeholder": "pettinghand or catmunch",
-                        "max_length": 64,
-                    },
+            current_template = (config.get("welcome_image_template") or "pettinghand").strip().lower()
+            view = SingleValuePickerView(
+                invoker_id=interaction.user.id,
+                placeholder="Select welcome image template",
+                options=[
+                    SingleSelectOption(
+                        label="pettinghand",
+                        value="pettinghand",
+                        description="Send the pettinghand GIF welcome image.",
+                        default=current_template == "pettinghand",
+                    ),
+                    SingleSelectOption(
+                        label="catmunch",
+                        value="catmunch",
+                        description="Send the catmunch PNG welcome image.",
+                        default=current_template == "catmunch",
+                    ),
                 ],
-                on_submit_callback=lambda modal_interaction, values: self._save_welcome_image_template(modal_interaction, values),
+                apply_value=lambda selected: self._set_welcome_image_template_value(
+                    interaction.guild.id,
+                    interaction.user.id,
+                    selected,
+                ),
             )
-            await interaction.response.send_modal(modal)
+            await self._send_panel_response(interaction, content="Choose the welcome image template.", view=view)
             return
         if value == "edit_image_destination":
             if not await self._ensure_welcome_auth(interaction):
                 return
             config = await get_welcome_config(interaction.guild.id)
-            modal = CallbackFormModal(
-                title="Welcome Image Destination",
-                fields=[
-                    {
-                        "key": "destination",
-                        "label": "Destination",
-                        "default": config.get("welcome_image_destination"),
-                        "required": False,
-                        "style": discord.TextStyle.short,
-                        "placeholder": "welcome_channel, specific_channel, or dm",
-                        "max_length": 64,
-                    },
+            current_destination = (config.get("welcome_image_destination") or "welcome_channel").strip().lower()
+            view = SingleValuePickerView(
+                invoker_id=interaction.user.id,
+                placeholder="Select welcome image destination",
+                options=[
+                    SingleSelectOption(
+                        label="Welcome channel",
+                        value="welcome_channel",
+                        description="Send the image to the main welcome channel.",
+                        default=current_destination == "welcome_channel",
+                    ),
+                    SingleSelectOption(
+                        label="Specific channel",
+                        value="specific_channel",
+                        description="Send the image to the configured image channel.",
+                        default=current_destination == "specific_channel",
+                    ),
+                    SingleSelectOption(
+                        label="DM",
+                        value="dm",
+                        description="Send the image in a direct message.",
+                        default=current_destination == "dm",
+                    ),
                 ],
-                on_submit_callback=lambda modal_interaction, values: self._save_welcome_image_destination(modal_interaction, values),
+                apply_value=lambda selected: self._set_welcome_image_destination_value(
+                    interaction.guild.id,
+                    interaction.user.id,
+                    selected,
+                ),
             )
-            await interaction.response.send_modal(modal)
+            await self._send_panel_response(interaction, content="Choose where the welcome image is sent.", view=view)
             return
         if value == "set_image_channel":
             if not await self._ensure_welcome_auth(interaction):
@@ -1888,15 +1977,8 @@ class Config(commands.Cog):
                 ephemeral=True,
             )
             return
-        await set_welcome_image_template(interaction.guild.id, cleaned)
-        await add_guild_config_audit(
-            interaction.guild.id,
-            interaction.user.id,
-            "welcome_settings_save",
-            summary="Welcome image template updated",
-            detail={"welcome_image_template": cleaned},
-        )
-        await interaction.response.send_message("Welcome image template updated.", ephemeral=True)
+        message = await self._set_welcome_image_template_value(interaction.guild.id, interaction.user.id, cleaned)
+        await interaction.response.send_message(message, ephemeral=True)
 
     async def _save_welcome_image_destination(self, interaction: discord.Interaction, values: dict[str, str]) -> None:
         cleaned = self._normalize_welcome_text(values.get("destination")).lower()
@@ -1906,15 +1988,30 @@ class Config(commands.Cog):
                 ephemeral=True,
             )
             return
-        await set_welcome_image_destination(interaction.guild.id, cleaned)
+        message = await self._set_welcome_image_destination_value(interaction.guild.id, interaction.user.id, cleaned)
+        await interaction.response.send_message(message, ephemeral=True)
+
+    async def _set_welcome_image_template_value(self, guild_id: int, user_id: int, template: str) -> str:
+        await set_welcome_image_template(guild_id, template)
         await add_guild_config_audit(
-            interaction.guild.id,
-            interaction.user.id,
+            guild_id,
+            user_id,
+            "welcome_settings_save",
+            summary="Welcome image template updated",
+            detail={"welcome_image_template": template},
+        )
+        return "Welcome image template updated."
+
+    async def _set_welcome_image_destination_value(self, guild_id: int, user_id: int, destination: str) -> str:
+        await set_welcome_image_destination(guild_id, destination)
+        await add_guild_config_audit(
+            guild_id,
+            user_id,
             "welcome_settings_save",
             summary="Welcome image destination updated",
-            detail={"welcome_image_destination": cleaned},
+            detail={"welcome_image_destination": destination},
         )
-        await interaction.response.send_message("Welcome image destination updated.", ephemeral=True)
+        return "Welcome image destination updated."
 
     async def _set_welcome_image_channel(self, guild_id: int, user_id: int, channel_id: int) -> str:
         await set_welcome_image_channel_id(guild_id, channel_id)
@@ -2608,6 +2705,13 @@ class Config(commands.Cog):
             updates["gemini_key_type"] = key_type or None
             summary.append(f"GEMINI_KEY_TYPE={updates['gemini_key_type'] or 'CLEARED'}")
 
+        if "NORMAL_TEXT_PROVIDER" in parsed:
+            provider = (parsed["NORMAL_TEXT_PROVIDER"] or "").strip().lower()
+            if provider not in {*NORMAL_TEXT_PROVIDER_OPTIONS, ""}:
+                warnings.append("NORMAL_TEXT_PROVIDER should be gemini, openrouter, or custom_endpoint.")
+            updates["normal_text_provider"] = provider or None
+            summary.append(f"NORMAL_TEXT_PROVIDER={updates['normal_text_provider'] or 'CLEARED'}")
+
         if "OPENROUTER_MODEL" in parsed:
             model = parsed["OPENROUTER_MODEL"] or ""
             normalized = normalize_openrouter_model(model) or model
@@ -2718,6 +2822,19 @@ class Config(commands.Cog):
     async def toggle_manage(self, interaction: discord.Interaction):
         await self._send_capabilities_panel(interaction)
 
+    @toggle_group.command(name="web-search", description="View the web-search toggle and open the tools panel.")
+    @app_commands.checks.has_permissions(administrator=True)
+    async def toggle_web_search(self, interaction: discord.Interaction):
+        if not await self._require_guild(interaction):
+            return
+        config = await get_guild_config(interaction.guild.id)
+        enabled = bool(config.get("web_search_enabled", 1))
+        status = "enabled" if enabled else "disabled"
+        await interaction.response.send_message(
+            f"Web search is currently {status}.{self._manage_panel_hint('/config panel', '/tools manage')}",
+            ephemeral=True,
+        )
+
     # =========================
     # AI Reply Behavior
     # =========================
@@ -2796,6 +2913,26 @@ class Config(commands.Cog):
     async def autorole_manage(self, interaction: discord.Interaction):
         await self._send_autorole_panel(interaction)
 
+    @autorole_group.command(name="view", description="View the current autorole and open the autorole panel.")
+    @app_commands.checks.has_permissions(administrator=True)
+    async def autorole_view(self, interaction: discord.Interaction):
+        if not await self._require_guild(interaction):
+            return
+        config = await get_autorole_config(interaction.guild.id)
+        role_id = config.get("autorole_id")
+        if not role_id:
+            await interaction.response.send_message(
+                f"No autorole configured.{self._manage_panel_hint('/config panel', '/autorole manage')}",
+                ephemeral=True,
+            )
+            return
+        role = interaction.guild.get_role(role_id)
+        role_label = role.mention if role else f"(deleted role {role_id})"
+        await interaction.response.send_message(
+            f"Autorole is currently {role_label}.{self._manage_panel_hint('/config panel', '/autorole manage')}",
+            ephemeral=True,
+        )
+
     # =========================
     # Welcome
     # =========================
@@ -2804,6 +2941,24 @@ class Config(commands.Cog):
     @app_commands.checks.has_permissions(administrator=True)
     async def welcome_manage(self, interaction: discord.Interaction):
         await self._send_welcome_panel(interaction)
+
+    @welcome_group.command(name="view-message", description="View the welcome message template and open the welcome panel.")
+    @app_commands.checks.has_permissions(administrator=True)
+    async def welcome_view_message(self, interaction: discord.Interaction):
+        if not await self._require_guild(interaction):
+            return
+        config = await get_welcome_config(interaction.guild.id)
+        template = (config.get("welcome_message_template") or "").strip()
+        if not template:
+            await interaction.response.send_message(
+                f"No welcome message template configured.{self._manage_panel_hint('/config panel', '/welcome manage')}",
+                ephemeral=True,
+            )
+            return
+        await interaction.response.send_message(
+            f"Current welcome message template:\n{template}{self._manage_panel_hint('/config panel', '/welcome manage')}",
+            ephemeral=True,
+        )
 
     # =========================
     # Staff Roles

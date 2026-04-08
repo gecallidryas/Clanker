@@ -465,6 +465,12 @@ class Memories(commands.Cog):
 
         facts = await get_mention_lookup_personal_memories(ctx.guild.id, member.id, limit=10)
         if not facts:
+            all_facts = await get_personal_memories(ctx.guild.id, member.id, include_private=True, limit=1)
+            if all_facts:
+                await ctx.send(
+                    f"I have facts stored about {member.display_name}, but public fact lookup is disabled for them."
+                )
+                return
             await ctx.send(f"I don't have any facts stored about {member.display_name}.")
             return
 
@@ -1039,6 +1045,13 @@ class Memories(commands.Cog):
 
         facts = await get_mention_lookup_personal_memories(interaction.guild.id, member.id, limit=10)
         if not facts:
+            all_facts = await get_personal_memories(interaction.guild.id, member.id, include_private=True, limit=1)
+            if all_facts:
+                await interaction.response.send_message(
+                    f"I have facts stored about {member.display_name}, but public fact lookup is disabled for them.",
+                    ephemeral=True,
+                )
+                return
             await interaction.response.send_message(
                 f"I don't have any facts stored about {member.display_name}.",
                 ephemeral=True,

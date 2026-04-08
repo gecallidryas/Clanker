@@ -1,15 +1,11 @@
-﻿import sys
+import sys
 import unittest
 from io import BytesIO
 from pathlib import Path
 from types import SimpleNamespace
 from unittest.mock import AsyncMock, patch
 
-<<<<<<< main
 from PIL import Image
-=======
-import discord
->>>>>>> local
 
 ROOT = Path(__file__).resolve().parents[1]
 sys.path.insert(0, str(ROOT / "discord_bot"))
@@ -46,25 +42,16 @@ class _FakeChannel:
 
 
 class _FakeGuild:
-<<<<<<< main
     def __init__(self, channels=None):
         self.id = 123
         self.name = "Test Guild"
         self.member_count = 42
         self._channels = channels or {}
-=======
-    def __init__(self, welcome_channel=None):
-        self.id = 123
-        self.name = "Test Guild"
-        self.member_count = 42
-        self._welcome_channel = welcome_channel
->>>>>>> local
 
     def get_role(self, _role_id: int):
         return None
 
     def get_channel(self, channel_id: int):
-<<<<<<< main
         return self._channels.get(channel_id)
 
 
@@ -87,26 +74,15 @@ class _FakeAvatar:
 
 class _FakeMember:
     def __init__(self, guild=None, avatar=None):
-=======
-        if channel_id == 555:
-            return self._welcome_channel
-        return None
-
-
-class _FakeMember:
-    def __init__(self, guild=None, display_avatar=None):
->>>>>>> local
         self.guild = guild or _FakeGuild()
         self.display_name = "New User"
         self.mention = "@new-user"
-        self.display_avatar = display_avatar
         self.add_roles = AsyncMock()
         self.send = AsyncMock()
         self.display_avatar = avatar or _FakeAvatar()
 
 
 class SocialWelcomeDmTests(unittest.IsolatedAsyncioTestCase):
-<<<<<<< main
     async def test_get_welcome_config_defaults_include_welcome_image_settings(self):
         with patch("discord_bot.utils.db_handler.get_guild_config", AsyncMock(return_value={})):
             config = await get_welcome_config(123)
@@ -171,46 +147,6 @@ class SocialWelcomeDmTests(unittest.IsolatedAsyncioTestCase):
         welcome_channel = _FakeChannel()
         member = _FakeMember(guild=_FakeGuild(channels={555: welcome_channel}))
         payload = WelcomeImagePayload(data=b"gif-bytes", filename="pettinghand.gif", content_type="image/gif")
-=======
-    async def test_build_petpet_file_retries_avatar_fetch_after_short_delay(self):
-        cog = Social(_FakeBot())
-        avatar = SimpleNamespace(read=AsyncMock(side_effect=[RuntimeError("cdn not ready"), b"avatar-bytes"]))
-        member = _FakeMember(display_avatar=avatar)
-
-        with patch("discord_bot.cogs.social.make_petpet", return_value=b"gif-bytes") as make_petpet, patch(
-            "asyncio.sleep",
-            AsyncMock(),
-        ) as sleep_mock:
-            petpet_file = await cog._build_petpet_file(member)
-
-        self.assertIsInstance(petpet_file, discord.File)
-        self.assertEqual(petpet_file.filename, "petpet.gif")
-        self.assertEqual(petpet_file.fp.read(), b"gif-bytes")
-        self.assertEqual(avatar.read.await_count, 2)
-        sleep_mock.assert_awaited_once()
-        make_petpet.assert_called_once_with(b"avatar-bytes")
-
-    def test_apply_welcome_template_replaces_at_user_with_member_mention(self):
-        cog = Social(_FakeBot())
-        member = _FakeMember()
-
-        rendered = cog._apply_welcome_template(
-            "@user welcome to the batcave! + You are the nth member to join~",
-            member,
-            42,
-        )
-
-        self.assertEqual(
-            rendered,
-            "@new-user welcome to the batcave! + You are the nth member to join~",
-        )
-
-    async def test_public_welcome_attaches_petpet_gif(self):
-        cog = Social(_FakeBot())
-        channel = _FakeChannel()
-        member = _FakeMember(guild=_FakeGuild(welcome_channel=channel))
-        petpet_file = object()
->>>>>>> local
 
         with patch("discord_bot.cogs.social.get_server_mode", AsyncMock(return_value="mode_default")), patch(
             "discord_bot.cogs.social.get_autorole_config",
@@ -221,7 +157,6 @@ class SocialWelcomeDmTests(unittest.IsolatedAsyncioTestCase):
                 return_value={
                     "welcome_enabled": 1,
                     "welcome_channel_id": 555,
-<<<<<<< main
                     "welcome_message_template": "@new-user welcome to the batcave!",
                     "welcome_image_enabled": True,
                     "welcome_image_template": "pettinghand",
@@ -239,7 +174,10 @@ class SocialWelcomeDmTests(unittest.IsolatedAsyncioTestCase):
             await cog.on_member_join(member)
 
         render_image.assert_called_once()
+        self.assertEqual(render_image.call_args.kwargs["template"], "pettinghand")
         self.assertEqual(welcome_channel.send.await_count, 2)
+        text_args, _ = welcome_channel.send.await_args_list[0]
+        self.assertEqual(text_args[0], "@new-user welcome to the batcave!")
         _, image_kwargs = welcome_channel.send.await_args_list[1]
         self.assertEqual(image_kwargs["file"].filename, "pettinghand.gif")
 
@@ -275,6 +213,7 @@ class SocialWelcomeDmTests(unittest.IsolatedAsyncioTestCase):
             await cog.on_member_join(member)
 
         render_image.assert_called_once()
+        self.assertEqual(render_image.call_args.kwargs["template"], "catmunch")
         image_channel.send.assert_awaited_once()
         _, image_kwargs = image_channel.send.await_args
         self.assertEqual(image_kwargs["file"].filename, "catmunch.png")
@@ -298,15 +237,11 @@ class SocialWelcomeDmTests(unittest.IsolatedAsyncioTestCase):
                     "welcome_image_template": "catmunch",
                     "welcome_image_destination": "dm",
                     "welcome_image_channel_id": None,
-=======
-                    "welcome_message_template": "@user welcome to the batcave!",
->>>>>>> local
                 }
             ),
         ), patch(
             "discord_bot.cogs.social.get_dm_welcome_enabled",
             AsyncMock(return_value=False),
-<<<<<<< main
         ), patch(
             "discord_bot.cogs.social.get_dm_welcome_message",
             AsyncMock(return_value=None),
@@ -336,21 +271,6 @@ class SocialWelcomeDmTests(unittest.IsolatedAsyncioTestCase):
 
         self.assertEqual(avatar_bytes, b"avatar-bytes")
         sleep_mock.assert_awaited_once()
-=======
-        ), patch.object(
-            Social,
-            "_build_petpet_file",
-            AsyncMock(return_value=petpet_file),
-            create=True,
-        ) as build_petpet:
-            await cog.on_member_join(member)
-
-        build_petpet.assert_awaited_once_with(member)
-        channel.send.assert_awaited_once()
-        args, kwargs = channel.send.await_args
-        self.assertEqual(args[0], "@new-user welcome to the batcave! You are the 42nd member to join~")
-        self.assertIs(kwargs["file"], petpet_file)
->>>>>>> local
 
     async def test_dm_welcome_sends_plain_text_message(self):
         cog = Social(_FakeBot())
