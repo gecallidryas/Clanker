@@ -187,6 +187,48 @@ class PersonaDbTests(unittest.IsolatedAsyncioTestCase):
         self.assertNotIn("reply_sequence_timeout_seconds", config)
         self.assertNotIn("reply_sequence_hard_max_stages", config)
 
+    async def test_set_welcome_image_enabled_repairs_initialized_legacy_schema(self):
+        guild_id = 1243
+        await self.db_handler.init_guild_db(guild_id)
+
+        legacy_db_path = Path(self.db_handler.get_guild_db_path(guild_id))
+        with sqlite3.connect(legacy_db_path) as conn:
+            conn.execute("DROP TABLE guild_config")
+            conn.execute(
+                """
+                CREATE TABLE guild_config (
+                    guild_id INTEGER PRIMARY KEY,
+                    welcome_channel_id INTEGER,
+                    welcome_enabled INTEGER DEFAULT 1,
+                    welcome_message_template TEXT,
+                    updated_at TIMESTAMP DEFAULT CURRENT_TIMESTAMP
+                )
+                """
+            )
+            conn.execute(
+                """
+                INSERT INTO guild_config (guild_id, welcome_channel_id, welcome_enabled)
+                VALUES (?, ?, ?)
+                """,
+                (guild_id, 555, 1),
+            )
+            conn.commit()
+
+        await self.db_handler.set_welcome_image_enabled(guild_id, True)
+        config = await self.db_handler.get_welcome_config(guild_id)
+
+        with sqlite3.connect(legacy_db_path) as conn:
+            columns = {
+                row[1]
+                for row in conn.execute("PRAGMA table_info(guild_config)").fetchall()
+            }
+
+        self.assertIn("welcome_image_enabled", columns)
+        self.assertIn("welcome_image_template", columns)
+        self.assertIn("welcome_image_destination", columns)
+        self.assertIn("welcome_image_channel_id", columns)
+        self.assertTrue(config["welcome_image_enabled"])
+
     async def test_set_active_persona_modes_persists_custom_personas(self):
         guild_id = 125
         await self.db_handler.init_guild_db(guild_id)

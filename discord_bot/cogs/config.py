@@ -1949,7 +1949,15 @@ class Config(commands.Cog):
 
     async def _toggle_welcome_image(self, interaction: discord.Interaction) -> None:
         config = await get_welcome_config(interaction.guild.id)
-        enabled = not bool(config.get("welcome_image_enabled"))
+        currently_enabled = bool(config.get("welcome_image_enabled"))
+        channel_id = config.get("welcome_channel_id")
+        if not currently_enabled and not channel_id:
+            await interaction.response.send_message(
+                "Set a welcome channel before enabling welcome images.",
+                ephemeral=True,
+            )
+            return
+        enabled = not currently_enabled
         await set_welcome_image_enabled(interaction.guild.id, enabled)
         await add_guild_config_audit(
             interaction.guild.id,
@@ -2033,7 +2041,6 @@ class Config(commands.Cog):
     async def _send_welcome_image_test(self, interaction: discord.Interaction) -> None:
         config = await get_welcome_config(interaction.guild.id)
         template = (config.get("welcome_image_template") or "pettinghand").strip().lower()
-        destination = (config.get("welcome_image_destination") or "welcome_channel").strip().lower()
 
         avatar = getattr(interaction.user, "display_avatar", None)
         if avatar is None:
@@ -2051,23 +2058,11 @@ class Config(commands.Cog):
             await interaction.response.send_message("Could not read your avatar.", ephemeral=True)
             return
 
-        if destination == "dm":
-            target = interaction.user
-        elif destination == "specific_channel":
-            channel_id = config.get("welcome_image_channel_id")
-            if not channel_id:
-                await interaction.response.send_message("Set a welcome image channel first.", ephemeral=True)
-                return
-            target = interaction.guild.get_channel(channel_id)
-        else:
-            channel_id = config.get("welcome_channel_id") or config.get("welcome_image_channel_id")
-            if not channel_id:
-                await interaction.response.send_message(
-                    "Set a welcome channel or welcome image channel first.",
-                    ephemeral=True,
-                )
-                return
-            target = interaction.guild.get_channel(channel_id)
+        channel_id = config.get("welcome_channel_id")
+        if not channel_id:
+            await interaction.response.send_message("Set a welcome channel first.", ephemeral=True)
+            return
+        target = interaction.guild.get_channel(channel_id)
 
         if target is None or not hasattr(target, "send"):
             await interaction.response.send_message("Target channel not found.", ephemeral=True)

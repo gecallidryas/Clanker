@@ -98,6 +98,12 @@ REMOVED_REPLY_SEQUENCE_FIELDS = (
     "reply_sequence_allow_sticker",
     "reply_sequence_allow_emoji_only",
 )
+WELCOME_IMAGE_CONFIG_COLUMNS = (
+    ("welcome_image_enabled", "INTEGER", 0),
+    ("welcome_image_template", "TEXT", "pettinghand"),
+    ("welcome_image_destination", "TEXT", "welcome_channel"),
+    ("welcome_image_channel_id", "INTEGER", None),
+)
 
 
 def get_guild_db_path(guild_id: int) -> str:
@@ -304,6 +310,44 @@ async def _create_guild_config_table(db: aiosqlite.Connection) -> None:
         )
         """
     )
+
+
+async def _ensure_specific_guild_config_columns(
+    db: aiosqlite.Connection,
+    required_columns: Iterable[tuple[str, str, Any]],
+) -> bool:
+    async with db.execute("PRAGMA table_info(guild_config)") as cursor:
+        columns = {row[1] for row in await cursor.fetchall()}
+
+    changed = False
+    for column_name, column_type, default_value in required_columns:
+        if column_name in columns:
+            continue
+        if default_value is None:
+            await db.execute(f"ALTER TABLE guild_config ADD COLUMN {column_name} {column_type}")
+        else:
+            if isinstance(default_value, str):
+                default_sql = "'" + default_value.replace("'", "''") + "'"
+            else:
+                default_sql = str(default_value)
+            await db.execute(
+                f"ALTER TABLE guild_config ADD COLUMN {column_name} {column_type} DEFAULT {default_sql}"
+            )
+        changed = True
+    return changed
+
+
+async def _ensure_welcome_image_guild_config_schema(guild_id: int) -> None:
+    await _ensure_global_db()
+    db_path = get_guild_db_path(guild_id)
+    if not Path(db_path).exists():
+        await _ensure_guild_db(guild_id)
+        return
+
+    async with _sqlite_connect(db_path) as db:
+        changed = await _ensure_specific_guild_config_columns(db, WELCOME_IMAGE_CONFIG_COLUMNS)
+        if changed:
+            await db.commit()
 
 
 async def _rebuild_guild_config_without_removed_columns(db: aiosqlite.Connection) -> None:
@@ -4871,6 +4915,9 @@ async def set_autorole_enabled(guild_id: int, enabled: bool) -> None:
 async def get_welcome_config(guild_id: int) -> Dict[str, Any]:
     """Get welcome configuration for a guild."""
     config = await get_guild_config(guild_id)
+    if any(column_name not in config for column_name, _, _ in WELCOME_IMAGE_CONFIG_COLUMNS):
+        await _ensure_welcome_image_guild_config_schema(guild_id)
+        config = await get_guild_config(guild_id)
     enabled = config.get("welcome_enabled")
     return {
         "welcome_channel_id": config.get("welcome_channel_id"),
@@ -4900,21 +4947,25 @@ async def set_welcome_message_template(guild_id: int, template: Optional[str]) -
 
 async def set_welcome_image_enabled(guild_id: int, enabled: bool) -> None:
     """Enable or disable welcome images for a guild."""
+    await _ensure_welcome_image_guild_config_schema(guild_id)
     await update_guild_config(guild_id, {"welcome_image_enabled": int(enabled)})
 
 
 async def set_welcome_image_template(guild_id: int, template: Optional[str]) -> None:
     """Set or clear the welcome image template for a guild."""
+    await _ensure_welcome_image_guild_config_schema(guild_id)
     await update_guild_config(guild_id, {"welcome_image_template": template})
 
 
 async def set_welcome_image_destination(guild_id: int, destination: str) -> None:
     """Set the welcome image destination for a guild."""
+    await _ensure_welcome_image_guild_config_schema(guild_id)
     await update_guild_config(guild_id, {"welcome_image_destination": destination})
 
 
 async def set_welcome_image_channel_id(guild_id: int, channel_id: Optional[int]) -> None:
     """Set or clear the welcome image channel ID for a guild."""
+    await _ensure_welcome_image_guild_config_schema(guild_id)
     await update_guild_config(guild_id, {"welcome_image_channel_id": channel_id})
 
 
@@ -5035,6 +5086,10 @@ GUILD_CONFIG_FIELDS: Set[str] = {
     "welcome_channel_id",
     "welcome_enabled",
     "welcome_message_template",
+    "welcome_image_enabled",
+    "welcome_image_template",
+    "welcome_image_destination",
+    "welcome_image_channel_id",
     "dm_welcome_message",
     "dm_welcome_enabled",
     "spam_timeout_enabled",

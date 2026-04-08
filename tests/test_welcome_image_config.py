@@ -143,9 +143,10 @@ class WelcomeImageConfigTests(unittest.IsolatedAsyncioTestCase):
         self.assertIn("catmunch", args[0])
         self.assertTrue(kwargs["ephemeral"])
 
-    async def test_send_welcome_image_test_sends_preview_to_specific_channel(self):
+    async def test_send_welcome_image_test_sends_preview_to_welcome_channel(self):
+        welcome_channel = _FakeChannel()
         image_channel = _FakeChannel()
-        interaction = _FakeInteraction(guild=_FakeGuild(channels={777: image_channel}))
+        interaction = _FakeInteraction(guild=_FakeGuild(channels={555: welcome_channel, 777: image_channel}))
         payload = WelcomeImagePayload(data=b"png-bytes", filename="catmunch.png", content_type="image/png")
 
         with patch("discord_bot.cogs.config.get_encryption", return_value=SimpleNamespace()), patch(
@@ -156,7 +157,7 @@ class WelcomeImageConfigTests(unittest.IsolatedAsyncioTestCase):
                     "welcome_image_template": "catmunch",
                     "welcome_image_destination": "specific_channel",
                     "welcome_image_channel_id": 777,
-                    "welcome_channel_id": None,
+                    "welcome_channel_id": 555,
                 }
             ),
         ), patch(
@@ -168,33 +169,38 @@ class WelcomeImageConfigTests(unittest.IsolatedAsyncioTestCase):
 
         render_image.assert_called_once()
         self.assertEqual(render_image.call_args.kwargs["template"], "catmunch")
-        image_channel.send.assert_awaited_once()
-        _, send_kwargs = image_channel.send.await_args
+        welcome_channel.send.assert_awaited_once()
+        image_channel.send.assert_not_awaited()
+        _, send_kwargs = welcome_channel.send.await_args
         self.assertEqual(send_kwargs["file"].filename, "catmunch.png")
         interaction.response.send_message.assert_awaited_once_with("Sent a welcome image preview.", ephemeral=True)
 
-    async def test_set_welcome_image_channel_switches_destination_to_specific_channel(self):
+    async def test_toggle_welcome_image_requires_welcome_channel_before_enabling(self):
         with patch("discord_bot.cogs.config.get_encryption", return_value=SimpleNamespace()), patch(
-            "discord_bot.cogs.config.set_welcome_image_channel_id",
+            "discord_bot.cogs.config.get_welcome_config",
+            AsyncMock(
+                return_value={
+                    "welcome_channel_id": None,
+                    "welcome_image_enabled": False,
+                }
+            ),
+        ), patch(
+            "discord_bot.cogs.config.set_welcome_image_enabled",
             AsyncMock(),
-        ) as set_channel, patch(
-            "discord_bot.cogs.config.set_welcome_image_destination",
-            AsyncMock(),
-        ) as set_destination, patch(
-            "discord_bot.cogs.config.add_guild_config_audit",
-            AsyncMock(),
-        ) as add_audit:
+        ) as set_enabled:
+            interaction = _FakeInteraction()
             cog = Config(_FakeBot())
-            message = await cog._set_welcome_image_channel(123, 111, 777)
+            await cog._toggle_welcome_image(interaction)
 
-        set_channel.assert_awaited_once_with(123, 777)
-        set_destination.assert_awaited_once_with(123, "specific_channel")
-        add_audit.assert_awaited_once()
-        self.assertIn("specific channel", message.lower())
+        set_enabled.assert_not_awaited()
+        interaction.response.send_message.assert_awaited_once_with(
+            "Set a welcome channel before enabling welcome images.",
+            ephemeral=True,
+        )
 
     async def test_send_welcome_image_test_handles_render_errors(self):
         image_channel = _FakeChannel()
-        interaction = _FakeInteraction(guild=_FakeGuild(channels={777: image_channel}))
+        interaction = _FakeInteraction(guild=_FakeGuild(channels={555: image_channel, 777: image_channel}))
 
         with patch("discord_bot.cogs.config.get_encryption", return_value=SimpleNamespace()), patch(
             "discord_bot.cogs.config.get_welcome_config",
@@ -204,7 +210,7 @@ class WelcomeImageConfigTests(unittest.IsolatedAsyncioTestCase):
                     "welcome_image_template": "catmunch",
                     "welcome_image_destination": "specific_channel",
                     "welcome_image_channel_id": 777,
-                    "welcome_channel_id": None,
+                    "welcome_channel_id": 555,
                 }
             ),
         ), patch(
@@ -220,7 +226,7 @@ class WelcomeImageConfigTests(unittest.IsolatedAsyncioTestCase):
             ephemeral=True,
         )
 
-    async def test_send_welcome_image_test_falls_back_to_image_channel_when_welcome_channel_is_missing(self):
+    async def test_send_welcome_image_test_requires_welcome_channel(self):
         image_channel = _FakeChannel()
         interaction = _FakeInteraction(guild=_FakeGuild(channels={777: image_channel}))
         payload = WelcomeImagePayload(data=b"gif-bytes", filename="pettinghand.gif", content_type="image/gif")
@@ -243,11 +249,9 @@ class WelcomeImageConfigTests(unittest.IsolatedAsyncioTestCase):
             cog = Config(_FakeBot())
             await cog._send_welcome_image_test(interaction)
 
-        render_image.assert_called_once()
-        image_channel.send.assert_awaited_once()
-        _, send_kwargs = image_channel.send.await_args
-        self.assertEqual(send_kwargs["file"].filename, "pettinghand.gif")
-        interaction.response.send_message.assert_awaited_once_with("Sent a welcome image preview.", ephemeral=True)
+        render_image.assert_not_called()
+        image_channel.send.assert_not_awaited()
+        interaction.response.send_message.assert_awaited_once_with("Set a welcome channel first.", ephemeral=True)
 
 
 if __name__ == "__main__":

@@ -268,13 +268,7 @@ class Social(commands.Cog):
         return None
 
     def _resolve_welcome_image_target(self, member: discord.Member, welcome_config: dict):
-        destination = (welcome_config.get("welcome_image_destination") or "welcome_channel").strip().lower()
-        if destination == "dm":
-            return member
-        if destination == "specific_channel":
-            channel_id = welcome_config.get("welcome_image_channel_id")
-        else:
-            channel_id = welcome_config.get("welcome_channel_id") or welcome_config.get("welcome_image_channel_id")
+        channel_id = welcome_config.get("welcome_channel_id")
         if not channel_id:
             return None
         channel = member.guild.get_channel(channel_id)

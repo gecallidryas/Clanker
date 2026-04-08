@@ -181,10 +181,11 @@ class SocialWelcomeDmTests(unittest.IsolatedAsyncioTestCase):
         _, image_kwargs = welcome_channel.send.await_args_list[1]
         self.assertEqual(image_kwargs["file"].filename, "pettinghand.gif")
 
-    async def test_on_member_join_routes_welcome_image_to_specific_channel(self):
+    async def test_on_member_join_routes_welcome_image_to_welcome_channel_even_if_legacy_image_channel_is_set(self):
         cog = Social(_FakeBot())
+        welcome_channel = _FakeChannel()
         image_channel = _FakeChannel()
-        member = _FakeMember(guild=_FakeGuild(channels={777: image_channel}))
+        member = _FakeMember(guild=_FakeGuild(channels={555: welcome_channel, 777: image_channel}))
         payload = WelcomeImagePayload(data=b"png-bytes", filename="catmunch.png", content_type="image/png")
 
         with patch("discord_bot.cogs.social.get_server_mode", AsyncMock(return_value="mode_default")), patch(
@@ -195,7 +196,7 @@ class SocialWelcomeDmTests(unittest.IsolatedAsyncioTestCase):
             AsyncMock(
                 return_value={
                     "welcome_enabled": 0,
-                    "welcome_channel_id": None,
+                    "welcome_channel_id": 555,
                     "welcome_message_template": None,
                     "welcome_image_enabled": True,
                     "welcome_image_template": "catmunch",
@@ -214,11 +215,12 @@ class SocialWelcomeDmTests(unittest.IsolatedAsyncioTestCase):
 
         render_image.assert_called_once()
         self.assertEqual(render_image.call_args.kwargs["template"], "catmunch")
-        image_channel.send.assert_awaited_once()
-        _, image_kwargs = image_channel.send.await_args
+        welcome_channel.send.assert_awaited_once()
+        image_channel.send.assert_not_awaited()
+        _, image_kwargs = welcome_channel.send.await_args
         self.assertEqual(image_kwargs["file"].filename, "catmunch.png")
 
-    async def test_on_member_join_routes_welcome_image_to_image_channel_when_welcome_channel_is_missing(self):
+    async def test_on_member_join_skips_welcome_image_when_no_welcome_channel_is_configured(self):
         cog = Social(_FakeBot())
         image_channel = _FakeChannel()
         member = _FakeMember(guild=_FakeGuild(channels={777: image_channel}))
@@ -249,12 +251,10 @@ class SocialWelcomeDmTests(unittest.IsolatedAsyncioTestCase):
         ) as render_image:
             await cog.on_member_join(member)
 
-        render_image.assert_called_once()
-        image_channel.send.assert_awaited_once()
-        _, image_kwargs = image_channel.send.await_args
-        self.assertEqual(image_kwargs["file"].filename, "catmunch.png")
+        render_image.assert_not_called()
+        image_channel.send.assert_not_awaited()
 
-    async def test_on_member_join_routes_welcome_image_to_dm_even_when_dm_text_is_disabled(self):
+    async def test_on_member_join_does_not_route_welcome_image_to_dm_when_dm_text_is_disabled(self):
         cog = Social(_FakeBot())
         member = _FakeMember()
         payload = WelcomeImagePayload(data=b"png-bytes", filename="catmunch.png", content_type="image/png")
@@ -287,10 +287,8 @@ class SocialWelcomeDmTests(unittest.IsolatedAsyncioTestCase):
         ) as render_image:
             await cog.on_member_join(member)
 
-        render_image.assert_called_once()
-        member.send.assert_awaited_once()
-        _, image_kwargs = member.send.await_args
-        self.assertEqual(image_kwargs["file"].filename, "catmunch.png")
+        render_image.assert_not_called()
+        member.send.assert_not_awaited()
 
     async def test_send_welcome_image_retries_avatar_read_after_short_delay(self):
         cog = Social(_FakeBot())
