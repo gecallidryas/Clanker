@@ -88,6 +88,18 @@ class _FakeContextBuffer:
     def get_context(self, min_message_id=None):
         return f"snapshot:{len(self.entries)}"
 
+    def get_context_with_appended_message(
+        self,
+        message_id,
+        user_id,
+        username,
+        content,
+        reply_to_username=None,
+        media=None,
+        min_message_id=None,
+    ):
+        return f"snapshot:{len(self.entries) + 1}"
+
 
 class _FakeTyping:
     async def __aenter__(self):
@@ -239,6 +251,7 @@ class AIBrainMultiPersonaRuntimeTests(unittest.TestCase):
             original_get_active_persona_modes = ai_brain_mod.get_active_persona_modes
             original_get_guild_config = ai_brain_mod.get_guild_config
             original_get_affection_by_mode = ai_brain_mod.get_affection_by_mode
+            original_get_personal_memory_privacy = ai_brain_mod.get_personal_memory_privacy
             try:
                 ai_brain_mod.ai_limiter.acquire = _acquire
                 ai_brain_mod.increment_stat = _fake_increment_stat
@@ -246,6 +259,7 @@ class AIBrainMultiPersonaRuntimeTests(unittest.TestCase):
                 ai_brain_mod.get_active_persona_modes = _return_none
                 ai_brain_mod.get_guild_config = _return_none
                 ai_brain_mod.get_affection_by_mode = _return_none
+                ai_brain_mod.get_personal_memory_privacy = _return_none
 
                 async def _fake_get_server_mode(_guild_id):
                     return "mode_femboy"
@@ -289,6 +303,7 @@ class AIBrainMultiPersonaRuntimeTests(unittest.TestCase):
                 self.brain._maybe_handle_starboard_setup_request = _return_false
                 self.brain._maybe_handle_channel_request = _return_false
                 self.brain._maybe_handle_role_request = _return_false
+                self.brain._maybe_handle_admin_nl_request = _return_false
                 self.brain._has_video_attachment = lambda *_args, **_kwargs: False
                 self.brain._has_image_attachment = lambda *_args, **_kwargs: False
                 self.brain._resolve_reply_to = lambda *_args, **_kwargs: (None, None)
@@ -300,11 +315,16 @@ class AIBrainMultiPersonaRuntimeTests(unittest.TestCase):
                 self.brain._build_stream_tool_schemas = _return_empty_list
                 self.brain._handle_streaming_turn = _fake_handle_streaming_turn
                 self.brain._refresh_conversation = lambda *args, **kwargs: None
+                self.brain.turn_coordinator.debounce_window = 0.0
 
                 await self.brain.on_message(message)
-                task = self.brain.persona_queue._tasks.get(message.channel.id)
-                if task is not None:
-                    await task
+                turn_key = self.brain._turn_key_for_message(message)
+                pending_task = self.brain.pending_turn_tasks.get(turn_key)
+                if pending_task is not None:
+                    await pending_task
+                active_task = self.brain.active_turn_tasks.get(turn_key)
+                if active_task is not None:
+                    await active_task
 
                 self.assertEqual(streaming_modes, ["mode_femboy", "mode_oneesan"])
                 self.assertEqual(
@@ -322,5 +342,6 @@ class AIBrainMultiPersonaRuntimeTests(unittest.TestCase):
                 ai_brain_mod.get_active_persona_modes = original_get_active_persona_modes
                 ai_brain_mod.get_guild_config = original_get_guild_config
                 ai_brain_mod.get_affection_by_mode = original_get_affection_by_mode
+                ai_brain_mod.get_personal_memory_privacy = original_get_personal_memory_privacy
 
         asyncio.run(_run())
