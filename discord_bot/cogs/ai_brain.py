@@ -79,6 +79,8 @@ from utils.guild_ai import (
 from utils.admin_actions import ADMIN_ACTIONS, execute_admin_action, execute_admin_intent
 from utils.admin_nl import AdminNLContext, PendingAdminRequest, interpret_admin_request, resume_admin_request
 from modes import get_mode_profile, get_all_modes
+from personas import compile_persona_sections
+from personas.builtin import get_builtin_persona
 from utils.rate_limiter import StreamSendBudget, ai_limiter, get_rate_limit_message
 from utils.logger import get_logger, log_stream_event, log_stream_result
 from utils.tool_registry import (
@@ -2730,6 +2732,34 @@ class AIBrain(commands.Cog):
             return content
         return profile.persona_fallback
 
+    def _compile_builtin_persona(self, mode: str, evil_mode: bool) -> Optional[str]:
+        """Compile structured built-in persona sections; return None when unavailable."""
+        if mode.startswith("custom_"):
+            return None
+        try:
+            persona_definition = get_builtin_persona(mode)
+        except KeyError:
+            return None
+        except Exception as exc:
+            logger.warning("Failed to resolve built-in persona definition for %s: %s", mode, exc)
+            return None
+
+        try:
+            compiled_sections = compile_persona_sections(persona_definition, evil_mode=evil_mode)
+        except Exception as exc:
+            logger.warning("Failed to compile built-in persona %s: %s", mode, exc)
+            return None
+
+        blocks: list[str] = []
+        for section in compiled_sections:
+            title = (section.title or "").strip()
+            body = (section.body or "").strip()
+            if not title or not body:
+                continue
+            blocks.append(f"=== {title} ===\n{body}")
+        compiled_persona = "\n\n".join(blocks).strip()
+        return compiled_persona or None
+
     def _has_trigger_word(self, content: str, mode: str) -> bool:
         """Return True if the content contains a trigger word for the mode."""
         profile = get_mode_profile(mode)
@@ -3370,7 +3400,9 @@ class AIBrain(commands.Cog):
         """
         mode = mode_override or await get_server_mode(guild_id)
         evil_mode = allow_evil and await get_evil_mode(guild_id)
-        persona = await self._load_persona(guild_id, mode, evil_mode)
+        persona = self._compile_builtin_persona(mode, evil_mode)
+        if not persona:
+            persona = await self._load_persona(guild_id, mode, evil_mode)
         guild_config = await get_guild_config(guild_id)
 
         personal_facts = await get_personal_memories(guild_id, user_id, limit=5)

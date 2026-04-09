@@ -3,6 +3,7 @@ import types
 import asyncio
 import unittest
 from pathlib import Path
+from unittest.mock import AsyncMock, patch
 
 ROOT = Path(__file__).resolve().parents[1]
 sys.path.insert(0, str(ROOT / "discord_bot"))
@@ -119,6 +120,9 @@ class _FakeGuild:
         self.id = guild_id
         self.name = "Test Guild"
         self.owner_id = 9999
+
+    def get_channel(self, _channel_id: int):
+        return None
 
 
 class _FakeChannel:
@@ -345,3 +349,111 @@ class AIBrainMultiPersonaRuntimeTests(unittest.TestCase):
                 ai_brain_mod.get_personal_memory_privacy = original_get_personal_memory_privacy
 
         asyncio.run(_run())
+
+
+class AIBrainStructuredPersonaPromptTests(unittest.IsolatedAsyncioTestCase):
+    def setUp(self):
+        self._orig_register_builtin_tools = ai_brain_mod.register_builtin_tools
+        ai_brain_mod.register_builtin_tools = lambda: None
+        self.brain = ai_brain_mod.AIBrain(_FakeBot())
+
+    def tearDown(self):
+        ai_brain_mod.register_builtin_tools = self._orig_register_builtin_tools
+
+    async def _build_prompt_for_mode(
+        self,
+        *,
+        mode: str,
+        evil_mode: bool = False,
+        tools_text: str = "",
+    ) -> str:
+        guild = _FakeGuild(123)
+        member = _FakeMember(guild.owner_id, guild)
+
+        with patch(
+            "cogs.ai_brain.get_evil_mode",
+            AsyncMock(return_value=evil_mode),
+        ), patch(
+            "cogs.ai_brain.get_guild_config",
+            AsyncMock(return_value={"normal_text_provider": "gemini"}),
+        ), patch(
+            "cogs.ai_brain.get_personal_memories",
+            AsyncMock(return_value=[]),
+        ), patch(
+            "cogs.ai_brain.get_channel_recency_summary",
+            AsyncMock(return_value=[]),
+        ), patch(
+            "cogs.ai_brain.get_guild_recency_summary",
+            AsyncMock(return_value=[]),
+        ), patch(
+            "cogs.ai_brain.get_mention_lookup_personal_memories",
+            AsyncMock(return_value=[]),
+        ), patch(
+            "cogs.ai_brain.get_server_memory",
+            AsyncMock(return_value=[]),
+        ), patch(
+            "cogs.ai_brain.get_persona_attributes",
+            AsyncMock(return_value=[]),
+        ), patch(
+            "cogs.ai_brain.get_sample_dialogues",
+            AsyncMock(return_value=[]),
+        ), patch(
+            "cogs.ai_brain.get_affection_by_mode",
+            AsyncMock(return_value={"affection_level": "friend", "affection_points": 250}),
+        ), patch(
+            "cogs.ai_brain.get_strict_alias",
+            AsyncMock(return_value=None),
+        ), patch(
+            "cogs.ai_brain.get_aliases",
+            AsyncMock(return_value=[]),
+        ), patch(
+            "cogs.ai_brain.render_prompt_tool_definitions",
+            AsyncMock(return_value=tools_text),
+        ), patch.object(
+            self.brain,
+            "get_user_gender",
+            AsyncMock(return_value="unknown"),
+        ), patch.object(
+            self.brain,
+            "_build_expression_prompt_context",
+            AsyncMock(return_value=([], [], [])),
+        ):
+            return await self.brain.build_prompt(
+                guild.id,
+                member.id,
+                "help me with this task",
+                "ctx",
+                channel_id=456,
+                member=member,
+                mode_override=mode,
+            )
+
+    async def test_build_prompt_uses_structured_builtin_persona_sections(self):
+        prompt = await self._build_prompt_for_mode(mode="mode_femboy", evil_mode=False, tools_text="")
+
+        self.assertIn("=== ROLEPLAY CONTRACT ===", prompt)
+        self.assertIn("=== ACTIVE PERSONA IDENTITY ===", prompt)
+        self.assertIn("=== VOICE AND CADENCE ===", prompt)
+        self.assertIn("=== NORMAL MODE SCENE RULES ===", prompt)
+        self.assertIn("=== TASK AND TOOL COMPETENCE RULES ===", prompt)
+        self.assertNotIn("Core vibe:", prompt)
+
+    async def test_build_prompt_keeps_tool_and_admin_sections_with_compiled_persona(self):
+        prompt = await self._build_prompt_for_mode(
+            mode="mode_default",
+            evil_mode=False,
+            tools_text="- test_tool: use for verification",
+        )
+
+        self.assertIn("=== ROLEPLAY CONTRACT ===", prompt)
+        self.assertIn("=== AVAILABLE TOOLS ===", prompt)
+        self.assertIn("test_tool", prompt)
+        self.assertIn("=== ADMIN CONFIG INSTRUCTIONS ===", prompt)
+
+    async def test_build_prompt_switches_normal_and_evil_scene_rules_for_builtins(self):
+        normal_prompt = await self._build_prompt_for_mode(mode="mode_oneesan", evil_mode=False, tools_text="")
+        evil_prompt = await self._build_prompt_for_mode(mode="mode_oneesan", evil_mode=True, tools_text="")
+
+        self.assertIn("=== NORMAL MODE SCENE RULES ===", normal_prompt)
+        self.assertNotIn("=== EVIL MODE SCENE RULES ===", normal_prompt)
+        self.assertIn("=== EVIL MODE SCENE RULES ===", evil_prompt)
