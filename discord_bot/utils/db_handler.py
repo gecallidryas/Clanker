@@ -1262,8 +1262,6 @@ async def _init_guild_schema(db: aiosqlite.Connection) -> None:
         ("examples_json", "TEXT"),
         ("constraints_json", "TEXT"),
         ("author_notes_text", "TEXT"),
-        ("legacy_normal_prompt", "TEXT"),
-        ("legacy_evil_prompt", "TEXT"),
     )
     for column_name, column_type in structured_persona_columns:
         try:

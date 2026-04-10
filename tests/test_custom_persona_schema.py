@@ -61,8 +61,6 @@ class CustomPersonaSchemaTests(unittest.IsolatedAsyncioTestCase):
             "author_notes_text",
             "normal_prompt",
             "evil_prompt",
-            "legacy_normal_prompt",
-            "legacy_evil_prompt",
         ):
             self.assertIn(column_name, columns)
 

@@ -142,13 +142,11 @@ def hydrate_custom_persona_definition(record: dict[str, Any]) -> PersonaDefiniti
             scene_normal_data.get("description"),
             scene_normal_data.get("normal"),
             base_persona.scene_rules.normal if base_persona else "",
-            record.get("normal_prompt"),
         ),
         evil=_coerce_text(
             scene_evil_data.get("description"),
             scene_evil_data.get("evil"),
             base_persona.scene_rules.evil if base_persona else "",
-            record.get("evil_prompt"),
         ),
     )
     utility = PersonaUtilityRules(
