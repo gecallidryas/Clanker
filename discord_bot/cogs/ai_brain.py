@@ -51,6 +51,7 @@ from utils.db_handler import (
     get_persona_attributes,
     get_sample_dialogues,
     get_guild_custom_personas,
+    get_custom_persona_by_mode_key,
     delete_short_term_facts_for_channel,
     get_channel_recency_summary,
     get_guild_recency_summary,
@@ -2704,7 +2705,6 @@ class AIBrain(commands.Cog):
         """Load persona prompt from custom persona or file, falling back to defaults."""
         if mode.startswith("custom_"):
             try:
-                from utils.db_handler import get_custom_persona_by_mode_key
                 persona = await get_custom_persona_by_mode_key(guild_id, mode)
             except Exception as exc:
                 logger.warning("Failed to load custom persona %s: %s", mode, exc)
@@ -2766,6 +2766,30 @@ class AIBrain(commands.Cog):
         if isinstance(data, str):
             return [token.strip().lower() for token in re.split(r"[,\\n]+", data) if token.strip()]
         return []
+
+    def _persona_sample_dialogues_from_record(self, persona: Optional[dict]) -> list[str]:
+        if not persona or not persona.get("sample_dialogues_json"):
+            return []
+        try:
+            data = json.loads(persona["sample_dialogues_json"])
+        except (TypeError, json.JSONDecodeError):
+            return []
+        return [str(item).strip() for item in data if str(item).strip()]
+
+    async def _resolve_sample_dialogue_lines(self, guild_id: int, mode: str) -> list[str]:
+        if mode.startswith("custom_"):
+            try:
+                persona = await get_custom_persona_by_mode_key(guild_id, mode)
+            except Exception as exc:
+                logger.warning("Failed to load custom persona sample dialogues for %s: %s", mode, exc)
+                persona = None
+
+            local_lines = self._persona_sample_dialogues_from_record(persona)
+            if local_lines:
+                return local_lines
+
+        dialogues = await get_sample_dialogues(guild_id)
+        return [f"{item['speaker']}: {item['dialogue']}" for item in dialogues[:10]]
 
     def _find_first_trigger_position(self, content: str, triggers: tuple[str, ...] | list[str]) -> Optional[int]:
         normalized = self._normalize_trigger_text(content)
@@ -3413,7 +3437,7 @@ class AIBrain(commands.Cog):
         selected_channel_summary = _select_relevant_lines(channel_summary, message, limit=1)
         selected_guild_summary = _select_relevant_lines(guild_summary, message, limit=1)
         attributes = await get_persona_attributes(guild_id)
-        dialogues = await get_sample_dialogues(guild_id)
+        dialogue_lines = await self._resolve_sample_dialogue_lines(guild_id, mode)
 
         rag_context = ""
         try:
@@ -3618,7 +3642,7 @@ You can explain these commands to the user if asked:
             section_order.append(section_affection)
         section_dialogues = section_from_lines(
             "SAMPLE DIALOGUES",
-            [f"{item['speaker']}: {item['dialogue']}" for item in dialogues[:10]],
+            dialogue_lines,
         )
         if section_dialogues:
             section_order.append(section_dialogues)
