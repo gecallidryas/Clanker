@@ -44,6 +44,7 @@ from utils.server_avatar import set_custom_avatar, set_mode_avatar
 from utils.logger import get_logger
 from utils.persona_panel_ui import (
     MANAGE_GUIDANCE,
+    apply_structured_persona_fields,
     delete_persona_with_fallback,
     open_persona_manage_panel,
 )
@@ -54,6 +55,13 @@ logger = get_logger(__name__)
 MAX_PERSONAS_PER_GUILD = 5
 MAX_CREATIONS_PER_HOUR = 3
 PENDING_TTL_SECONDS = 300
+_STRUCTURED_BASE_TEMPLATES = {
+    "blank",
+    "mode_default",
+    "mode_femboy",
+    "mode_tsundere",
+    "mode_oneesan",
+}
 
 
 @dataclass
@@ -66,6 +74,14 @@ class PendingPersona:
     normal_prompt: Optional[str]
     evil_prompt: Optional[str]
     created_at: datetime
+    base_template: str = "blank"
+    voice_tone: Optional[str] = None
+    worldview: Optional[str] = None
+    scene_normal: Optional[str] = None
+    scene_evil: Optional[str] = None
+    example_replies: tuple[str, ...] = ()
+    examples_normal: tuple[str, ...] = ()
+    examples_evil: tuple[str, ...] = ()
 
 
 @dataclass
@@ -107,6 +123,32 @@ def _parse_aliases_input(raw: str, persona_name: str) -> list[str]:
         if value not in cleaned:
             cleaned.append(value)
     return cleaned
+
+
+def _normalize_base_template(raw_value: str) -> Optional[str]:
+    value = (raw_value or "").strip().lower()
+    if not value:
+        return "blank"
+    if value in _STRUCTURED_BASE_TEMPLATES:
+        return value
+    if value.startswith("mode_"):
+        return None
+    resolved = resolve_mode_key(value)
+    if resolved in _STRUCTURED_BASE_TEMPLATES:
+        return resolved
+    return None
+
+
+def _parse_examples_input(raw: str) -> tuple[str, ...]:
+    if not raw:
+        return ()
+    tokens = re.split(r"[\n,]+", raw)
+    cleaned: list[str] = []
+    for token in tokens:
+        value = token.strip()
+        if value and value not in cleaned:
+            cleaned.append(value)
+    return tuple(cleaned)
 
 
 class ContinueToNormalPromptsView(discord.ui.View):
@@ -319,42 +361,43 @@ class PersonaNormalPromptModal(discord.ui.Modal):
         self.guild_id = guild_id
         self.user_id = user_id
 
-        self.part1 = discord.ui.TextInput(
-            label="Normal Prompt (Part 1)",
-            style=discord.TextStyle.paragraph,
-            max_length=2000,
-            required=True,
+        self.base_template = discord.ui.TextInput(
+            label="Base Template",
+            placeholder="blank, default, femboy, tsundere, oneesan",
+            max_length=32,
+            required=False,
         )
-        self.part2 = discord.ui.TextInput(
-            label="Normal Prompt (Part 2, optional)",
+        self.voice_tone = discord.ui.TextInput(
+            label="Voice Tone (optional)",
+            style=discord.TextStyle.paragraph,
+            max_length=600,
+            required=False,
+        )
+        self.worldview = discord.ui.TextInput(
+            label="Worldview (optional)",
             style=discord.TextStyle.paragraph,
             max_length=2000,
             required=False,
         )
-        self.part3 = discord.ui.TextInput(
-            label="Normal Prompt (Part 3, optional)",
+        self.scene_normal = discord.ui.TextInput(
+            label="Normal Scene Rules (optional)",
             style=discord.TextStyle.paragraph,
             max_length=2000,
             required=False,
         )
-        self.part4 = discord.ui.TextInput(
-            label="Normal Prompt (Part 4, optional)",
-            style=discord.TextStyle.paragraph,
-            max_length=2000,
-            required=False,
-        )
-        self.part5 = discord.ui.TextInput(
-            label="Normal Prompt (Part 5, optional)",
+        self.examples_normal = discord.ui.TextInput(
+            label="Normal Examples (optional)",
+            placeholder="Comma or newline separated examples",
             style=discord.TextStyle.paragraph,
             max_length=2000,
             required=False,
         )
 
-        self.add_item(self.part1)
-        self.add_item(self.part2)
-        self.add_item(self.part3)
-        self.add_item(self.part4)
-        self.add_item(self.part5)
+        self.add_item(self.base_template)
+        self.add_item(self.voice_tone)
+        self.add_item(self.worldview)
+        self.add_item(self.scene_normal)
+        self.add_item(self.examples_normal)
 
     async def on_submit(self, interaction: discord.Interaction) -> None:
         pending = self.cog.get_pending(self.guild_id, self.user_id)
@@ -365,30 +408,24 @@ class PersonaNormalPromptModal(discord.ui.Modal):
             )
             return
 
-        normal_prompt = "\n".join(
-            part.strip()
-            for part in [
-                self.part1.value,
-                self.part2.value,
-                self.part3.value,
-                self.part4.value,
-                self.part5.value,
-            ]
-            if (part or "").strip()
-        ).strip()
-
-        if not normal_prompt:
+        base_template = _normalize_base_template(self.base_template.value or "")
+        if base_template is None:
             await interaction.response.send_message(
-                "Normal prompt is required.",
+                "Base template must be blank, default, femboy, tsundere, or oneesan.",
                 ephemeral=True,
             )
             return
 
-        pending.normal_prompt = normal_prompt
+        pending.base_template = base_template
+        pending.voice_tone = (self.voice_tone.value or "").strip() or None
+        pending.worldview = (self.worldview.value or "").strip() or None
+        pending.scene_normal = (self.scene_normal.value or "").strip() or None
+        pending.examples_normal = _parse_examples_input(self.examples_normal.value or "")
+        pending.example_replies = pending.examples_normal
 
         view = ContinueToEvilPromptsView(self.cog, self.guild_id, self.user_id)
         await interaction.response.send_message(
-            "Step 2 saved. Click Continue to add the evil prompt.",
+            "Step 2 saved. Click Continue to add evil-mode fields and optional raw prompt notes.",
             view=view,
             ephemeral=True,
         )
@@ -401,42 +438,38 @@ class PersonaEvilPromptModal(discord.ui.Modal):
         self.guild_id = guild_id
         self.user_id = user_id
 
-        self.part1 = discord.ui.TextInput(
-            label="Evil Prompt (Part 1, optional)",
+        self.scene_evil = discord.ui.TextInput(
+            label="Evil Scene Rules (optional)",
             style=discord.TextStyle.paragraph,
             max_length=2000,
             required=False,
         )
-        self.part2 = discord.ui.TextInput(
-            label="Evil Prompt (Part 2, optional)",
+        self.examples_evil = discord.ui.TextInput(
+            label="Evil Examples (optional)",
+            placeholder="Comma or newline separated examples",
             style=discord.TextStyle.paragraph,
             max_length=2000,
             required=False,
         )
-        self.part3 = discord.ui.TextInput(
-            label="Evil Prompt (Part 3, optional)",
+        self.normal_prompt_notes = discord.ui.TextInput(
+            label="Raw Normal Prompt Notes (optional)",
+            placeholder="Expert escape hatch for legacy-style notes",
             style=discord.TextStyle.paragraph,
             max_length=2000,
             required=False,
         )
-        self.part4 = discord.ui.TextInput(
-            label="Evil Prompt (Part 4, optional)",
-            style=discord.TextStyle.paragraph,
-            max_length=2000,
-            required=False,
-        )
-        self.part5 = discord.ui.TextInput(
-            label="Evil Prompt (Part 5, optional)",
+        self.evil_prompt_notes = discord.ui.TextInput(
+            label="Raw Evil Prompt Notes (optional)",
+            placeholder="Expert escape hatch for legacy-style notes",
             style=discord.TextStyle.paragraph,
             max_length=2000,
             required=False,
         )
 
-        self.add_item(self.part1)
-        self.add_item(self.part2)
-        self.add_item(self.part3)
-        self.add_item(self.part4)
-        self.add_item(self.part5)
+        self.add_item(self.scene_evil)
+        self.add_item(self.examples_evil)
+        self.add_item(self.normal_prompt_notes)
+        self.add_item(self.evil_prompt_notes)
 
     async def on_submit(self, interaction: discord.Interaction) -> None:
         pending = self.cog.get_pending(self.guild_id, self.user_id)
@@ -447,19 +480,10 @@ class PersonaEvilPromptModal(discord.ui.Modal):
             )
             return
 
-        evil_prompt = "\n".join(
-            part.strip()
-            for part in [
-                self.part1.value,
-                self.part2.value,
-                self.part3.value,
-                self.part4.value,
-                self.part5.value,
-            ]
-            if (part or "").strip()
-        ).strip()
-
-        pending.evil_prompt = evil_prompt or None
+        pending.scene_evil = (self.scene_evil.value or "").strip() or None
+        pending.examples_evil = _parse_examples_input(self.examples_evil.value or "")
+        pending.normal_prompt = (self.normal_prompt_notes.value or "").strip() or None
+        pending.evil_prompt = (self.evil_prompt_notes.value or "").strip() or None
 
         view = ContinueToConfirmView(self.cog, self.guild_id, self.user_id)
         await interaction.response.send_message(
@@ -883,13 +907,6 @@ class Persona(commands.Cog):
             )
             return
 
-        if not pending.normal_prompt:
-            await interaction.response.send_message(
-                "Normal prompt is required.",
-                ephemeral=True,
-            )
-            return
-
         mode_key = build_custom_mode_key(guild_id, pending.name)
         if not mode_key:
             await interaction.response.send_message(
@@ -932,6 +949,13 @@ class Persona(commands.Cog):
                 await interaction.followup.send(f"Banner error: {message}", ephemeral=True)
                 return
 
+        normal_prompt_notes = (pending.normal_prompt or "").strip()
+        evil_prompt_notes = (pending.evil_prompt or "").strip() or None
+        normal_prompt_payload = (
+            normal_prompt_notes
+            or "Structured persona notes managed via /persona manage."
+        )
+
         try:
             await create_custom_persona(
                 guild_id=guild_id,
@@ -941,8 +965,8 @@ class Persona(commands.Cog):
                 avatar_path=str(avatar_path),
                 banner_path=str(banner_path) if banner_path else None,
                 aliases=pending.aliases,
-                normal_prompt=pending.normal_prompt,
-                evil_prompt=pending.evil_prompt or None,
+                normal_prompt=normal_prompt_payload,
+                evil_prompt=evil_prompt_notes,
                 created_by=interaction.user.id,
             )
         except sqlite3.IntegrityError:
@@ -958,12 +982,24 @@ class Persona(commands.Cog):
             await interaction.followup.send(
                 "A custom persona with that name already exists.",
                 ephemeral=True,
-            )
+                )
             return
 
+        await apply_structured_persona_fields(
+            guild_id=guild_id,
+            mode_key=mode_key,
+            base_template=pending.base_template,
+            voice_tone=pending.voice_tone,
+            worldview=pending.worldview,
+            scene_normal=pending.scene_normal,
+            scene_evil=pending.scene_evil,
+            examples_normal=pending.examples_normal or pending.example_replies,
+            examples_evil=pending.examples_evil,
+        )
+
         traits = extract_persona_traits(
-            pending.normal_prompt,
-            pending.evil_prompt or None,
+            normal_prompt_notes,
+            evil_prompt_notes,
         )
         if traits:
             try:
