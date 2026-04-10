@@ -213,8 +213,15 @@ class CustomPersonaPromptPrecedenceTests(unittest.IsolatedAsyncioTestCase):
         ):
             sys.modules.pop(name, None)
         for name, module in self._saved_modules.items():
+            package_name, _, attr_name = name.rpartition(".")
+            package = sys.modules.get(package_name)
             if module is not None:
                 sys.modules[name] = module
+                if package is not None and attr_name:
+                    setattr(package, attr_name, module)
+                continue
+            if package is not None and hasattr(package, attr_name):
+                delattr(package, attr_name)
 
     async def _seed_structured_custom_persona(self) -> tuple[int, str]:
         guild_id = 778
