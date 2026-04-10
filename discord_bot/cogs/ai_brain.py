@@ -81,6 +81,7 @@ from utils.admin_nl import AdminNLContext, PendingAdminRequest, interpret_admin_
 from modes import get_mode_profile, get_all_modes
 from personas import compile_persona_sections
 from personas.builtin import get_builtin_persona
+from personas.custom import load_custom_persona_definition
 from utils.rate_limiter import StreamSendBudget, ai_limiter, get_rate_limit_message
 from utils.logger import get_logger, log_stream_event, log_stream_result
 from utils.tool_registry import (
@@ -2760,6 +2761,40 @@ class AIBrain(commands.Cog):
         compiled_persona = "\n\n".join(blocks).strip()
         return compiled_persona or None
 
+    async def _compile_custom_persona(
+        self,
+        guild_id: int,
+        mode: str,
+        evil_mode: bool,
+    ) -> Optional[str]:
+        """Compile structured sections for custom personas, including legacy-adapted ones."""
+        if not mode.startswith("custom_"):
+            return None
+
+        try:
+            persona_definition = await load_custom_persona_definition(guild_id, mode)
+        except Exception as exc:
+            logger.warning("Failed to resolve custom persona definition for %s: %s", mode, exc)
+            return None
+        if persona_definition is None:
+            return None
+
+        try:
+            compiled_sections = compile_persona_sections(persona_definition, evil_mode=evil_mode)
+        except Exception as exc:
+            logger.warning("Failed to compile custom persona %s: %s", mode, exc)
+            return None
+
+        blocks: list[str] = []
+        for section in compiled_sections:
+            title = (section.title or "").strip()
+            body = (section.body or "").strip()
+            if not title or not body:
+                continue
+            blocks.append(f"=== {title} ===\n{body}")
+        compiled_persona = "\n\n".join(blocks).strip()
+        return compiled_persona or None
+
     def _has_trigger_word(self, content: str, mode: str) -> bool:
         """Return True if the content contains a trigger word for the mode."""
         profile = get_mode_profile(mode)
@@ -3400,7 +3435,11 @@ class AIBrain(commands.Cog):
         """
         mode = mode_override or await get_server_mode(guild_id)
         evil_mode = allow_evil and await get_evil_mode(guild_id)
-        persona = self._compile_builtin_persona(mode, evil_mode)
+        persona: Optional[str]
+        if mode.startswith("custom_"):
+            persona = await self._compile_custom_persona(guild_id, mode, evil_mode)
+        else:
+            persona = self._compile_builtin_persona(mode, evil_mode)
         if not persona:
             persona = await self._load_persona(guild_id, mode, evil_mode)
         guild_config = await get_guild_config(guild_id)

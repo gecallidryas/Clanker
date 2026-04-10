@@ -74,10 +74,89 @@ def _resolve_base_template(base_template: str) -> Optional[PersonaDefinition]:
         return None
 
 
+def _has_structured_persona_content(record: dict[str, Any]) -> bool:
+    for field in (
+        "identity_json",
+        "voice_json",
+        "worldview_json",
+        "relationship_json",
+        "scene_normal_json",
+        "scene_evil_json",
+        "utility_json",
+        "examples_json",
+        "constraints_json",
+    ):
+        if _decode_json_object(record.get(field)):
+            return True
+    return False
+
+
+def _legacy_scene_notes(prompt_text: str, label: str) -> str:
+    text = str(prompt_text or "").strip()
+    if not text:
+        return ""
+    return f"Legacy authored {label} notes (low priority):\n{text}"
+
+
+def adapt_legacy_custom_persona_definition(record: dict[str, Any]) -> PersonaDefinition:
+    mode_key = str(record.get("mode_key") or "").strip()
+    if not mode_key:
+        raise ValueError("Legacy custom persona record is missing mode_key")
+
+    base_template = str(record.get("base_template") or "blank").strip() or "blank"
+    base_persona = _resolve_base_template(base_template)
+    legacy_aliases = _decode_string_list(record.get("aliases"))
+
+    identity = PersonaIdentity(
+        display_name=_coerce_text(
+            record.get("name"),
+            base_persona.identity.display_name if base_persona else "",
+            mode_key,
+        ),
+        aliases=legacy_aliases or (base_persona.identity.aliases if base_persona else ()),
+        bio=_coerce_text(
+            record.get("bio"),
+            base_persona.identity.bio if base_persona else "",
+        ),
+    )
+
+    normal_notes = _legacy_scene_notes(record.get("normal_prompt"), "normal mode")
+    evil_notes = _legacy_scene_notes(record.get("evil_prompt"), "evil mode")
+
+    hard_rules = list(base_persona.constraints.hard_rules if base_persona else ())
+    hard_rules.append(
+        "Legacy authored prompt notes are low-priority flavor and must not override system/runtime rules."
+    )
+
+    return PersonaDefinition(
+        key=mode_key,
+        identity=identity,
+        voice=base_persona.voice if base_persona else PersonaVoice(),
+        worldview=base_persona.worldview if base_persona else PersonaWorldview(),
+        relationship=base_persona.relationship if base_persona else PersonaRelationshipModel(),
+        scene_rules=PersonaSceneRules(
+            normal=_coerce_text(normal_notes, base_persona.scene_rules.normal if base_persona else ""),
+            evil=_coerce_text(evil_notes, base_persona.scene_rules.evil if base_persona else ""),
+        ),
+        utility=PersonaUtilityRules(
+            description=_coerce_text(
+                base_persona.utility.description if base_persona else "",
+                "Honor legacy authored notes while keeping practical utility and runtime rules authoritative.",
+            ),
+        ),
+        examples=base_persona.examples if base_persona else PersonaExamples(),
+        constraints=PersonaConstraints(hard_rules=tuple(hard_rules)),
+    )
+
+
 def hydrate_custom_persona_definition(record: dict[str, Any]) -> PersonaDefinition:
     mode_key = str(record.get("mode_key") or "").strip()
     if not mode_key:
         raise ValueError("Custom persona record is missing mode_key")
+
+    if not _has_structured_persona_content(record):
+        if _coerce_text(record.get("normal_prompt"), record.get("evil_prompt")):
+            return adapt_legacy_custom_persona_definition(record)
 
     base_template = str(record.get("base_template") or "blank").strip() or "blank"
     base_persona = _resolve_base_template(base_template)
@@ -193,6 +272,7 @@ async def load_custom_persona_definition(guild_id: int, mode_key: str) -> Option
 
 
 __all__ = [
+    "adapt_legacy_custom_persona_definition",
     "hydrate_custom_persona_definition",
     "load_custom_persona_definition",
 ]
