@@ -98,6 +98,12 @@ def _legacy_scene_notes(prompt_text: str, label: str) -> str:
     return f"Legacy authored {label} notes (low priority):\n{text}"
 
 
+def _append_note(items: tuple[str, ...], note: str) -> tuple[str, ...]:
+    if not note:
+        return items
+    return (*items, note)
+
+
 def adapt_legacy_custom_persona_definition(record: dict[str, Any]) -> PersonaDefinition:
     mode_key = str(record.get("mode_key") or "").strip()
     if not mode_key:
@@ -135,8 +141,8 @@ def adapt_legacy_custom_persona_definition(record: dict[str, Any]) -> PersonaDef
         worldview=base_persona.worldview if base_persona else PersonaWorldview(),
         relationship=base_persona.relationship if base_persona else PersonaRelationshipModel(),
         scene_rules=PersonaSceneRules(
-            normal=_coerce_text(normal_notes, base_persona.scene_rules.normal if base_persona else ""),
-            evil=_coerce_text(evil_notes, base_persona.scene_rules.evil if base_persona else ""),
+            normal=base_persona.scene_rules.normal if base_persona else "",
+            evil=base_persona.scene_rules.evil if base_persona else "",
         ),
         utility=PersonaUtilityRules(
             description=_coerce_text(
@@ -144,7 +150,10 @@ def adapt_legacy_custom_persona_definition(record: dict[str, Any]) -> PersonaDef
                 "Honor legacy authored notes while keeping practical utility and runtime rules authoritative.",
             ),
         ),
-        examples=base_persona.examples if base_persona else PersonaExamples(),
+        examples=PersonaExamples(
+            normal=_append_note(base_persona.examples.normal if base_persona else (), normal_notes),
+            evil=_append_note(base_persona.examples.evil if base_persona else (), evil_notes),
+        ),
         constraints=PersonaConstraints(hard_rules=tuple(hard_rules)),
     )
 

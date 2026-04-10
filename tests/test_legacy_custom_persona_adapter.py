@@ -128,6 +128,7 @@ class LegacyCustomPersonaAdapterTests(unittest.IsolatedAsyncioTestCase):
         compiled = self.compile_persona_sections(persona, evil_mode=True)
         compiled_text = "\n\n".join(f"{section.title}\n{section.body}" for section in compiled)
         self.assertIn(evil_prompt, compiled_text)
+        self.assertIn("EXAMPLE REPLIES", compiled_text)
 
     async def test_ai_brain_build_prompt_compiles_legacy_custom_persona_sections(self):
         guild_id, mode_key, evil_prompt = await self._seed_legacy_custom_persona()
@@ -201,7 +202,7 @@ class LegacyCustomPersonaAdapterTests(unittest.IsolatedAsyncioTestCase):
 
         self.assertIn("=== ROLEPLAY CONTRACT ===", prompt)
         self.assertIn("=== ACTIVE PERSONA IDENTITY ===", prompt)
-        self.assertIn("=== EVIL MODE SCENE RULES ===", prompt)
+        self.assertIn("=== EXAMPLE REPLIES ===", prompt)
         self.assertIn(evil_prompt, prompt)
 
 
