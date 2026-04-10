@@ -6,6 +6,7 @@ from __future__ import annotations
 
 from dataclasses import dataclass
 from datetime import datetime, timedelta
+import json
 from pathlib import Path
 import re
 from typing import Optional
@@ -24,6 +25,7 @@ from utils.db_handler import (
     delete_persona_traits,
     get_active_persona_modes,
     get_custom_persona_by_name,
+    get_custom_persona_by_mode_key,
     get_guild_custom_personas,
     sanitize_persona_name,
     set_active_persona_modes,
@@ -35,6 +37,8 @@ from utils.db_handler import (
     upsert_persona_traits,
 )
 from utils.affection_traits import extract_persona_traits
+from utils.api_manager import UserInputError
+from utils.guild_ai import GuildConfigError, generate_guild_gemini_profile_text
 from utils.image_downloader import (
     MAX_AVATAR_BYTES,
     MAX_BANNER_BYTES,
@@ -42,6 +46,14 @@ from utils.image_downloader import (
 )
 from utils.server_avatar import set_custom_avatar, set_mode_avatar
 from utils.logger import get_logger
+from utils.persona_impersonation import (
+    build_generated_bio,
+    build_impersonation_prompt,
+    choose_unique_persona_name,
+    collect_member_messages,
+    copy_member_avatar,
+    parse_impersonation_payload,
+)
 from utils.persona_panel_ui import (
     MANAGE_GUIDANCE,
     delete_persona_with_fallback,
@@ -1026,6 +1038,169 @@ class Persona(commands.Cog):
 
         await interaction.response.send_message(
             f"Persona **{persona.get('name', name)}** deleted. {MANAGE_GUIDANCE}",
+            ephemeral=True,
+        )
+
+    @persona_group.command(
+        name="impersonate",
+        description="Generate a custom persona from a member's message history.",
+    )
+    @app_commands.checks.has_permissions(manage_guild=True)
+    @app_commands.describe(member="User to mirror", name="Optional custom persona name")
+    async def impersonate_persona(
+        self,
+        interaction: discord.Interaction,
+        member: discord.Member,
+        name: Optional[str] = None,
+    ) -> None:
+        if not interaction.guild:
+            await interaction.response.send_message("Use this command in a server.", ephemeral=True)
+            return
+
+        permissions = getattr(interaction.user, "guild_permissions", None)
+        if not getattr(permissions, "manage_guild", False):
+            await interaction.response.send_message(
+                "You need Manage Guild to impersonate a member into a persona.",
+                ephemeral=True,
+            )
+            return
+
+        if getattr(member, "bot", False):
+            await interaction.response.send_message(
+                "Bots can't be used as persona impersonation targets.",
+                ephemeral=True,
+            )
+            return
+
+        await interaction.response.defer(ephemeral=True)
+
+        personas = await get_guild_custom_personas(interaction.guild.id)
+        if len(personas) >= MAX_PERSONAS_PER_GUILD:
+            await interaction.followup.send(
+                "This server already has the maximum number of custom personas.",
+                ephemeral=True,
+            )
+            return
+
+        collected = await collect_member_messages(
+            member,
+            interaction.guild.text_channels,
+            viewer=interaction.guild.me if hasattr(interaction.guild, "me") else None,
+            limit=1000,
+        )
+        if collected.usable_count < 100:
+            await interaction.followup.send(
+                (
+                    f"Not enough usable messages for {member.display_name}. "
+                    f"Scanned {collected.raw_count} messages but only {collected.usable_count} "
+                    "passed filtering. Need at least 100 usable messages."
+                ),
+                ephemeral=True,
+            )
+            return
+
+        requested_name = (name or member.display_name or "").strip()
+        if not requested_name or not sanitize_persona_name(requested_name):
+            await interaction.followup.send(
+                "Persona name must contain letters or numbers.",
+                ephemeral=True,
+            )
+            return
+
+        persona_name = choose_unique_persona_name(
+            requested_name,
+            {str(persona.get("name") or "").strip() for persona in personas if persona.get("name")},
+        )
+        mode_key = build_custom_mode_key(interaction.guild.id, persona_name)
+        if not mode_key:
+            await interaction.followup.send(
+                "Failed to build a mode key for that persona name.",
+                ephemeral=True,
+            )
+            return
+
+        prompt = build_impersonation_prompt(
+            member_display_name=member.display_name,
+            filtered_messages=collected.usable_messages,
+            raw_count=collected.raw_count,
+            usable_count=collected.usable_count,
+        )
+
+        try:
+            response_text, _provider = await generate_guild_gemini_profile_text(interaction.guild.id, prompt)
+        except GuildConfigError:
+            await interaction.followup.send(
+                "Profile analysis not configured. Ask an admin to set GEMINI_PROFILE_KEY.",
+                ephemeral=True,
+            )
+            return
+        except UserInputError:
+            await interaction.followup.send(
+                "Gemini could not analyze that message corpus safely.",
+                ephemeral=True,
+            )
+            return
+        except Exception as exc:
+            logger.warning("Persona impersonation Gemini generation failed: %s", exc)
+            await interaction.followup.send(
+                "Persona generation failed while contacting Gemini. Try again later.",
+                ephemeral=True,
+            )
+            return
+
+        try:
+            payload = parse_impersonation_payload(response_text)
+        except ValueError as exc:
+            await interaction.followup.send(
+                f"Gemini returned an invalid impersonation payload: {exc}",
+                ephemeral=True,
+            )
+            return
+
+        avatar_path, avatar_error = await copy_member_avatar(
+            member,
+            guild_id=interaction.guild.id,
+            persona_name=persona_name,
+        )
+
+        try:
+            await create_custom_persona(
+                guild_id=interaction.guild.id,
+                name=persona_name,
+                mode_key=mode_key,
+                bio=build_generated_bio(payload.bio, member_display_name=member.display_name),
+                avatar_path=avatar_path,
+                banner_path=None,
+                aliases=payload.aliases,
+                normal_prompt=payload.normal_prompt,
+                evil_prompt=payload.evil_prompt,
+                created_by=interaction.user.id,
+                sample_dialogues_json=json.dumps(payload.sample_dialogues),
+            )
+        except sqlite3.IntegrityError:
+            await interaction.followup.send(
+                "Failed to save the impersonated persona because the generated name collided in storage.",
+                ephemeral=True,
+            )
+            return
+
+        traits = extract_persona_traits(payload.normal_prompt, payload.evil_prompt)
+        if traits:
+            try:
+                await upsert_persona_traits(interaction.guild.id, mode_key, traits)
+            except Exception as exc:
+                logger.warning("Failed to save impersonated persona traits: %s", exc)
+
+        avatar_note = ""
+        if avatar_error:
+            avatar_note = f" Avatar copy failed, so it was saved without an avatar ({avatar_error})."
+
+        await interaction.followup.send(
+            (
+                f"Saved inactive custom persona **{persona_name}** from {member.display_name}. "
+                f"Scanned {collected.raw_count} messages and kept {collected.usable_count}.{avatar_note} "
+                f"{MANAGE_GUIDANCE}"
+            ),
             ephemeral=True,
         )
 
