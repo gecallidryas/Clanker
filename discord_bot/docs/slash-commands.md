@@ -32,6 +32,7 @@ Some commands require elevated Discord permissions such as `Manage Guild`, `Admi
 | `/mood` | Check the bot's current mood. | `affection.py` |
 | `/persona delete` | Delete a custom persona. | `persona.py` |
 | `/persona edit` | Edit a custom persona. | `persona.py` |
+| `/persona impersonate` | Generate a saved custom persona from a member's recent messages and avatar. | `persona.py` |
 | `/persona manage` | Open the persona and presentation admin panel. | `persona.py` |
 
 ## Vision And Media
