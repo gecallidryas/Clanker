@@ -1143,6 +1143,7 @@ async def _init_guild_schema(db: aiosqlite.Connection) -> None:
             guild_id INTEGER NOT NULL,
             name TEXT NOT NULL,
             aliases TEXT,
+            sample_dialogues_json TEXT,
             mode_key TEXT NOT NULL,
             bio TEXT,
             avatar_path TEXT,
@@ -1211,6 +1212,7 @@ async def _init_guild_schema(db: aiosqlite.Connection) -> None:
                     guild_id INTEGER NOT NULL,
                     name TEXT NOT NULL,
                     aliases TEXT,
+                    sample_dialogues_json TEXT,
                     mode_key TEXT NOT NULL,
                     bio TEXT,
                     avatar_path TEXT,
@@ -1228,10 +1230,10 @@ async def _init_guild_schema(db: aiosqlite.Connection) -> None:
             await db.execute(
                 """
                 INSERT INTO custom_personas_new
-                    (id, guild_id, name, aliases, mode_key, bio, avatar_path, banner_path,
+                    (id, guild_id, name, aliases, sample_dialogues_json, mode_key, bio, avatar_path, banner_path,
                      normal_prompt, evil_prompt, created_by, created_at, updated_at, is_active)
                 SELECT
-                    id, guild_id, name, NULL, mode_key, bio, avatar_path, banner_path,
+                    id, guild_id, name, NULL, NULL, mode_key, bio, avatar_path, banner_path,
                     normal_prompt, evil_prompt, created_by, created_at, updated_at, is_active
                 FROM custom_personas
                 """
@@ -1245,6 +1247,11 @@ async def _init_guild_schema(db: aiosqlite.Connection) -> None:
     # Add aliases column to custom_personas if missing (migration)
     try:
         await db.execute("ALTER TABLE custom_personas ADD COLUMN aliases TEXT")
+    except Exception:
+        pass
+
+    try:
+        await db.execute("ALTER TABLE custom_personas ADD COLUMN sample_dialogues_json TEXT")
     except Exception:
         pass
 
@@ -4443,20 +4450,22 @@ async def create_custom_persona(
     evil_prompt: Optional[str],
     created_by: int,
     aliases: Optional[List[str]] = None,
+    sample_dialogues_json: Optional[str] = None,
 ) -> int:
     """Create a custom persona and return its row id."""
     async with guild_db(guild_id) as db:
         cursor = await db.execute(
             """
             INSERT INTO custom_personas
-                (guild_id, name, aliases, mode_key, bio, avatar_path, banner_path,
+                (guild_id, name, aliases, sample_dialogues_json, mode_key, bio, avatar_path, banner_path,
                  normal_prompt, evil_prompt, created_by)
-            VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
+            VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
             """,
             (
                 guild_id,
                 name,
                 _serialize_aliases(aliases),
+                sample_dialogues_json,
                 mode_key,
                 bio,
                 avatar_path,
@@ -4533,6 +4542,7 @@ async def update_custom_persona(
         "banner_path",
         "normal_prompt",
         "evil_prompt",
+        "sample_dialogues_json",
         "updated_at",
         "is_active",
     }
