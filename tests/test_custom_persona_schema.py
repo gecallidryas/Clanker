@@ -135,10 +135,16 @@ class CustomPersonaSchemaTests(unittest.IsolatedAsyncioTestCase):
         from personas.custom import load_custom_persona_definition
 
         persona = await load_custom_persona_definition(guild_id, mode_key)
+        from personas.builtin import get_builtin_persona
+
+        expected_aliases: list[str] = []
+        for alias in (*get_builtin_persona("mode_oneesan").identity.aliases, "velvet", "vel"):
+            if alias not in expected_aliases:
+                expected_aliases.append(alias)
 
         self.assertEqual(persona.key, mode_key)
         self.assertEqual(persona.identity.display_name, "Velvet")
-        self.assertEqual(persona.identity.aliases, ("velvet", "vel"))
+        self.assertEqual(persona.identity.aliases, tuple(expected_aliases))
         self.assertEqual(persona.identity.bio, "Structured bio")
         self.assertEqual(persona.voice.tone, "soft and composed")
         self.assertEqual(

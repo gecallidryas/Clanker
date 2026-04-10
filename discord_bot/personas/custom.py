@@ -208,10 +208,9 @@ def hydrate_custom_persona_definition(record: dict[str, Any]) -> PersonaDefiniti
             base_persona.identity.display_name if base_persona else "",
             mode_key,
         ),
-        aliases=(
-            _decode_string_list(identity_data.get("aliases"))
-            or legacy_aliases
-            or (base_persona.identity.aliases if base_persona else ())
+        aliases=_merge_string_tuples(
+            base_persona.identity.aliases if base_persona else (),
+            identity_data.get("aliases") or legacy_aliases,
         ),
         bio=_coerce_text(
             identity_data.get("bio"),
