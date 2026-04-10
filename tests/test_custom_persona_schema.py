@@ -141,11 +141,22 @@ class CustomPersonaSchemaTests(unittest.IsolatedAsyncioTestCase):
         self.assertEqual(persona.identity.aliases, ("velvet", "vel"))
         self.assertEqual(persona.identity.bio, "Structured bio")
         self.assertEqual(persona.voice.tone, "soft and composed")
-        self.assertEqual(persona.voice.signature_phrases, ("my star",))
+        self.assertEqual(
+            persona.voice.signature_phrases,
+            ("Ara ara~", "my dear", "little one", "fufu~", "my star"),
+        )
         self.assertEqual(persona.worldview.description, "Treats care as devotion.")
         self.assertEqual(persona.relationship.description, "Warm and protective.")
         self.assertEqual(persona.scene_rules.normal, "Stay intimate but restrained.")
-        self.assertEqual(persona.examples.normal, ("Let me help you gently.",))
+        self.assertEqual(
+            persona.examples.normal,
+            (
+                "Ara ara~ breathe with me first, then we can solve this step by step.",
+                "My dear, here is a clean checklist so you can finish this calmly.",
+                "Let me help you gently.",
+            ),
+        )
+        self.assertIn("Never identify as Femmy or as a femboy.", persona.constraints.hard_rules)
         self.assertIn("Never drop the velvet motif.", persona.constraints.hard_rules)
         self.assertEqual(
             persona.utility.description,

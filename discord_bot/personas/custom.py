@@ -28,6 +28,13 @@ def _coerce_text(*candidates: Any) -> str:
     return ""
 
 
+def _merge_text(base_value: str, override_value: Any) -> str:
+    override_text = str(override_value or "").strip()
+    if override_text:
+        return override_text
+    return str(base_value or "").strip()
+
+
 def _decode_json_object(value: Any) -> dict[str, Any]:
     if isinstance(value, dict):
         return value
@@ -62,6 +69,19 @@ def _decode_string_list(value: Any) -> tuple[str, ...]:
         for token in re.split(r"[,\\n]+", value)
         if token and token.strip()
     )
+
+
+def _merge_string_tuples(base_items: tuple[str, ...], override_value: Any) -> tuple[str, ...]:
+    override_items = _decode_string_list(override_value)
+    if not base_items and not override_items:
+        return ()
+    merged: list[str] = []
+    for item in (*base_items, *override_items):
+        token = str(item).strip()
+        if not token or token in merged:
+            continue
+        merged.append(token)
+    return tuple(merged)
 
 
 def _resolve_base_template(base_template: str) -> Optional[PersonaDefinition]:
@@ -201,62 +221,60 @@ def hydrate_custom_persona_definition(record: dict[str, Any]) -> PersonaDefiniti
     )
 
     voice = PersonaVoice(
-        tone=_coerce_text(voice_data.get("tone"), base_persona.voice.tone if base_persona else ""),
-        cadence=_coerce_text(voice_data.get("cadence"), base_persona.voice.cadence if base_persona else ""),
-        signature_phrases=(
-            _decode_string_list(voice_data.get("signature_phrases"))
-            or (base_persona.voice.signature_phrases if base_persona else ())
+        tone=_merge_text(base_persona.voice.tone if base_persona else "", voice_data.get("tone")),
+        cadence=_merge_text(base_persona.voice.cadence if base_persona else "", voice_data.get("cadence")),
+        signature_phrases=_merge_string_tuples(
+            base_persona.voice.signature_phrases if base_persona else (),
+            voice_data.get("signature_phrases"),
         ),
-        forbidden_phrases=(
-            _decode_string_list(voice_data.get("forbidden_phrases"))
-            or (base_persona.voice.forbidden_phrases if base_persona else ())
+        forbidden_phrases=_merge_string_tuples(
+            base_persona.voice.forbidden_phrases if base_persona else (),
+            voice_data.get("forbidden_phrases"),
         ),
     )
 
     worldview = PersonaWorldview(
-        description=_coerce_text(
-            worldview_data.get("description"),
+        description=_merge_text(
             base_persona.worldview.description if base_persona else "",
+            worldview_data.get("description"),
         ),
     )
     relationship = PersonaRelationshipModel(
-        description=_coerce_text(
-            relationship_data.get("description"),
+        description=_merge_text(
             base_persona.relationship.description if base_persona else "",
+            relationship_data.get("description"),
         ),
     )
     scene_rules = PersonaSceneRules(
-        normal=_coerce_text(
-            scene_normal_data.get("description"),
-            scene_normal_data.get("normal"),
+        normal=_merge_text(
             base_persona.scene_rules.normal if base_persona else "",
+            _coerce_text(scene_normal_data.get("description"), scene_normal_data.get("normal")),
         ),
-        evil=_coerce_text(
-            scene_evil_data.get("description"),
-            scene_evil_data.get("evil"),
+        evil=_merge_text(
             base_persona.scene_rules.evil if base_persona else "",
+            _coerce_text(scene_evil_data.get("description"), scene_evil_data.get("evil")),
         ),
     )
     utility = PersonaUtilityRules(
-        description=_coerce_text(
-            utility_data.get("description"),
+        description=_merge_text(
             base_persona.utility.description if base_persona else "",
+            utility_data.get("description"),
         ),
     )
     examples = PersonaExamples(
-        normal=(
-            _decode_string_list(examples_data.get("normal"))
-            or (base_persona.examples.normal if base_persona else ())
+        normal=_merge_string_tuples(
+            base_persona.examples.normal if base_persona else (),
+            examples_data.get("normal"),
         ),
-        evil=(
-            _decode_string_list(examples_data.get("evil"))
-            or (base_persona.examples.evil if base_persona else ())
+        evil=_merge_string_tuples(
+            base_persona.examples.evil if base_persona else (),
+            examples_data.get("evil"),
         ),
     )
     constraints = PersonaConstraints(
-        hard_rules=(
-            _decode_string_list(constraints_data.get("hard_rules"))
-            or (base_persona.constraints.hard_rules if base_persona else ())
+        hard_rules=_merge_string_tuples(
+            base_persona.constraints.hard_rules if base_persona else (),
+            constraints_data.get("hard_rules"),
         ),
     )
 
