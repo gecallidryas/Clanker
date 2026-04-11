@@ -117,6 +117,50 @@ def _normalize_examples(examples: Sequence[str] | None) -> list[str]:
     return normalized
 
 
+def _decode_aliases(value: object) -> list[str]:
+    if isinstance(value, list):
+        return [str(item).strip().lower() for item in value if str(item).strip()]
+    if not isinstance(value, str) or not value:
+        return []
+    try:
+        decoded = json.loads(value)
+    except json.JSONDecodeError:
+        decoded = None
+    if isinstance(decoded, list):
+        return [str(item).strip().lower() for item in decoded if str(item).strip()]
+    return _parse_aliases(value)
+
+
+def _merge_aliases(*alias_sources: object) -> list[str]:
+    merged: list[str] = []
+    for source in alias_sources:
+        for alias in _decode_aliases(source):
+            if alias in merged:
+                continue
+            merged.append(alias)
+    return merged
+
+
+def _decode_json_object(value: object) -> dict[str, object]:
+    if isinstance(value, dict):
+        return value
+    if not isinstance(value, str) or not value:
+        return {}
+    try:
+        decoded = json.loads(value)
+    except json.JSONDecodeError:
+        return {}
+    if not isinstance(decoded, dict):
+        return {}
+    return decoded
+
+
+def _encode_json_object(value: dict[str, object]) -> str | None:
+    if not value:
+        return None
+    return json.dumps(value, ensure_ascii=True)
+
+
 async def apply_structured_persona_fields(
     *,
     guild_id: int,
@@ -128,6 +172,7 @@ async def apply_structured_persona_fields(
     scene_evil: Optional[str] = None,
     examples_normal: Sequence[str] | None = None,
     examples_evil: Sequence[str] | None = None,
+    constraints_rules: Sequence[str] | None = None,
 ) -> None:
     normalized_base_template = _normalize_base_template(base_template)
 
@@ -137,6 +182,7 @@ async def apply_structured_persona_fields(
     scene_evil_text = (scene_evil or "").strip()
     examples_normal_list = _normalize_examples(examples_normal)
     examples_evil_list = _normalize_examples(examples_evil)
+    constraints_list = _normalize_examples(constraints_rules)
 
     voice_json = json.dumps({"tone": voice_tone_text}, ensure_ascii=True) if voice_tone_text else None
     worldview_json = (
@@ -155,6 +201,11 @@ async def apply_structured_persona_fields(
     if examples_evil_list:
         examples_payload["evil"] = examples_evil_list
     examples_json = json.dumps(examples_payload, ensure_ascii=True) if examples_payload else None
+    constraints_json = (
+        json.dumps({"hard_rules": constraints_list}, ensure_ascii=True)
+        if constraints_list
+        else None
+    )
 
     async with guild_db(guild_id) as db:
         await db.execute(
@@ -166,7 +217,8 @@ async def apply_structured_persona_fields(
                 worldview_json = ?,
                 scene_normal_json = ?,
                 scene_evil_json = ?,
-                examples_json = ?
+                examples_json = ?,
+                constraints_json = ?
             WHERE guild_id = ? AND mode_key = ?
             """,
             (
@@ -177,6 +229,7 @@ async def apply_structured_persona_fields(
                 scene_normal_json,
                 scene_evil_json,
                 examples_json,
+                constraints_json,
                 guild_id,
                 mode_key,
             ),
@@ -388,6 +441,7 @@ async def create_persona_from_inputs(
     scene_evil: Optional[str] = None,
     examples_normal: Sequence[str] | None = None,
     examples_evil: Sequence[str] | None = None,
+    constraints_rules: Sequence[str] | None = None,
     action: str = "persona_create",
 ) -> str:
     clean_name = (name or "").strip()
@@ -430,6 +484,7 @@ async def create_persona_from_inputs(
         scene_evil=scene_evil,
         examples_normal=examples_normal,
         examples_evil=examples_evil,
+        constraints_rules=constraints_rules,
     )
 
     await add_guild_config_audit(
@@ -530,16 +585,83 @@ async def duplicate_custom_persona(
     persona = await get_custom_persona_by_mode_key(guild_id, source_mode_key)
     if not persona:
         raise ValueError("Only custom personas can be duplicated.")
-    return await create_persona_from_inputs(
+
+    voice_data = _decode_json_object(persona.get("voice_json"))
+    worldview_data = _decode_json_object(persona.get("worldview_json"))
+    scene_normal_data = _decode_json_object(persona.get("scene_normal_json"))
+    scene_evil_data = _decode_json_object(persona.get("scene_evil_json"))
+    examples_data = _decode_json_object(persona.get("examples_json"))
+    constraints_data = _decode_json_object(persona.get("constraints_json"))
+    identity_data = _decode_json_object(persona.get("identity_json"))
+    merged_aliases = _merge_aliases(
+        persona.get("aliases"),
+        identity_data.get("aliases"),
+    )
+
+    duplicate_mode_key = await create_persona_from_inputs(
         guild_id=guild_id,
         user_id=user_id,
         name=new_name,
         bio=persona.get("bio"),
-        aliases=persona.get("aliases") or [],
+        aliases=merged_aliases,
         normal_prompt=persona.get("normal_prompt") or "",
         evil_prompt=persona.get("evil_prompt"),
+        base_template=persona.get("base_template"),
+        voice_tone=str(voice_data.get("tone") or ""),
+        worldview=str(worldview_data.get("description") or ""),
+        scene_normal=str(scene_normal_data.get("normal") or scene_normal_data.get("description") or ""),
+        scene_evil=str(scene_evil_data.get("evil") or scene_evil_data.get("description") or ""),
+        examples_normal=examples_data.get("normal") if isinstance(examples_data.get("normal"), list) else None,
+        examples_evil=examples_data.get("evil") if isinstance(examples_data.get("evil"), list) else None,
+        constraints_rules=(
+            constraints_data.get("hard_rules")
+            if isinstance(constraints_data.get("hard_rules"), list)
+            else None
+        ),
         action="persona_duplicate",
     )
+
+    if identity_data:
+        identity_data["display_name"] = new_name.strip()
+
+    async with guild_db(guild_id) as db:
+        await db.execute(
+            """
+            UPDATE custom_personas
+            SET schema_version = ?,
+                base_template = ?,
+                identity_json = ?,
+                voice_json = ?,
+                worldview_json = ?,
+                relationship_json = ?,
+                scene_normal_json = ?,
+                scene_evil_json = ?,
+                utility_json = ?,
+                examples_json = ?,
+                constraints_json = ?,
+                author_notes_text = ?
+            WHERE guild_id = ? AND mode_key = ?
+            """,
+            (
+                persona.get("schema_version") or 1,
+                persona.get("base_template") or "blank",
+                _encode_json_object(identity_data),
+                persona.get("voice_json"),
+                persona.get("worldview_json"),
+                persona.get("relationship_json"),
+                persona.get("scene_normal_json"),
+                persona.get("scene_evil_json"),
+                persona.get("utility_json"),
+                persona.get("examples_json"),
+                persona.get("constraints_json"),
+                persona.get("author_notes_text"),
+                guild_id,
+                duplicate_mode_key,
+            ),
+        )
+        await db.commit()
+
+    return duplicate_mode_key
 
 
 async def delete_persona_with_fallback(
