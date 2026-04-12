@@ -1255,6 +1255,27 @@ async def _init_guild_schema(db: aiosqlite.Connection) -> None:
     except Exception:
         pass
 
+    # Add structured persona columns to custom_personas if missing (migration)
+    structured_persona_columns = (
+        ("schema_version", "INTEGER NOT NULL DEFAULT 1"),
+        ("base_template", "TEXT NOT NULL DEFAULT 'blank'"),
+        ("identity_json", "TEXT"),
+        ("voice_json", "TEXT"),
+        ("worldview_json", "TEXT"),
+        ("relationship_json", "TEXT"),
+        ("scene_normal_json", "TEXT"),
+        ("scene_evil_json", "TEXT"),
+        ("utility_json", "TEXT"),
+        ("examples_json", "TEXT"),
+        ("constraints_json", "TEXT"),
+        ("author_notes_text", "TEXT"),
+    )
+    for column_name, column_type in structured_persona_columns:
+        try:
+            await db.execute(f"ALTER TABLE custom_personas ADD COLUMN {column_name} {column_type}")
+        except Exception:
+            pass
+
 
     # Add birthday column if missing (migration)
     try:
