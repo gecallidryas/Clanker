@@ -8,7 +8,8 @@ from cogs.ai_brain import AIBrain
 
 class PersonaPromptDialogueTests(unittest.IsolatedAsyncioTestCase):
     async def test_build_prompt_prefers_custom_persona_dialogues(self) -> None:
-        brain = AIBrain(bot=SimpleNamespace())
+        with patch("cogs.ai_brain.register_builtin_tools", lambda: None):
+            brain = AIBrain(bot=SimpleNamespace())
         custom_persona = {
             "normal_prompt": "persona prompt",
             "sample_dialogues_json": json.dumps(["first line", "second line"]),
@@ -18,7 +19,8 @@ class PersonaPromptDialogueTests(unittest.IsolatedAsyncioTestCase):
         self.assertEqual(parsed, ["first line", "second line"])
 
     async def test_resolve_sample_dialogues_prefers_custom_persona_dialogues(self) -> None:
-        brain = AIBrain(bot=SimpleNamespace())
+        with patch("cogs.ai_brain.register_builtin_tools", lambda: None):
+            brain = AIBrain(bot=SimpleNamespace())
         custom_persona = {
             "normal_prompt": "persona prompt",
             "sample_dialogues_json": json.dumps(["first line", "second line"]),

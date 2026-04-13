@@ -256,6 +256,7 @@ class AIBrainMultiPersonaRuntimeTests(unittest.TestCase):
             original_get_guild_config = ai_brain_mod.get_guild_config
             original_get_affection_by_mode = ai_brain_mod.get_affection_by_mode
             original_get_personal_memory_privacy = ai_brain_mod.get_personal_memory_privacy
+            original_require_message_member = ai_brain_mod._require_message_member
             try:
                 ai_brain_mod.ai_limiter.acquire = _acquire
                 ai_brain_mod.increment_stat = _fake_increment_stat
@@ -264,6 +265,7 @@ class AIBrainMultiPersonaRuntimeTests(unittest.TestCase):
                 ai_brain_mod.get_guild_config = _return_none
                 ai_brain_mod.get_affection_by_mode = _return_none
                 ai_brain_mod.get_personal_memory_privacy = _return_none
+                ai_brain_mod._require_message_member = lambda msg: msg.author
 
                 async def _fake_get_server_mode(_guild_id):
                     return "mode_femboy"
@@ -347,6 +349,7 @@ class AIBrainMultiPersonaRuntimeTests(unittest.TestCase):
                 ai_brain_mod.get_guild_config = original_get_guild_config
                 ai_brain_mod.get_affection_by_mode = original_get_affection_by_mode
                 ai_brain_mod.get_personal_memory_privacy = original_get_personal_memory_privacy
+                ai_brain_mod._require_message_member = original_require_message_member
 
         asyncio.run(_run())
 
