@@ -7,6 +7,8 @@ from typing import Any, Optional
 
 import aiohttp
 from duckduckgo_search import DDGS
+from utils.api_manager import _parse_timeout
+from utils.guild_ai import get_guild_gemini_keys, get_guild_gemini_model
 
 from utils.db_handler import get_guild_config
 from utils.encryption import get_encryption
@@ -14,6 +16,13 @@ from utils.logger import get_logger
 from utils.tool_context import ToolContext
 from utils.tool_registry import ToolDefinition, ToolResult
 from utils.url_fetcher import fetch_url_text
+
+try:
+    from google import genai
+    from google.genai import types as genai_types
+except ImportError:  # pragma: no cover - exercised in lightweight test environments
+    genai = None
+    genai_types = None
 
 logger = get_logger(__name__)
 
@@ -35,6 +44,122 @@ def _cache_get(provider: str, query: str) -> Optional[list[dict[str, str]]]:
 
 def _cache_set(provider: str, query: str, results: list[dict[str, str]]) -> None:
     _cache[(provider, query)] = (time.time(), results)
+
+
+async def _get_gemini_search_config(guild_id: int) -> Optional[tuple[list[str], str]]:
+    keys = await get_guild_gemini_keys(guild_id)
+    if not keys:
+        return None
+    model = await get_guild_gemini_model(guild_id)
+    return keys, model
+
+
+def _normalize_snippet(text: str, limit: int = 280) -> str:
+    normalized = " ".join((text or "").split())
+    if len(normalized) <= limit:
+        return normalized
+    return normalized[: limit - 1].rstrip() + "…"
+
+
+def _extract_gemini_results(response: Any, max_results: int) -> list[dict[str, str]]:
+    candidates = getattr(response, "candidates", None) or []
+    grounding_metadata = getattr(candidates[0], "grounding_metadata", None) if candidates else None
+    if grounding_metadata is None:
+        return []
+
+    snippet_map: dict[int, list[str]] = {}
+    for support in getattr(grounding_metadata, "grounding_supports", None) or []:
+        segment = getattr(support, "segment", None)
+        snippet = _normalize_snippet(getattr(segment, "text", None) or "")
+        if not snippet:
+            continue
+        for chunk_index in getattr(support, "grounding_chunk_indices", None) or []:
+            try:
+                index = int(chunk_index)
+            except (TypeError, ValueError):
+                continue
+            bucket = snippet_map.setdefault(index, [])
+            if snippet not in bucket:
+                bucket.append(snippet)
+
+    results: list[dict[str, str]] = []
+    seen_urls: set[str] = set()
+    for index, chunk in enumerate(getattr(grounding_metadata, "grounding_chunks", None) or []):
+        web_chunk = getattr(chunk, "web", None)
+        url = (getattr(web_chunk, "uri", None) or "").strip()
+        if not url or url in seen_urls:
+            continue
+        title = (
+            getattr(web_chunk, "title", None)
+            or getattr(web_chunk, "domain", None)
+            or "Untitled source"
+        )
+        snippets = snippet_map.get(index, [])
+        results.append(
+            {
+                "title": str(title).strip() or "Untitled source",
+                "url": url,
+                "snippet": " ".join(snippets).strip(),
+            }
+        )
+        seen_urls.add(url)
+        if len(results) >= max_results:
+            break
+    return results
+
+
+def _run_gemini_search_sync(
+    api_key: str,
+    model: str,
+    query: str,
+    max_results: int,
+) -> list[dict[str, str]]:
+    if genai is None or genai_types is None:
+        raise RuntimeError("google-genai is not installed")
+
+    client = genai.Client(api_key=api_key)
+    response = client.models.generate_content(
+        model=model,
+        contents=query,
+        config=genai_types.GenerateContentConfig(
+            tools=[genai_types.Tool(google_search=genai_types.GoogleSearch())]
+        ),
+    )
+    return _extract_gemini_results(response, max_results=max_results)
+
+
+async def gemini_search(
+    query: str,
+    api_keys: list[str],
+    model: str,
+    max_results: int = 5,
+) -> Optional[list[dict[str, str]]]:
+    cached = _cache_get("gemini", query)
+    if cached is not None:
+        return cached
+
+    request_timeout = _parse_timeout(os.getenv("GEMINI_REQUEST_TIMEOUT_SECONDS"), 30.0)
+    last_error: Optional[Exception] = None
+    for api_key in api_keys:
+        try:
+            results = await asyncio.wait_for(
+                asyncio.to_thread(
+                    _run_gemini_search_sync,
+                    api_key,
+                    model,
+                    query,
+                    max_results,
+                ),
+                timeout=request_timeout,
+            )
+            _cache_set("gemini", query, results)
+            return results
+        except Exception as exc:
+            last_error = exc
+            logger.warning("Gemini search failed: %s", exc)
+    if last_error is not None:
+        logger.warning("Gemini search exhausted all configured keys: %s", last_error)
+    return None
 
 
 async def duckduckgo_search(query: str, max_results: int = 5) -> list[dict[str, str]]:
@@ -117,10 +242,14 @@ def _format_results(results: list[dict[str, str]]) -> str:
         return "No results found."
     lines = []
     for idx, item in enumerate(results, start=1):
-        title = item.get("title") or "Untitled"
+        title = item.get("title") or "Untitled source"
         url = item.get("url") or ""
-        snippet = item.get("snippet") or ""
-        lines.append(f"{idx}. {title} - {url} ({snippet})")
+        snippet = _normalize_snippet(item.get("snippet") or "")
+        lines.append(f"{idx}. [{title}]({url})" if url else f"{idx}. {title}")
+        if snippet:
+            lines.append(snippet)
+        if idx < len(results):
+            lines.append("")
     return "\n".join(lines)
 
 
@@ -131,14 +260,33 @@ async def _handle_web_search(context: ToolContext, args: dict[str, Any]) -> Tool
 
     max_results = int(args.get("max_results") or 5)
     max_results = max(1, min(max_results, 8))
-    brave_key = await _get_brave_key(context.guild.id)
+    guild_id = getattr(getattr(context, "guild", None), "id", None)
+    if guild_id is None:
+        return ToolResult(ok=False, summary="Web search is only available in servers.")
 
-    if brave_key:
-        results = await brave_search(query, brave_key, max_results=max_results)
-        provider = "brave"
+    gemini_config = await _get_gemini_search_config(guild_id)
+    if gemini_config:
+        api_keys, model = gemini_config
+        gemini_results = await gemini_search(query, api_keys, model, max_results=max_results)
+        if gemini_results is not None:
+            results = gemini_results
+            provider = "gemini"
+        else:
+            brave_key = await _get_brave_key(guild_id)
+            if brave_key:
+                results = await brave_search(query, brave_key, max_results=max_results)
+                provider = "brave"
+            else:
+                results = await duckduckgo_search(query, max_results=max_results)
+                provider = "duckduckgo"
     else:
-        results = await duckduckgo_search(query, max_results=max_results)
-        provider = "duckduckgo"
+        brave_key = await _get_brave_key(guild_id)
+        if brave_key:
+            results = await brave_search(query, brave_key, max_results=max_results)
+            provider = "brave"
+        else:
+            results = await duckduckgo_search(query, max_results=max_results)
+            provider = "duckduckgo"
 
     summary = f"Web search ({provider}) results for '{query}'."
     return ToolResult(

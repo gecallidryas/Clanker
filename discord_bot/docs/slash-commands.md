@@ -35,6 +35,14 @@ Some commands require elevated Discord permissions such as `Manage Guild`, `Admi
 | `/persona impersonate` | Generate a saved custom persona from a member's recent messages and avatar. | `persona.py` |
 | `/persona manage` | Open the persona and presentation admin panel. | `persona.py` |
 
+Persona notes:
+
+- `/persona manage` is the main admin surface for built-in persona selection, custom persona lifecycle actions, active-persona selection, and evil-mode toggling.
+- In the full persona-system rollout, built-in and custom personas share one structured runtime contract instead of relying only on flat prompt blobs.
+- Custom personas can be authored as structured variants of a built-in base persona while older prompt-only personas keep working through a compatibility path.
+- Multi-persona reply fan-out is still queue-based. One persona speaks at a time, and additional triggered personas run as follow-up jobs rather than talking simultaneously.
+- See [`../../docs/feature-full-persona-system.md`](../../docs/feature-full-persona-system.md) for the engineering reference and rollout details.
+
 ## Vision And Media
 
 | Command | Description | Source |

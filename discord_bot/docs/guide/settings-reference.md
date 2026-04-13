@@ -53,7 +53,7 @@ Auto-reply behavior notes:
 - auto-channel threshold `0` means always eligible for evaluation, not always reply
 - users can separately opt out of passive no-mention auto-replies through `/personal privacy` without opting out of personal memory
 - streamed reply concurrency is per `(channel, user)`, not one active stream for the whole channel
-- same-user explicit trigger fragments are coalesced for a short fixed debounce window before prompt execution
+- same-user trigger fragments are coalesced for a short fixed debounce window before prompt execution, and once that turn is pending the user does not need to repeat the mention or trigger on each fragment
 - if the same user adds more text before any visible streamed output appears, the bot restarts that in-flight turn with the merged content
 - if visible output has already started, extra same-user fragments collapse into one buffered follow-up turn after the current same-user turn finishes, including any queued persona replies
 

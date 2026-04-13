@@ -19,14 +19,16 @@ This file is a code-referenced map of the bot's major user-facing features and w
 - Streaming contracts and types: `discord_bot/utils/streaming/types.py`
 - Per-user stream claim registry and Discord stream sender: `discord_bot/utils/streaming/session_registry.py`, `discord_bot/utils/streaming/discord_sender.py`
 - Persona management panel: `discord_bot/utils/persona_panel_ui.py`
+- Persona impersonation generation flow: `discord_bot/cogs/persona.py`, `discord_bot/utils/persona_impersonation.py`
 
 AI reply runtime notes:
 
 - Stream concurrency is scoped per `(channel_id, user_id)`, so different users can receive concurrent streamed replies in the same channel.
-- Same-user explicit trigger fragments sent within the debounce window are merged into one turn and one reply.
+- Same-user trigger fragments sent within the debounce window are merged into one turn and one reply, and later fragments in that pending turn do not need to repeat the mention or trigger word.
 - If the same user sends more text before any visible streamed output appears, the active generation is restarted with the merged content.
 - If visible streamed output has already started, later same-user fragments collapse into one buffered follow-up turn instead of creating overlapping replies, and that follow-up waits for any queued persona replies from the current turn to finish.
 - Conservative passive no-mention auto-reply heuristics are unchanged by this runtime.
+- When an active custom persona has `sample_dialogues_json`, the prompt builder uses those persona-local dialogue examples before falling back to guild-global `/teach sampledialogue` data.
 
 ## Tooling And Capability Flags
 
@@ -67,6 +69,10 @@ AI reply runtime notes:
 - Memories and recall surfaces: `discord_bot/cogs/memories.py`
 - Database-backed memory reconciliation for stored facts, persona attributes, and sample dialogue: `discord_bot/utils/database_summarizer.py`
 - Self-teaching config wiring: `discord_bot/cogs/config.py`, `discord_bot/utils/db_handler.py`
+
+Persona impersonation note:
+
+- `/persona impersonate` uses the guild `GEMINI_PROFILE_KEY` path to analyze a member's recent visible messages and save the result as an inactive custom persona with persona-local sample dialogues.
 
 The memory system has a separate "database summarization" path from channel TLDR summaries. When a user saves personal memory with `/remember personal` or staff teach persona attributes/sample dialogue, the bot can reconcile existing stored entries with the new entry through `DatabaseSummarizer` before writing back to the database. That reconciler currently uses the process-level Gemini summarize manager from `discord_bot/utils/api_manager.py`, so it depends on `GEMINI_SUMMARIZE_KEY` and the `google-genai` package being available at runtime.
 

@@ -354,6 +354,34 @@ class OnMessagePolicyTests(unittest.IsolatedAsyncioTestCase):
         recent_messages = brain.get_context(123).get_recent_messages(limit=5)
         self.assertEqual([item["content"] for item in recent_messages], ["I WANT TO\nCOOK BEEF TODAY"])
 
+    async def test_same_user_non_trigger_fragment_still_merges_while_turn_is_pending(self) -> None:
+        brain = self._make_brain()
+        brain.turn_coordinator.debounce_window = 0.01
+        self._start_patch("cogs.ai_brain.get_server_mode", new=AsyncMock(return_value="mode_femboy"))
+        self._start_patch(
+            "cogs.ai_brain.get_guild_config",
+            new=AsyncMock(return_value=self._default_config()),
+        )
+        self._start_patch("cogs.ai_brain.ai_limiter.acquire", new=AsyncMock(return_value=True))
+
+        message_one = self._make_message(content="I WANT YOU TO", message_id=5051)
+        message_one.mentions = [brain.bot.user]
+        message_two = self._make_message(content="SEND ME CAT PICS", message_id=5052)
+
+        await brain.on_message(message_one)
+        await brain.on_message(message_two)
+        await self._wait_for_background_turns()
+
+        self.assertEqual(brain._execute_persona_invocation.await_count, 1)
+        call = brain._execute_persona_invocation.await_args
+        self.assertIs(call.kwargs["message"], message_two)
+        self.assertEqual(call.kwargs["content_for_prompt"], "I WANT YOU TO\nSEND ME CAT PICS")
+        recent_messages = brain.get_context(123).get_recent_messages(limit=5)
+        self.assertEqual(
+            [item["content"] for item in recent_messages],
+            ["I WANT YOU TO\nSEND ME CAT PICS"],
+        )
+
     async def test_different_users_keep_independent_pending_turns(self) -> None:
         brain = self._make_brain()
         brain.turn_coordinator.debounce_window = 0.01

@@ -16,6 +16,7 @@ Usage:
 """
 
 from collections import deque
+from collections.abc import Awaitable, Callable
 import asyncio
 from dataclasses import dataclass
 from datetime import datetime, timedelta
@@ -78,7 +79,7 @@ from utils.guild_ai import (
     GuildConfigError,
 )
 from utils.admin_actions import ADMIN_ACTIONS, execute_admin_action, execute_admin_intent
-from utils.admin_nl import AdminNLContext, PendingAdminRequest, interpret_admin_request, resume_admin_request
+from utils.admin_nl import AdminNLContext, AdminNLResult, PendingAdminRequest, interpret_admin_request, resume_admin_request
 from modes import get_mode_profile, get_all_modes
 from personas import compile_persona_sections
 from personas.builtin import get_builtin_persona
@@ -98,11 +99,15 @@ from tools.transports.prompt_emulated import (
     render_prompt_tool_definitions,
     strip_prompt_tool_call,
 )
+GetRagContext = Callable[..., Awaitable[str]]
+
 try:
-    from utils.rag_store import get_rag_context
+    from utils.rag_store import get_rag_context as imported_get_rag_context
+    get_rag_context: GetRagContext = imported_get_rag_context
 except ImportError:  # pragma: no cover - lightweight environments may omit optional RAG deps.
-    async def get_rag_context(*args, **kwargs):
+    async def _fallback_get_rag_context(*args: Any, **kwargs: Any) -> str:
         return ""
+    get_rag_context: GetRagContext = _fallback_get_rag_context
 from utils.text_splitter import split_message
 from utils.context_builder import (
     build_structured_prompt,
@@ -208,6 +213,12 @@ AUTO_CONTINUE_PROMPT = (
     "Continue now and provide the final answer to the user. "
     "Do not say that you are processing or working on it. "
     "If a tool is required, output only a tool code block."
+)
+EXPLICIT_WEB_SEARCH_PATTERNS = (
+    re.compile(r"^\s*search\s+(?:the\s+)?web\s+(?P<query>.+?)\s*$", re.IGNORECASE),
+    re.compile(r"^\s*web\s+search\s+(?P<query>.+?)\s*$", re.IGNORECASE),
+    re.compile(r"^\s*google(?:\s+search)?(?:\s+for)?\s+(?P<query>.+?)\s*$", re.IGNORECASE),
+    re.compile(r"^\s*look\s+(?:this|that)\s+up(?::|\s+for)?\s+(?P<query>.+?)\s*$", re.IGNORECASE),
 )
 
 AGENTIC_TOOL_INSTRUCTIONS = """
@@ -358,6 +369,19 @@ def _is_processing_ack_response(response_text: str) -> bool:
     return any(marker in text for marker in PROCESSING_ACK_MARKERS)
 
 
+def _extract_explicit_web_search_query(content: str) -> Optional[str]:
+    text = (content or "").strip()
+    if not text:
+        return None
+    for pattern in EXPLICIT_WEB_SEARCH_PATTERNS:
+        match = pattern.match(text)
+        if not match:
+            continue
+        query = " ".join((match.group("query") or "").split()).strip()
+        return query or None
+    return None
+
+
 def _apply_bot_controlled_custom_emojis(
     response_text: str,
     user_text: str,
@@ -443,6 +467,30 @@ def _build_admin_nl_confirmation_prompt(result) -> str:
     return f"Please confirm this delete action for {target} by replying \"confirm\"."
 
 
+def _require_message_guild(message: discord.Message) -> discord.Guild:
+    guild = message.guild
+    if guild is None:
+        raise RuntimeError("This operation requires a guild message.")
+    return guild
+
+
+def _require_message_member(message: discord.Message) -> discord.Member:
+    author = message.author
+    if not isinstance(author, discord.Member):
+        raise RuntimeError("This operation requires a guild member author.")
+    return author
+
+
+def _get_bot_user_id(bot: commands.Bot) -> int | None:
+    bot_user = bot.user
+    return bot_user.id if bot_user is not None else None
+
+
+def _should_assign_created_role(message: discord.Message) -> bool:
+    content = (message.content or "").lower()
+    return bool(re.search(r"\b(me|myself)\b", content))
+
+
 async def _get_agentic_permission_level(member: Optional[discord.Member]) -> int:
     """Return the highest agentic permission level for a member (0-2)."""
     guild = getattr(member, "guild", None)
@@ -516,6 +564,8 @@ async def _post_mod_log(
     embed.add_field(name="Target", value=str(target) if target else "Unknown", inline=True)
     if reason:
         embed.add_field(name="Reason", value=reason, inline=False)
+    if not isinstance(channel, (discord.TextChannel, discord.Thread)):
+        return
     await channel.send(embed=embed)
 
 
@@ -683,7 +733,7 @@ async def handle_agentic_actions(
                     return await message.reply("I couldn't find that member.", mention_author=False)
                 duration_raw = data.get("duration")
                 try:
-                    duration_minutes = int(duration_raw)
+                    duration_minutes = int(str(duration_raw).strip()) if duration_raw is not None else 10
                 except (TypeError, ValueError):
                     duration_minutes = 10
                 duration_minutes = max(1, min(duration_minutes, 40320))
@@ -837,7 +887,12 @@ async def handle_admin_actions(
         return None
 
     action = data.get("action")
-    params = data.get("params") or {}
+    if not isinstance(action, str) or not action.strip():
+        return await message.reply("I couldn't parse that admin request.", mention_author=False)
+    action = action.strip()
+    params = data.get("params")
+    if not isinstance(params, dict):
+        params = {}
     if isinstance(action, str) and action.upper().strip() in ADMIN_ACTIONS:
         return await message.reply(SUPPORTED_ADMIN_ACTION_REJECTION, mention_author=False)
     if (
@@ -1044,7 +1099,7 @@ class AIBrain(commands.Cog):
     def __init__(self, bot: commands.Bot):
         self.bot = bot
         if get_expression_service(self.bot) is None:
-            self.bot.expression_service = ExpressionService(self.bot)
+            setattr(self.bot, "expression_service", ExpressionService(self.bot))
         register_builtin_tools()
         self.contexts: Dict[int, ConversationContext] = {}  # channel_id -> context
         self.chain_memory: Dict[int, int] = {}  # message_id -> user_id
@@ -1583,7 +1638,8 @@ class AIBrain(commands.Cog):
 
             author = getattr(resolved, "author", None)
             author_id = getattr(author, "id", None)
-            if author_id == self.bot.user.id:
+            bot_user_id = _get_bot_user_id(self.bot)
+            if bot_user_id is not None and author_id == bot_user_id:
                 depth += 1
 
             cursor = resolved
@@ -1608,6 +1664,7 @@ class AIBrain(commands.Cog):
         turn_key: Optional[TurnKey] = None,
         turn_version: Optional[int] = None,
     ) -> DiscordReplySession:
+        guild = _require_message_guild(message)
         send_policy = DiscordSendPolicy(
             chunk_limit=1900,
             warmup_edit_window_seconds=float(
@@ -1625,7 +1682,7 @@ class AIBrain(commands.Cog):
         if bool(guild_config.get("ai_persona_webhooks_enabled", 1)):
             try:
                 webhook_context = await build_persona_webhook_context(
-                    message.guild.id,
+                    guild.id,
                     mode,
                     manager=self.webhook_identities,
                 )
@@ -1684,9 +1741,10 @@ class AIBrain(commands.Cog):
         system_instruction: Optional[str],
         chat_messages: list[dict[str, str]],
     ) -> tuple[str, Optional[discord.Message], Optional[int], int]:
+        guild = _require_message_guild(message)
         raw_response = await self.generate_response(
             prompt,
-            message.guild.id,
+            guild.id,
             allow_evil=allow_evil,
             system_instruction=system_instruction,
             messages=chat_messages,
@@ -1715,8 +1773,9 @@ class AIBrain(commands.Cog):
                 and isinstance(result.data, dict)
                 and result.data.get("sticker_id")
             ):
+                sticker_id_value = result.data.get("sticker_id")
                 try:
-                    pending_sticker_id = int(result.data.get("sticker_id"))
+                    pending_sticker_id = int(str(sticker_id_value).strip())
                 except (TypeError, ValueError):
                     pending_sticker_id = None
 
@@ -1735,7 +1794,7 @@ class AIBrain(commands.Cog):
             )
             raw_response = await self.generate_response(
                 prompt,
-                message.guild.id,
+                guild.id,
                 allow_evil=allow_evil,
                 system_instruction=system_instruction,
                 messages=chat_messages,
@@ -1761,17 +1820,18 @@ class AIBrain(commands.Cog):
         raw_text: str,
         reasoning_text: str,
     ) -> None:
+        guild = _require_message_guild(message)
         settings = ThoughtLogSettings(
             level=str(guild_config.get("ai_thought_log_level") or "off").lower(),
             channel_id=guild_config.get("ai_thought_channel_id"),
             allow_mod_log_reuse=bool(guild_config.get("ai_thought_log_allow_mod_log") or 0),
             mod_log_channel_id=guild_config.get("mod_log_channel_id"),
         )
-        thought_logger = ThoughtLogger(guild=message.guild, settings=settings)
+        thought_logger = ThoughtLogger(guild=guild, settings=settings)
         if settings.level == "off":
             return
         summary_lines = [
-            f"guild={message.guild.id}",
+            f"guild={guild.id}",
             f"channel={message.channel.id}",
             f"message={message.id}",
             f"finish_reason={finish_reason}",
@@ -1894,6 +1954,7 @@ class AIBrain(commands.Cog):
         turn_key: Optional[TurnKey] = None,
         turn_version: Optional[int] = None,
     ) -> tuple[Optional[discord.Message], str, Optional[int], int]:
+        guild = _require_message_guild(message)
         sender = await self._build_stream_sender(
             message,
             guild_config,
@@ -1928,7 +1989,7 @@ class AIBrain(commands.Cog):
                     result = await orchestrator.run(
                         self.generate_response_stream(
                             prompt,
-                            message.guild.id,
+                            guild.id,
                             allow_evil=allow_evil,
                             system_instruction=system_instruction,
                             messages=current_messages,
@@ -1962,7 +2023,7 @@ class AIBrain(commands.Cog):
                         if emoji_manager and emoji_usage_enabled:
                             evil_mode_enabled = False
                             if allow_evil:
-                                evil_mode_enabled = await get_evil_mode(message.guild.id)
+                                evil_mode_enabled = await get_evil_mode(guild.id)
                             cleaned_response = self._clean_stream_chunk(result.raw_text, guild_config)
                             emoji_suffix = emoji_manager.pick_contextual_emoji(
                                 response_text=cleaned_response,
@@ -2015,8 +2076,9 @@ class AIBrain(commands.Cog):
                         and isinstance(result_tool.data, dict)
                         and result_tool.data.get("sticker_id")
                     ):
+                        sticker_id_value = result_tool.data.get("sticker_id")
                         try:
-                            pending_sticker_id = int(result_tool.data.get("sticker_id"))
+                            pending_sticker_id = int(str(sticker_id_value).strip())
                         except (TypeError, ValueError):
                             pending_sticker_id = None
 
@@ -2100,6 +2162,9 @@ class AIBrain(commands.Cog):
 
     def _is_reply_to_bot(self, message: discord.Message) -> bool:
         """Return True when the message is a direct reply to a bot-authored message."""
+        bot_user_id = _get_bot_user_id(self.bot)
+        if bot_user_id is None:
+            return False
         if not message.reference:
             return False
 
@@ -2107,14 +2172,14 @@ class AIBrain(commands.Cog):
         if isinstance(resolved, discord.Message):
             if resolved.id in self.bot_owned_messages:
                 return True
-            return bool(getattr(getattr(resolved, "author", None), "id", None) == self.bot.user.id)
+            return bool(getattr(getattr(resolved, "author", None), "id", None) == bot_user_id)
 
         message_id = message.reference.message_id
         if not message_id:
             return False
         if int(message_id) in self.bot_owned_messages:
             return True
-        return self.chain_memory.get(message_id) == self.bot.user.id
+        return self.chain_memory.get(message_id) == bot_user_id
 
 
     def _is_active_conversation(self, channel_id: int, user_id: int) -> bool:
@@ -2280,7 +2345,13 @@ class AIBrain(commands.Cog):
                 requires_confirmation=bool(pending.get("requires_confirmation")),
                 confirmation_scope=pending.get("confirmation_scope"),
             )
-            resumed = pending_request
+            resumed: AdminNLResult = AdminNLResult(
+                intent=pending_request.intent,
+                params=dict(pending_request.params),
+                missing=list(pending_request.missing),
+                requires_confirmation=bool(pending_request.requires_confirmation),
+                confirmation_scope=pending_request.confirmation_scope,
+            )
             if pending_request.missing:
                 resumed = resume_admin_request(
                     pending_request,
@@ -2310,7 +2381,13 @@ class AIBrain(commands.Cog):
         if content not in ADMIN_CONFIRM_TOKENS:
             return None
 
+        guild = _require_message_guild(message)
+        member = _require_message_member(message)
         action = pending.get("action")
+        if not isinstance(action, str) or not action.strip():
+            self._pop_pending_admin_action(message.channel.id, message.author.id)
+            return await message.reply("I couldn't parse that admin request.", mention_author=False)
+        action = action.strip()
         params = dict(pending.get("params") or {})
         result = pending.get("result") or {}
         defaults = result.get("defaults") or {}
@@ -2325,8 +2402,8 @@ class AIBrain(commands.Cog):
         follow_up = await execute_admin_action(
             action,
             params,
-            message.guild,
-            message.author,
+            guild,
+            member,
             bot=self.bot,
             current_channel_id=message.channel.id,
         )
@@ -2394,11 +2471,13 @@ class AIBrain(commands.Cog):
         intent: str,
         params: Dict[str, Any],
     ) -> Optional[discord.Message]:
+        guild = _require_message_guild(message)
+        member = _require_message_member(message)
         result = await execute_admin_intent(
             intent,
             params,
-            message.guild,
-            message.author,
+            guild,
+            member,
             bot=self.bot,
             current_channel_id=message.channel.id,
         )
@@ -2407,12 +2486,13 @@ class AIBrain(commands.Cog):
         return await message.reply(result.get("message", "Done."), mention_author=False)
 
     async def _maybe_handle_admin_nl_request(self, message: discord.Message) -> bool:
-        if not message.guild or not getattr(message.author, "guild_permissions", None):
+        if not message.guild or not isinstance(message.author, discord.Member):
             return False
+        member = message.author
         if not (
-            message.author.guild_permissions.administrator
-            or message.author.guild_permissions.manage_guild
-            or await _get_agentic_permission_level(message.author) >= 2
+            member.guild_permissions.administrator
+            or member.guild_permissions.manage_guild
+            or await _get_agentic_permission_level(member) >= 2
         ):
             return False
 
@@ -2480,9 +2560,12 @@ class AIBrain(commands.Cog):
 
     def _is_mention_only(self, message: discord.Message) -> bool:
         """Check if the message only mentions the bot."""
+        bot_user_id = _get_bot_user_id(self.bot)
+        if bot_user_id is None:
+            return False
         content = message.content
-        content = content.replace(f"<@{self.bot.user.id}>", "")
-        content = content.replace(f"<@!{self.bot.user.id}>", "")
+        content = content.replace(f"<@{bot_user_id}>", "")
+        content = content.replace(f"<@!{bot_user_id}>", "")
         return content.strip() == ""
 
     def _has_image_attachment(self, message: discord.Message) -> bool:
@@ -2569,7 +2652,7 @@ class AIBrain(commands.Cog):
             return None
 
         try:
-            await increment_stat("images_analyzed", guild_id=message.guild.id)
+            await increment_stat("images_analyzed", guild_id=guild_id)
         except Exception as exc:
             logger.warning("Failed to increment images_analyzed: %s", exc)
 
@@ -2577,13 +2660,14 @@ class AIBrain(commands.Cog):
 
     async def _describe_images(self, message: discord.Message) -> list[str]:
         """Describe supported image attachments in a message."""
+        guild = _require_message_guild(message)
         attachments = self._get_image_attachments(message)
         if not attachments:
             return []
 
         descriptions = []
         for attachment in attachments:
-            description = await self._describe_image(message.guild.id, attachment)
+            description = await self._describe_image(guild.id, attachment)
             if description:
                 descriptions.append(description)
         return descriptions
@@ -2627,17 +2711,17 @@ class AIBrain(commands.Cog):
             return None
         video_client, video_types = client_info
 
-        tmp_video_path = None
+        tmp_video_path: Optional[Path] = None
         uploaded_name = None
         try:
             suffix = Path(attachment.filename or "").suffix or ".mp4"
             with tempfile.NamedTemporaryFile(delete=False, suffix=suffix) as tmp_video:
-                tmp_video_path = tmp_video.name
+                tmp_video_path = Path(tmp_video.name)
             await attachment.save(tmp_video_path)
 
             video_file = await asyncio.to_thread(
                 video_client.files.upload,
-                file=tmp_video_path,
+                file=str(tmp_video_path),
                 config={"display_name": attachment.filename or "video"},
             )
             uploaded_name = video_file.name
@@ -2685,7 +2769,7 @@ class AIBrain(commands.Cog):
             return None
 
         try:
-            await increment_stat("images_analyzed", guild_id=message.guild.id)
+            await increment_stat("images_analyzed", guild_id=guild_id)
         except Exception as exc:
             logger.warning("Failed to increment images_analyzed: %s", exc)
 
@@ -2693,13 +2777,14 @@ class AIBrain(commands.Cog):
 
     async def _describe_videos(self, message: discord.Message) -> list[str]:
         """Describe supported video attachments in a message."""
+        guild = _require_message_guild(message)
         attachments = self._get_video_attachments(message)
         if not attachments:
             return []
 
         descriptions = []
         for attachment in attachments:
-            description = await self._describe_video(message.guild.id, attachment)
+            description = await self._describe_video(guild.id, attachment)
             if description:
                 descriptions.append(description)
         return descriptions
@@ -2939,12 +3024,13 @@ class AIBrain(commands.Cog):
             return "", None
 
         user = await get_user(guild_id, member.id)
-        timezone = user.get("timezone") if user else None
-        tz_is_set = bool(timezone and timezone != "UTC")
+        timezone_name = str(user.get("timezone") or "UTC") if user else "UTC"
+        tz_is_set = timezone_name != "UTC"
+        date_str = datetime.utcnow().date().isoformat()
 
         if tz_is_set:
             try:
-                tz = pytz.timezone(timezone)
+                tz = pytz.timezone(timezone_name)
             except pytz.UnknownTimeZoneError:
                 tz_is_set = False
             else:
@@ -2952,8 +3038,6 @@ class AIBrain(commands.Cog):
                 if not (WELLBEING_NIGHT_START <= local_now.hour <= WELLBEING_NIGHT_END):
                     return "", None
                 date_str = local_now.date().isoformat()
-        if not tz_is_set:
-            date_str = datetime.utcnow().date().isoformat()
 
         last_date = await get_last_wellbeing_date(guild_id, member.id)
         if last_date == date_str:
@@ -3039,9 +3123,12 @@ class AIBrain(commands.Cog):
     ) -> str:
         if not response_text:
             return response_text
+        bot_user_id = _get_bot_user_id(self.bot)
+        if bot_user_id is None:
+            return response_text
         recent_bot_messages: list[str] = []
         for item in list(context.messages)[-recent_messages:]:
-            if int(item.get("user_id", 0)) != self.bot.user.id:
+            if int(item.get("user_id", 0)) != bot_user_id:
                 continue
             recent_bot_messages.append(str(item.get("content") or ""))
         return filter_duplicate_custom_emojis(response_text, recent_bot_messages) or response_text
@@ -3052,11 +3139,13 @@ class AIBrain(commands.Cog):
         message: discord.Message,
         guild_config: dict[str, Any],
     ) -> ToolContext:
+        guild = _require_message_guild(message)
+        member = _require_message_member(message)
         return ToolContext(
             bot=self.bot,
-            guild=message.guild,
+            guild=guild,
             channel=message.channel,
-            user=message.author,
+            user=member,
             message=message,
             guild_config=guild_config,
             locale="en",
@@ -3085,6 +3174,27 @@ class AIBrain(commands.Cog):
             guild_config=guild_config,
         )
 
+    async def _maybe_handle_explicit_web_search(
+        self,
+        *,
+        message: discord.Message,
+        guild_config: dict[str, Any],
+    ) -> bool:
+        query = _extract_explicit_web_search_query(message.content or "")
+        if not query:
+            return False
+
+        tool_context = self._build_tool_context(message=message, guild_config=guild_config)
+        result = await execute_tool("web_search", {"query": query}, tool_context)
+        reply_text = (
+            result.data.get("formatted")
+            or result.user_message
+            or result.summary
+            or "No results found."
+        )
+        await self._send_in_chunks(message, reply_text)
+        return True
+
     async def _prepare_response_text(
         self,
         *,
@@ -3107,7 +3217,8 @@ class AIBrain(commands.Cog):
 
         evil_mode_enabled = False
         if allow_evil:
-            evil_mode_enabled = await get_evil_mode(message.guild.id)
+            guild = _require_message_guild(message)
+            evil_mode_enabled = await get_evil_mode(guild.id)
 
         if apply_trigger_emojis:
             response = _apply_bot_controlled_custom_emojis(
@@ -3200,6 +3311,8 @@ class AIBrain(commands.Cog):
         turn_key: Optional[TurnKey] = None,
         turn_version: Optional[int] = None,
     ) -> Optional[discord.Message]:
+        guild = _require_message_guild(message)
+        member = _require_message_member(message)
         if mode == "mode_default":
             affection_data = {
                 "affection_level": "stranger",
@@ -3207,25 +3320,25 @@ class AIBrain(commands.Cog):
                 "total_interactions": 0,
             }
         else:
-            affection_data = await get_affection_by_mode(message.guild.id, message.author.id, mode)
+            affection_data = await get_affection_by_mode(guild.id, member.id, mode)
         affection_points = affection_data.get("affection_points", 0)
         allow_evil = affection_points >= 500
         if mode == "mode_default":
             allow_evil = False
 
         wellbeing_prompt, wellbeing_date = await self._get_wellbeing_prompt(
-            message.author,
-            message.guild.id,
+            member,
+            guild.id,
             mode,
         )
 
         prompt = await self.build_prompt(
-            message.guild.id,
-            message.author.id,
+            guild.id,
+            member.id,
             content_for_prompt,
             context_snapshot,
             channel_id=message.channel.id,
-            member=message.author,
+            member=member,
             wellbeing_prompt=wellbeing_prompt,
             affection_data=affection_data,
             allow_evil=allow_evil,
@@ -3295,7 +3408,7 @@ class AIBrain(commands.Cog):
                         async with message.channel.typing():
                             continued_raw = await self._continue_after_processing_ack(
                                 prompt=prompt,
-                                guild_id=message.guild.id,
+                                guild_id=guild.id,
                                 allow_evil=allow_evil,
                                 system_instruction=system_instruction,
                                 chat_messages=chat_messages,
@@ -3357,15 +3470,15 @@ class AIBrain(commands.Cog):
             )
 
         if wellbeing_date:
-            await set_last_wellbeing_date(message.guild.id, message.author.id, wellbeing_date)
+            await set_last_wellbeing_date(guild.id, member.id, wellbeing_date)
 
         if apply_reply_cooldown_update and reply_cooldown_seconds > 0 and reply_cooldown_type != "off":
             set_reply_cooldown(
                 self.reply_cooldowns,
                 cooldown_type=reply_cooldown_type,
-                guild_id=message.guild.id,
+                guild_id=guild.id,
                 channel_id=message.channel.id,
-                user_id=message.author.id,
+                user_id=member.id,
             )
 
         if interim_sent and interim_sent.id != sent.id:
@@ -3404,7 +3517,7 @@ class AIBrain(commands.Cog):
 
         if track_stats:
             try:
-                await increment_stat("messages_processed", guild_id=message.guild.id)
+                await increment_stat("messages_processed", guild_id=guild.id)
             except Exception as exc:
                 logger.warning("Failed to increment messages_processed: %s", exc)
 
@@ -3439,7 +3552,7 @@ class AIBrain(commands.Cog):
         channel_id: Optional[int] = None,
         member: Optional[discord.Member] = None,
         wellbeing_prompt: str = "",
-        affection_data: Optional[Dict[str, int]] = None,
+        affection_data: Optional[Dict[str, Any]] = None,
         allow_evil: bool = True,
         allow_tools: bool = True,
         mode_override: Optional[str] = None,
@@ -3484,9 +3597,10 @@ class AIBrain(commands.Cog):
         mentioned_user_lines: list[str] = []
         mentioned_alias_lines: list[str] = []
         mentioned_fact_lines: list[str] = []
+        bot_user_id = _get_bot_user_id(self.bot)
         for mentioned_id in mentioned_ids:
             uid = int(mentioned_id)
-            if uid == self.bot.user.id or uid == user_id:
+            if uid == bot_user_id or uid == user_id:
                 continue
             user_obj = self.bot.get_user(uid)
             name = user_obj.display_name if user_obj else f"User {uid}"
@@ -3528,8 +3642,9 @@ class AIBrain(commands.Cog):
                 }
             else:
                 affection_data = await get_affection_by_mode(guild_id, user_id, mode)
-        affection_level = affection_data.get("affection_level", "stranger")
-        affection_points = affection_data.get("affection_points", 0)
+        affection_payload = dict(affection_data or {})
+        affection_level = str(affection_payload.get("affection_level") or "stranger")
+        affection_points = int(affection_payload.get("affection_points") or 0)
 
         gender = await self.get_user_gender(member, guild_id, user_id)
         if gender == "unknown":
@@ -3805,7 +3920,7 @@ You can explain these commands to the user if asked:
     async def generate_response(
         self,
         prompt: str,
-        guild_id: int = None,
+        guild_id: int,
         allow_evil: bool = True,
         *,
         system_instruction: Optional[str] = None,
@@ -3892,13 +4007,14 @@ You can explain these commands to the user if asked:
                 reason="heuristic_not_ambiguous",
             )
 
+        guild = _require_message_guild(message)
         prompt = build_no_mention_judge_prompt(
             window,
             channel_name=getattr(message.channel, "name", "unknown"),
         )
         raw_response = await self.generate_response(
             prompt,
-            guild_id=getattr(message.guild, "id", None),
+            guild_id=guild.id,
             allow_evil=False,
         )
         return parse_no_mention_judge_response(raw_response)
@@ -4029,6 +4145,14 @@ You can explain these commands to the user if asked:
         triggered_modes = set(triggered_mode_keys)
         has_selected_trigger = any(job.mode_key in triggered_modes for job in persona_jobs)
         is_active = self._is_active_conversation(message.channel.id, message.author.id)
+        turn_key = self._turn_key_for_message(message)
+        has_pending_same_user_turn = any(
+            (
+                self.turn_coordinator.get_pending(turn_key) is not None,
+                self.turn_coordinator.get_active(turn_key) is not None,
+                self.turn_coordinator.get_buffered_follow_up(turn_key) is not None,
+            )
+        )
         whitelist_channel_ids = self._parse_id_list(guild_config.get("ai_channel_whitelist"))
         reply_cooldown_seconds = max(0, int(guild_config.get("ai_reply_cooldown_seconds") or 0))
         reply_cooldown_type = normalize_cooldown_type(
@@ -4065,9 +4189,10 @@ You can explain these commands to the user if asked:
             auto_channel_signal=auto_channel_signal,
             is_foreign_webhook=is_foreign_webhook,
         )
+        queue_same_user_turn = signals.explicit_trigger or has_pending_same_user_turn
 
         # Determine if we should respond
-        should_respond = signals.explicit_trigger
+        should_respond = queue_same_user_turn
         if (
             not should_respond
             and signals.passive_candidate
@@ -4124,19 +4249,17 @@ You can explain these commands to the user if asked:
             should_respond
             and whitelist_channel_ids
             and message.channel.id not in whitelist_channel_ids
-            and not signals.mentioned
-            and not signals.replied_to_bot
-            and not signals.has_selected_trigger
+            and not queue_same_user_turn
         ):
             should_respond = False
-        if should_respond and not signals.mentioned and not signals.has_selected_trigger and not signals.replied_to_bot:
+        if should_respond and not queue_same_user_turn:
             reply_chain_depth = await self._bot_reply_chain_depth(message)
             if self_reply_limit_reached(
                 SelfReplyChainState(depth=reply_chain_depth, last_was_self=reply_chain_depth > 0),
                 self_reply_limit,
             ):
                 should_respond = False
-        if should_respond and reply_cooldown_seconds > 0 and not signals.mentioned and not signals.replied_to_bot and not signals.has_selected_trigger:
+        if should_respond and reply_cooldown_seconds > 0 and not queue_same_user_turn:
             on_cooldown, _remaining = check_reply_cooldown(
                 self.reply_cooldowns,
                 cooldown_type=reply_cooldown_type,
@@ -4226,8 +4349,7 @@ You can explain these commands to the user if asked:
                 content_for_prompt = image_context
 
         _, reply_to_username = self._resolve_reply_to(message)
-        queue_explicit_turn = signals.explicit_trigger
-        if not queue_explicit_turn:
+        if not queue_same_user_turn:
             context.add_message(
                 message.id,
                 message.author.id,
@@ -4239,7 +4361,7 @@ You can explain these commands to the user if asked:
 
         # Let other cogs handle mention-only messages without images
         if self._is_mention_only(message) and not image_descriptions and not video_descriptions:
-            if queue_explicit_turn:
+            if queue_same_user_turn:
                 context.add_message(
                     message.id,
                     message.author.id,
@@ -4252,7 +4374,7 @@ You can explain these commands to the user if asked:
 
         # Rate limit AI responses per user
         if not await ai_limiter.acquire(message.author.id):
-            if queue_explicit_turn:
+            if queue_same_user_turn:
                 context.add_message(
                     message.id,
                     message.author.id,
@@ -4273,7 +4395,13 @@ You can explain these commands to the user if asked:
         if reply_context:
             content_for_prompt = f"{reply_context}\n{content_for_prompt}"
 
-        if queue_explicit_turn:
+        if await self._maybe_handle_explicit_web_search(
+            message=message,
+            guild_config=dict(guild_config),
+        ):
+            return
+
+        if queue_same_user_turn:
             await self._queue_same_user_turn(
                 message=message,
                 context=context,

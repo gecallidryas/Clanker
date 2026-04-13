@@ -23,6 +23,12 @@ Primary persona and presentation surface. This covers activation, evil-mode togg
 
 Detailed reference: [feature-persona-manage.md](./feature-persona-manage.md)
 
+### `/persona impersonate`
+
+Staff-only persona generation surface. This creates an inactive custom persona from a member's recent visible messages, persona-local sample dialogues, and current avatar.
+
+Detailed reference: [feature-persona-impersonation.md](./feature-persona-impersonation.md)
+
 ## Configuration Areas
 
 ### Capabilities and Tools
@@ -36,6 +42,8 @@ Detailed reference:
 ### AI Reply Settings
 
 Reply policy, routing, streaming, and thought/debug logging are managed directly from the config panel. Persona runtime state for multi-persona queueing and webhook identity is also stored in guild config and surfaced by the AI settings summaries.
+
+The AI reply runtime also coalesces same-user split messages into one turn after the first fragment triggers the bot, so later fragments in that short debounce window do not need to repeat the mention.
 
 Detailed reference: [feature-config-panel.md](./feature-config-panel.md)
 
@@ -66,9 +74,12 @@ Detailed reference:
 - Multi-persona queueing can fan out triggered personas into queued follow-up jobs.
 - Persona webhook identity can be enabled independently from queue execution.
 - Custom personas support create, edit, preview, duplicate, and delete flows.
+- Staff can generate inactive custom personas from member message history with `/persona impersonate`.
 - Deleting the active custom persona falls back to `mode_default`.
 
-Detailed reference: [feature-persona-manage.md](./feature-persona-manage.md)
+Detailed reference:
+- [feature-persona-manage.md](./feature-persona-manage.md)
+- [feature-persona-impersonation.md](./feature-persona-impersonation.md)
 
 ## Security and Audit
 
