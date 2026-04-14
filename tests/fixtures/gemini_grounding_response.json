@@ -1,0 +1,40 @@
+{
+  "candidates": [
+    {
+      "grounding_metadata": {
+        "grounding_chunks": [
+          {
+            "web": {
+              "uri": "https://example.com/articles/gemini-grounding",
+              "title": "Example Gemini Grounding Article"
+            }
+          },
+          {
+            "web": {
+              "uri": "https://developers.googleblog.com/google-search",
+              "title": "Google Search in Gemini"
+            }
+          }
+        ],
+        "grounding_supports": [
+          {
+            "segment": {
+              "text": "Example Gemini Grounding Article explains how grounded results are attached to search sources."
+            },
+            "grounding_chunk_indices": [
+              0
+            ]
+          },
+          {
+            "segment": {
+              "text": "Google Search in Gemini demonstrates the google_search tool shape and grounding metadata."
+            },
+            "grounding_chunk_indices": [
+              1
+            ]
+          }
+        ]
+      }
+    }
+  ]
+}

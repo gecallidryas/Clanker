@@ -4,6 +4,7 @@ import asyncio
 import os
 import time
 from typing import Any, Optional
+from urllib.parse import urlparse
 
 import aiohttp
 from duckduckgo_search import DDGS
@@ -46,6 +47,23 @@ def _cache_set(provider: str, query: str, results: list[dict[str, str]]) -> None
     _cache[(provider, query)] = (time.time(), results)
 
 
+def clear_search_cache(provider: Optional[str] = None, query: Optional[str] = None) -> None:
+    if provider is None and query is None:
+        _cache.clear()
+        return
+
+    keys_to_remove: list[tuple[str, str]] = []
+    for cache_provider, cache_query in list(_cache):
+        if provider is not None and cache_provider != provider:
+            continue
+        if query is not None and cache_query != query:
+            continue
+        keys_to_remove.append((cache_provider, cache_query))
+
+    for cache_key in keys_to_remove:
+        _cache.pop(cache_key, None)
+
+
 async def _get_gemini_search_config(guild_id: int) -> Optional[tuple[list[str], str]]:
     keys = await get_guild_gemini_keys(guild_id)
     if not keys:
@@ -61,9 +79,44 @@ def _normalize_snippet(text: str, limit: int = 280) -> str:
     return normalized[: limit - 1].rstrip() + "…"
 
 
+def _has_usable_gemini_chunk(grounding_metadata: Any) -> bool:
+    for chunk in getattr(grounding_metadata, "grounding_chunks", None) or []:
+        web_chunk = getattr(chunk, "web", None)
+        url = (getattr(web_chunk, "uri", None) or "").strip()
+        if url:
+            return True
+    return False
+
+
+def _get_gemini_grounding_metadata(response: Any) -> Any:
+    for candidate in getattr(response, "candidates", None) or []:
+        grounding_metadata = getattr(candidate, "grounding_metadata", None)
+        if grounding_metadata is not None and _has_usable_gemini_chunk(grounding_metadata):
+            return grounding_metadata
+    return None
+
+
+def _get_chunk_title(web_chunk: Any, url: str) -> tuple[str, int]:
+    title = str(getattr(web_chunk, "title", None) or "").strip()
+    if title:
+        return title, 3
+
+    domain = str(getattr(web_chunk, "domain", None) or "").strip()
+    if domain:
+        return domain, 2
+
+    parsed = urlparse(url)
+    host = (parsed.hostname or parsed.netloc or "").strip()
+    if host.startswith("www."):
+        host = host[4:]
+    if host:
+        return host, 1
+
+    return "Untitled source", 0
+
+
 def _extract_gemini_results(response: Any, max_results: int) -> list[dict[str, str]]:
-    candidates = getattr(response, "candidates", None) or []
-    grounding_metadata = getattr(candidates[0], "grounding_metadata", None) if candidates else None
+    grounding_metadata = _get_gemini_grounding_metadata(response)
     if grounding_metadata is None:
         return []
 
@@ -82,27 +135,40 @@ def _extract_gemini_results(response: Any, max_results: int) -> list[dict[str, s
             if snippet not in bucket:
                 bucket.append(snippet)
 
-    results: list[dict[str, str]] = []
-    seen_urls: set[str] = set()
+    results_by_url: dict[str, dict[str, Any]] = {}
     for index, chunk in enumerate(getattr(grounding_metadata, "grounding_chunks", None) or []):
         web_chunk = getattr(chunk, "web", None)
         url = (getattr(web_chunk, "uri", None) or "").strip()
-        if not url or url in seen_urls:
+        if not url:
             continue
-        title = (
-            getattr(web_chunk, "title", None)
-            or getattr(web_chunk, "domain", None)
-            or "Untitled source"
-        )
+        title, priority = _get_chunk_title(web_chunk, url)
         snippets = snippet_map.get(index, [])
+        entry = results_by_url.get(url)
+        if entry is None:
+            results_by_url[url] = {
+                "title": title,
+                "priority": priority,
+                "url": url,
+                "snippets": list(snippets),
+            }
+            continue
+
+        if priority > entry["priority"]:
+            entry["title"] = title
+            entry["priority"] = priority
+        for snippet in snippets:
+            if snippet not in entry["snippets"]:
+                entry["snippets"].append(snippet)
+
+    results: list[dict[str, str]] = []
+    for entry in results_by_url.values():
         results.append(
             {
-                "title": str(title).strip() or "Untitled source",
-                "url": url,
-                "snippet": " ".join(snippets).strip(),
+                "title": entry["title"],
+                "url": entry["url"],
+                "snippet": " ".join(entry["snippets"]).strip(),
             }
         )
-        seen_urls.add(url)
         if len(results) >= max_results:
             break
     return results
@@ -268,7 +334,7 @@ async def _handle_web_search(context: ToolContext, args: dict[str, Any]) -> Tool
     if gemini_config:
         api_keys, model = gemini_config
         gemini_results = await gemini_search(query, api_keys, model, max_results=max_results)
-        if gemini_results is not None:
+        if gemini_results:
             results = gemini_results
             provider = "gemini"
         else:
