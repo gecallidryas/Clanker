@@ -96,6 +96,16 @@ Older granular slash commands still exist as migration shims in several places. 
 
 Detailed reference: [feature-transitional-commands.md](./feature-transitional-commands.md)
 
+## Maintenance Notes
+
+### Gemini-Backed Web Search Verification
+
+- Refresh the Gemini grounding fixture with `python scripts/capture_gemini_grounding.py --output tests/fixtures/gemini_grounding_response.json` whenever the live response shape changes.
+- The canonical fixture refresh command now refuses to overwrite `tests/fixtures/gemini_grounding_response.json` with synthetic sample data; without credentials, capture to a temporary path if you only need a local parser sample.
+- Run the live contract test only when you want to verify the real provider path: set `RUN_LIVE_GEMINI_GROUNDING=1` and provide `GEMINI_API_KEY` or one of the numbered `GEMINI_API_KEY_1..10` values.
+- The parser is expected to skip empty or malformed Gemini metadata, normalize usable grounding chunks into `title`/`url`/`snippet` records, and fall back to Brave or DuckDuckGo when Gemini does not return usable results.
+- Use [`plans/2026-04-14-gemini-grounding-verification.md`](./plans/2026-04-14-gemini-grounding-verification.md) as the operator workflow for fixture refreshes, live checks, and Gemini triage.
+
 ## Source of Truth
 
 The documentation in this directory is based on the live implementation in:
