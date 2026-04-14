@@ -26,6 +26,11 @@ class PersonaImpersonationHelperTests(unittest.TestCase):
         result = choose_unique_persona_name("Tomori", existing)
         self.assertEqual(result, "Tomori (impersonated 2)")
 
+    def test_choose_unique_persona_name_treats_case_only_collisions_as_duplicates(self) -> None:
+        existing = {"Target"}
+        result = choose_unique_persona_name("target", existing)
+        self.assertEqual(result, "target (impersonated)")
+
     def test_parse_impersonation_payload_requires_prompt_and_dialogues(self) -> None:
         payload = parse_impersonation_payload(
             '{"bio":"bio","normal_prompt":"prompt","sample_dialogues":["a","b"]}'

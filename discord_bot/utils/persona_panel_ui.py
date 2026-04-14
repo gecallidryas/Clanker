@@ -291,7 +291,7 @@ async def load_persona_panel_state(guild_id: int) -> PersonaPanelState:
         )
 
     for persona in await get_guild_custom_personas(guild_id):
-        aliases = tuple(persona.get("aliases") or [])
+        aliases = tuple(_decode_aliases(persona.get("aliases")))
         entries.append(
             PersonaEntry(
                 mode_key=persona["mode_key"],

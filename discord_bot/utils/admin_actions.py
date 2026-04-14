@@ -1,5 +1,6 @@
 ﻿from __future__ import annotations
 
+from datetime import timedelta
 import json
 import re
 from typing import Any, Dict, List, Optional
@@ -56,6 +57,44 @@ ADMIN_ACTIONS = {
 }
 
 CUSTOM_EMOJI_RE = re.compile(r"<a?:\w+:(\d+)>")
+
+
+async def get_admin_permission_level(executor: discord.Member | None) -> int:
+    if not executor or not getattr(executor, "guild", None):
+        return 0
+
+    guild = executor.guild
+    if getattr(guild, "owner_id", None) == getattr(executor, "id", None):
+        return 2
+
+    permissions = getattr(executor, "guild_permissions", None)
+    if permissions and (
+        bool(getattr(permissions, "administrator", False))
+        or bool(getattr(permissions, "manage_guild", False))
+    ):
+        return 2
+
+    roles = getattr(executor, "roles", None) or []
+    role_ids = {int(getattr(role, "id", 0)) for role in roles if getattr(role, "id", None) is not None}
+    if not role_ids:
+        return 0
+
+    level = 0
+    for role_id, permission_level in await get_staff_roles(int(guild.id)):
+        if int(role_id) in role_ids:
+            level = max(level, int(permission_level))
+    return level
+
+
+def required_admin_intent_permission_level(intent: str) -> int:
+    normalized = str(intent or "").strip().lower()
+    if normalized in {"moderation.timeout", "moderation.kick"}:
+        return 1
+    return 2
+
+
+def required_admin_action_permission_level(action: str) -> int:
+    return required_admin_intent_permission_level(str(action or "").strip().lower())
 
 
 def _normalize_lookup_name(value: Any) -> str:
@@ -291,7 +330,7 @@ async def execute_admin_action(
     if action not in ADMIN_ACTIONS:
         return {"success": False, "error": "Unknown action."}
 
-    if not (executor.guild_permissions.administrator or executor.guild_permissions.manage_guild):
+    if await get_admin_permission_level(executor) < required_admin_action_permission_level(action):
         return {"success": False, "error": "Insufficient permissions."}
 
     handler_name = ADMIN_ACTIONS[action]
@@ -325,11 +364,63 @@ async def execute_admin_intent(
 ) -> Dict[str, Any]:
     if not intent:
         return {"success": False, "error": "Missing intent."}
-    if not (executor.guild_permissions.administrator or executor.guild_permissions.manage_guild):
+    if await get_admin_permission_level(executor) < required_admin_intent_permission_level(intent):
         return {"success": False, "error": "Insufficient permissions."}
 
     params = params or {}
     normalized_intent = intent.strip().lower()
+
+    if normalized_intent == "moderation.ban":
+        target_id = params.get("target_id")
+        try:
+            target_id = int(target_id) if target_id is not None else None
+        except (TypeError, ValueError):
+            target_id = None
+        if not target_id:
+            return {"success": False, "error": "Missing target_id."}
+        reason = str(params.get("reason") or "Natural-language moderation command")
+        await guild.ban(discord.Object(id=target_id), reason=reason)
+        return {"success": True, "message": f"Banned user `{target_id}`."}
+
+    if normalized_intent == "moderation.unban":
+        target_id = params.get("target_id")
+        try:
+            target_id = int(target_id) if target_id is not None else None
+        except (TypeError, ValueError):
+            target_id = None
+        if not target_id:
+            return {"success": False, "error": "Missing target_id."}
+        reason = str(params.get("reason") or "Natural-language moderation command")
+        await guild.unban(discord.Object(id=target_id), reason=reason)
+        return {"success": True, "message": f"Unbanned user `{target_id}`."}
+
+    if normalized_intent == "moderation.kick":
+        member = _resolve_guild_member(guild, member_id=params.get("target_id"))
+        if member is None:
+            return {"success": False, "error": "Missing or unknown target_id."}
+        reason = str(params.get("reason") or "Natural-language moderation command")
+        await member.kick(reason=reason)
+        return {"success": True, "message": f"Kicked {getattr(member, 'mention', getattr(member, 'id', 'that member'))}."}
+
+    if normalized_intent == "moderation.timeout":
+        member = _resolve_guild_member(guild, member_id=params.get("target_id"))
+        if member is None:
+            return {"success": False, "error": "Missing or unknown target_id."}
+        duration_raw = params.get("duration")
+        try:
+            duration_minutes = int(str(duration_raw).strip()) if duration_raw is not None else 10
+        except (TypeError, ValueError):
+            duration_minutes = 10
+        duration_minutes = max(1, min(duration_minutes, 40320))
+        reason = str(params.get("reason") or "Natural-language moderation command")
+        await member.timeout(
+            discord.utils.utcnow() + timedelta(minutes=duration_minutes),
+            reason=reason,
+        )
+        return {
+            "success": True,
+            "message": f"Timed out {getattr(member, 'mention', getattr(member, 'id', 'that member'))} for {duration_minutes} minute(s).",
+        }
 
     if normalized_intent == "channel.create_text":
         channel_name = str(params.get("channel_name") or "").strip()

@@ -78,7 +78,13 @@ from utils.guild_ai import (
     get_guild_gemini_model,
     GuildConfigError,
 )
-from utils.admin_actions import ADMIN_ACTIONS, execute_admin_action, execute_admin_intent
+from utils.admin_actions import (
+    ADMIN_ACTIONS,
+    execute_admin_action,
+    execute_admin_intent,
+    get_admin_permission_level,
+    required_admin_intent_permission_level,
+)
 from utils.admin_nl import AdminNLContext, AdminNLResult, PendingAdminRequest, interpret_admin_request, resume_admin_request
 from modes import get_mode_profile, get_all_modes
 from personas import compile_persona_sections
@@ -1681,9 +1687,11 @@ class AIBrain(commands.Cog):
         webhook_context = None
         if bool(guild_config.get("ai_persona_webhooks_enabled", 1)):
             try:
+                evil_mode = await get_evil_mode(guild.id)
                 webhook_context = await build_persona_webhook_context(
                     guild.id,
                     mode,
+                    evil_mode=evil_mode,
                     manager=self.webhook_identities,
                 )
             except Exception as exc:
@@ -2489,22 +2497,21 @@ class AIBrain(commands.Cog):
         if not message.guild or not isinstance(message.author, discord.Member):
             return False
         member = message.author
-        if not (
-            member.guild_permissions.administrator
-            or member.guild_permissions.manage_guild
-            or await _get_agentic_permission_level(member) >= 2
-        ):
-            return False
+        permission_level = await get_admin_permission_level(member)
 
         result = interpret_admin_request(
             message.content or "",
             self._build_admin_nl_context(message),
         )
         if result is None:
+            if permission_level < 1:
+                return False
             if not _is_admin_intent_content(message.content or ""):
                 return False
             await message.reply(ADMIN_NL_REPHRASE_RESPONSE, mention_author=False)
             return True
+        if permission_level < required_admin_intent_permission_level(result.intent):
+            return False
         if result.missing:
             self._store_pending_admin_intent(message.channel.id, message.author.id, result)
             await message.reply(result.follow_up_question or "I need a bit more information.", mention_author=False)
@@ -3783,12 +3790,7 @@ You can explain these commands to the user if asked:
         if agentic_access != "none":
             user_id_note = f"[User ID: {user_id}. Use this as target_id when the user says 'me'.]"
 
-        member_permissions = getattr(member, "guild_permissions", None)
-        admin_access = "yes" if member and prompt_guild and (
-            getattr(prompt_guild, "owner_id", None) == member.id
-            or bool(getattr(member_permissions, "administrator", False))
-            or bool(getattr(member_permissions, "manage_guild", False))
-        ) else "no"
+        admin_access = "yes" if member and prompt_guild and await get_admin_permission_level(member) >= 2 else "no"
         admin_note = f"[Admin config access: {admin_access}]"
         admin_instructions = ADMIN_ACTION_INSTRUCTIONS if admin_access == "yes" else ""
 

@@ -1,8 +1,13 @@
 import unittest
 from types import SimpleNamespace
-from unittest.mock import AsyncMock, Mock
+from unittest.mock import AsyncMock, Mock, patch
 
-from utils.persona_panel_ui import PersonaEntry, PersonaManageView, PersonaPanelState
+from utils.persona_panel_ui import (
+    PersonaEntry,
+    PersonaManageView,
+    PersonaPanelState,
+    load_persona_panel_state,
+)
 
 
 class PersonaManageCreateTests(unittest.IsolatedAsyncioTestCase):
@@ -78,6 +83,36 @@ class PersonaManageCreateTests(unittest.IsolatedAsyncioTestCase):
         )
         interaction.response.send_modal.assert_not_awaited()
         interaction.response.send_message.assert_not_awaited()
+
+    async def test_load_persona_panel_state_decodes_custom_persona_aliases(self) -> None:
+        with patch(
+            "utils.persona_panel_ui.get_server_mode",
+            AsyncMock(return_value="mode_default"),
+        ), patch(
+            "utils.persona_panel_ui.get_evil_mode",
+            AsyncMock(return_value=False),
+        ), patch(
+            "utils.persona_panel_ui.get_guild_custom_personas",
+            AsyncMock(
+                return_value=[
+                    {
+                        "mode_key": "custom_test",
+                        "name": "Target",
+                        "bio": "bio",
+                        "aliases": '["target", "mirror"]',
+                        "normal_prompt": "normal",
+                        "evil_prompt": None,
+                        "avatar_path": None,
+                        "banner_path": None,
+                    }
+                ]
+            ),
+        ):
+            state = await load_persona_panel_state(123)
+
+        custom_entries = [entry for entry in state.entries if entry.mode_key == "custom_test"]
+        self.assertEqual(len(custom_entries), 1)
+        self.assertEqual(custom_entries[0].aliases, ("target", "mirror"))
 
 
 if __name__ == "__main__":

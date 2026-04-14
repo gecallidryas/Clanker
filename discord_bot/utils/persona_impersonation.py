@@ -80,17 +80,22 @@ def choose_unique_persona_name(base_name: str, existing_names: set[str]) -> str:
     candidate = (base_name or "").strip()
     if not candidate:
         raise ValueError("Persona name is required.")
-    if candidate not in existing_names:
+    existing_lookup = {
+        str(name or "").strip().casefold()
+        for name in existing_names
+        if str(name or "").strip()
+    }
+    if candidate.casefold() not in existing_lookup:
         return candidate
 
     suffixed = f"{candidate} (impersonated)"
-    if suffixed not in existing_names:
+    if suffixed.casefold() not in existing_lookup:
         return suffixed
 
     counter = 2
     while True:
         numbered = f"{candidate} (impersonated {counter})"
-        if numbered not in existing_names:
+        if numbered.casefold() not in existing_lookup:
             return numbered
         counter += 1
 

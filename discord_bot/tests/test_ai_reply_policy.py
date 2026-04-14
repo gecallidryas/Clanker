@@ -5,6 +5,7 @@ from types import SimpleNamespace
 from unittest.mock import AsyncMock, patch
 
 from utils import ai_reply_policy
+from utils.admin_nl import AdminNLResult
 from cogs import ai_brain
 from cogs import config as config_cog
 
@@ -172,6 +173,36 @@ class OutboundPassportTests(unittest.TestCase):
 
         self.assertNotIn(111, brain.bot_owned_messages)
 
+    def test_stream_sender_passes_evil_mode_to_persona_webhook_context(self) -> None:
+        async def _run() -> None:
+            brain = self._make_brain()
+            message = SimpleNamespace(
+                guild=SimpleNamespace(id=321),
+                channel=SimpleNamespace(id=123, send=AsyncMock()),
+                reply=AsyncMock(),
+            )
+
+            with patch.object(ai_brain, "get_evil_mode", new=AsyncMock(return_value=True)), patch.object(
+                ai_brain,
+                "build_persona_webhook_context",
+                new=AsyncMock(return_value="webhook_ctx"),
+            ) as build_context:
+                session = await brain._build_stream_sender(
+                    message,
+                    {"ai_persona_webhooks_enabled": 1},
+                    "mode_femboy",
+                )
+
+            self.assertEqual(session.webhook_context, "webhook_ctx")
+            build_context.assert_awaited_once_with(
+                321,
+                "mode_femboy",
+                evil_mode=True,
+                manager=brain.webhook_identities,
+            )
+
+        asyncio.run(_run())
+
 
 class DeterministicTriggerTests(unittest.TestCase):
     def test_auto_counter_hit_creates_candidate_signal(self) -> None:
@@ -313,6 +344,59 @@ class OnMessagePolicyTests(unittest.IsolatedAsyncioTestCase):
         await self._wait_for_background_turns()
 
         self.assertEqual(brain._execute_persona_invocation.await_count, 1)
+
+    async def test_admin_nl_request_allows_level_1_staff_for_timeout_intent(self) -> None:
+        brain = self._make_brain()
+        message = self._make_message(content="timeout @user for 5m")
+        message.author.roles = [SimpleNamespace(id=10)]
+        brain._execute_admin_nl_intent = AsyncMock(return_value=None)
+
+        with patch(
+            "cogs.ai_brain.discord.Member",
+            new=SimpleNamespace,
+        ), patch(
+            "cogs.ai_brain.get_admin_permission_level",
+            new=AsyncMock(return_value=1),
+        ), patch(
+            "cogs.ai_brain.interpret_admin_request",
+            return_value=AdminNLResult(
+                intent="moderation.timeout",
+                params={"target_id": 222, "duration": 5},
+            ),
+        ):
+            handled = await ai_brain.AIBrain._maybe_handle_admin_nl_request(brain, message)
+
+        self.assertTrue(handled)
+        brain._execute_admin_nl_intent.assert_awaited_once_with(
+            message,
+            "moderation.timeout",
+            {"target_id": 222, "duration": 5},
+        )
+
+    async def test_admin_nl_request_does_not_run_admin_intent_for_normal_member(self) -> None:
+        brain = self._make_brain()
+        message = self._make_message(content="set the mod log to this channel")
+        message.author.roles = []
+        brain._execute_admin_nl_intent = AsyncMock(return_value=None)
+
+        with patch(
+            "cogs.ai_brain.discord.Member",
+            new=SimpleNamespace,
+        ), patch(
+            "cogs.ai_brain.get_admin_permission_level",
+            new=AsyncMock(return_value=0),
+        ), patch(
+            "cogs.ai_brain.interpret_admin_request",
+            return_value=AdminNLResult(
+                intent="modlog.set",
+                params={"channel_id": 123},
+            ),
+        ):
+            handled = await ai_brain.AIBrain._maybe_handle_admin_nl_request(brain, message)
+
+        self.assertFalse(handled)
+        brain._execute_admin_nl_intent.assert_not_awaited()
+        message.reply.assert_not_awaited()
 
     async def test_foreign_webhook_message_stays_quiet(self) -> None:
         brain = self._make_brain()
